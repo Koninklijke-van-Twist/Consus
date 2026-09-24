@@ -31,6 +31,13 @@ nightly_debug_assert(consus_nightly_force_requested(null, null, ['--force']) ===
 nightly_debug_assert(consus_nightly_force_requested(null, null, ['force=true']) === true, 'cli force= telt');
 nightly_debug_assert(consus_nightly_force_requested('0', 'false', []) === false, 'force blijft uit');
 nightly_debug_assert(consus_nightly_force_requested(null, null) === false, 'zonder force geen herlaad');
+nightly_debug_assert(consus_nightly_full_ledger_requested('1', null) === true, 'env CONSUS_FULL_LEDGER telt');
+nightly_debug_assert(consus_nightly_full_ledger_requested(null, 'yes') === true, 'query full telt');
+nightly_debug_assert(consus_nightly_full_ledger_requested(null, null, ['--full']) === true, 'cli --full telt');
+nightly_debug_assert(consus_nightly_full_ledger_requested(null, null, ['full=true']) === true, 'cli full= telt');
+nightly_debug_assert(consus_nightly_full_ledger_requested('0', 'false', []) === false, 'full blijft uit');
+nightly_debug_assert(consus_nightly_full_ledger_requested(null, null, ['--force']) === false, 'force is geen full');
+nightly_debug_assert(consus_nightly_force_requested(null, null, ['--full']) === false, 'full is geen force');
 
 $plain = new RuntimeException('password=hunter2 bij Authorization: Bearer super-secret-token');
 $withoutDebug = consus_nightly_throwable_payload($plain, 15, false);

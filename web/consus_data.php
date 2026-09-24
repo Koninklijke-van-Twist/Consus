@@ -19,6 +19,11 @@ function consus_snapshot_lock_file(): string
     return consus_snapshot_file() . '.lock';
 }
 
+function consus_snapshot_directory_hint(): string
+{
+    return 'De datamap moet schrijfbaar zijn voor de webgebruiker: in de repo web/data, op de server /var/www/html/consus/data/ (web/ staat live als consus/).';
+}
+
 function consus_normalize_name(string $value): string
 {
     $value = strtolower(trim($value));
@@ -411,6 +416,36 @@ function consus_wo_ledger_parts(): array
     ];
 }
 
+/**
+ * Volgorde van de grootboekstappen. Elke stap heeft eigen maandcheckpoints.
+ *
+ * @return array<int, array{id:string,kind:string,entry_types:array<int, string>,document_prefix:string,include_amount:bool,progress_step:string}>
+ */
+function consus_ledger_steps(): array
+{
+    $steps = [[
+        'id' => 'verkoop',
+        'kind' => 'sales',
+        'entry_types' => CONSUS_SALES_ENTRY_TYPES,
+        'document_prefix' => '',
+        'include_amount' => true,
+        'progress_step' => 'verkoop',
+    ]];
+    foreach (consus_wo_ledger_parts() as $part) {
+        $prefix = trim((string) ($part['document_prefix'] ?? ''));
+        $steps[] = [
+            'id' => $prefix === '' ? 'verbruik-assemblage' : 'verbruik-' . strtolower($prefix),
+            'kind' => 'consumption',
+            'entry_types' => is_array($part['entry_types'] ?? null) ? $part['entry_types'] : [],
+            'document_prefix' => $prefix,
+            'include_amount' => false,
+            'progress_step' => 'verbruik',
+        ];
+    }
+
+    return $steps;
+}
+
 function consus_document_no_has_prefix(array $row, string $prefix): bool
 {
     $prefix = trim($prefix);
@@ -493,8 +528,24 @@ function consus_ledger_date_chunks(array $windows): array
     return $chunks;
 }
 
+function consus_shift_date(string $date, int $days): string
+{
+    $date = consus_parse_date($date);
+    if ($date === '') {
+        return '';
+    }
+
+    $zone = new DateTimeZone('Europe/Amsterdam');
+    $shifted = (new DateTimeImmutable($date . ' 00:00:00', $zone))->modify(($days < 0 ? '' : '+') . $days . ' day');
+
+    return $shifted->format('Y-m-d');
+}
+
 /**
- * @return array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string}
+ * retain_days_from is de dag die een volgende warme run opnieuw ophaalt
+ * (ledger_through). Oudere dagen zitten alleen in de maandtotalen.
+ *
+ * @return array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string,retain_days_from:string}
  */
 function consus_period_windows(?DateTimeImmutable $asOf = null): array
 {
@@ -512,6 +563,7 @@ function consus_period_windows(?DateTimeImmutable $asOf = null): array
         'quarter_start' => $quarterStart->format('Y-m-d'),
         'year_start' => $yearStart->format('Y-m-d'),
         'history_start' => $historyStart->format('Y-m-d'),
+        'retain_days_from' => $asOf->format('Y-m-d'),
     ];
 }
 
@@ -534,12 +586,16 @@ function consus_month_keys(array $windows): array
 }
 
 /**
- * @return array{months:array<string, array{qty:float,amount:float}>,m:array{qty:float,amount:float},q:array{qty:float,amount:float},y:array{qty:float,amount:float}}
+ * days bewaart alleen de overlapdag (retain_days_from), zodat een warme run
+ * die dag kan aftrekken en opnieuw optellen. De maandtotalen blijven het venster.
+ *
+ * @return array{months:array<string, array{qty:float,amount:float}>,days:array<string, array{qty:float,amount:float}>,m:array{qty:float,amount:float},q:array{qty:float,amount:float},y:array{qty:float,amount:float}}
  */
 function consus_empty_period_stats(): array
 {
     return [
         'months' => [],
+        'days' => [],
         'm' => ['qty' => 0.0, 'amount' => 0.0],
         'q' => ['qty' => 0.0, 'amount' => 0.0],
         'y' => ['qty' => 0.0, 'amount' => 0.0],
@@ -596,6 +652,19 @@ function consus_add_to_period_stats(array &$stats, string $date, float $qty, flo
         $stats['y']['qty'] += $qty;
         $stats['y']['amount'] += $amount;
     }
+
+    $retainFrom = consus_parse_date($windows['retain_days_from'] ?? '');
+    if ($retainFrom === '' || $date < $retainFrom) {
+        return;
+    }
+    if (!isset($stats['days']) || !is_array($stats['days'])) {
+        $stats['days'] = [];
+    }
+    if (!isset($stats['days'][$date]) || !is_array($stats['days'][$date])) {
+        $stats['days'][$date] = ['qty' => 0.0, 'amount' => 0.0];
+    }
+    $stats['days'][$date]['qty'] += $qty;
+    $stats['days'][$date]['amount'] += $amount;
 }
 
 /**
@@ -613,13 +682,593 @@ function consus_merge_bucket_maps(array &$target, array $source): void
             $target[$bucket][$period]['amount'] += (float) ($stats[$period]['amount'] ?? 0);
         }
         foreach ($stats['months'] as $month => $values) {
+            if (!is_array($values)) {
+                continue;
+            }
             if (!isset($target[$bucket]['months'][$month])) {
                 $target[$bucket]['months'][$month] = ['qty' => 0.0, 'amount' => 0.0];
             }
             $target[$bucket]['months'][$month]['qty'] += (float) ($values['qty'] ?? 0);
             $target[$bucket]['months'][$month]['amount'] += (float) ($values['amount'] ?? 0);
         }
+        if (!isset($target[$bucket]['days']) || !is_array($target[$bucket]['days'])) {
+            $target[$bucket]['days'] = [];
+        }
+        foreach ($stats['days'] ?? [] as $date => $values) {
+            if (!is_array($values)) {
+                continue;
+            }
+            $date = (string) $date;
+            if (!isset($target[$bucket]['days'][$date])) {
+                $target[$bucket]['days'][$date] = ['qty' => 0.0, 'amount' => 0.0];
+            }
+            $target[$bucket]['days'][$date]['qty'] += (float) ($values['qty'] ?? 0);
+            $target[$bucket]['days'][$date]['amount'] += (float) ($values['amount'] ?? 0);
+        }
     }
+}
+
+/**
+ * @param array{months?:array<string, mixed>,days?:array<string, mixed>,m?:array<string, mixed>,q?:array<string, mixed>,y?:array<string, mixed>} $stats
+ * @return array{months:array<string, array{qty:float,amount:float}>,days:array<string, array{qty:float,amount:float}>,m:array{qty:float,amount:float},q:array{qty:float,amount:float},y:array{qty:float,amount:float}}
+ */
+function consus_copy_period_stats(array $stats): array
+{
+    $copy = consus_empty_period_stats();
+    foreach (['m', 'q', 'y'] as $period) {
+        $values = is_array($stats[$period] ?? null) ? $stats[$period] : [];
+        $copy[$period]['qty'] = (float) ($values['qty'] ?? 0);
+        $copy[$period]['amount'] = (float) ($values['amount'] ?? 0);
+    }
+    foreach ($stats['months'] ?? [] as $month => $values) {
+        if (!is_array($values)) {
+            continue;
+        }
+        $copy['months'][(string) $month] = [
+            'qty' => (float) ($values['qty'] ?? 0),
+            'amount' => (float) ($values['amount'] ?? 0),
+        ];
+    }
+    foreach ($stats['days'] ?? [] as $date => $values) {
+        if (!is_array($values)) {
+            continue;
+        }
+        $copy['days'][(string) $date] = [
+            'qty' => (float) ($values['qty'] ?? 0),
+            'amount' => (float) ($values['amount'] ?? 0),
+        ];
+    }
+
+    return $copy;
+}
+
+/**
+ * @param array<string, array<string, mixed>> $map
+ * @return array<string, array{months:array<string, array{qty:float,amount:float}>,days:array<string, array{qty:float,amount:float}>,m:array{qty:float,amount:float},q:array{qty:float,amount:float},y:array{qty:float,amount:float}}>
+ */
+function consus_copy_bucket_map(array $map): array
+{
+    $copy = [];
+    foreach ($map as $bucket => $stats) {
+        if (!is_string($bucket) || !is_array($stats) || !isset(CONSUS_BUCKETS[$bucket])) {
+            continue;
+        }
+        $copy[$bucket] = consus_copy_period_stats($stats);
+    }
+
+    return $copy;
+}
+
+/**
+ * Haalt de overlapdagen uit de maandtotalen. m/q/y worden daarna herberekend.
+ *
+ * @param array{months:array<string, array{qty:float,amount:float}>,days:array<string, array{qty:float,amount:float}>,m:array{qty:float,amount:float},q:array{qty:float,amount:float},y:array{qty:float,amount:float}} $stats
+ */
+function consus_subtract_ledger_days(array &$stats, string $fromDate, string $throughDate): void
+{
+    $fromDate = consus_parse_date($fromDate);
+    $throughDate = consus_parse_date($throughDate);
+    if ($fromDate === '' || $throughDate === '' || $fromDate > $throughDate) {
+        return;
+    }
+    if (!isset($stats['days']) || !is_array($stats['days'])) {
+        $stats['days'] = [];
+
+        return;
+    }
+
+    foreach ($stats['days'] as $date => $values) {
+        $parsed = consus_parse_date($date);
+        if ($parsed === '' || $parsed < $fromDate || $parsed > $throughDate || !is_array($values)) {
+            continue;
+        }
+        $month = substr($parsed, 0, 7);
+        if (isset($stats['months'][$month]) && is_array($stats['months'][$month])) {
+            $stats['months'][$month]['qty'] -= (float) ($values['qty'] ?? 0);
+            $stats['months'][$month]['amount'] -= (float) ($values['amount'] ?? 0);
+        }
+        unset($stats['days'][$date]);
+    }
+}
+
+/**
+ * @param array<string, array<string, mixed>> $map
+ */
+function consus_subtract_bucket_days(array &$map, string $fromDate, string $throughDate): void
+{
+    foreach ($map as &$stats) {
+        if (is_array($stats)) {
+            consus_subtract_ledger_days($stats, $fromDate, $throughDate);
+        }
+    }
+    unset($stats);
+}
+
+/**
+ * Telt alleen maand- en dagtotalen op. m/q/y blijven onaangeroerd tot de herberekening,
+ * anders zou een vers maandvenster de oude periode dubbel tellen.
+ *
+ * @param array{months:array<string, array{qty:float,amount:float}>,days:array<string, array{qty:float,amount:float}>} $target
+ * @param array<string, mixed> $source
+ */
+function consus_add_period_months(array &$target, array $source): void
+{
+    if (!isset($target['months']) || !is_array($target['months'])) {
+        $target['months'] = [];
+    }
+    if (!isset($target['days']) || !is_array($target['days'])) {
+        $target['days'] = [];
+    }
+    foreach ($source['months'] ?? [] as $month => $values) {
+        if (!is_array($values)) {
+            continue;
+        }
+        $month = (string) $month;
+        if (!isset($target['months'][$month])) {
+            $target['months'][$month] = ['qty' => 0.0, 'amount' => 0.0];
+        }
+        $target['months'][$month]['qty'] += (float) ($values['qty'] ?? 0);
+        $target['months'][$month]['amount'] += (float) ($values['amount'] ?? 0);
+    }
+    foreach ($source['days'] ?? [] as $date => $values) {
+        if (!is_array($values)) {
+            continue;
+        }
+        $date = consus_parse_date($date);
+        if ($date === '') {
+            continue;
+        }
+        if (!isset($target['days'][$date])) {
+            $target['days'][$date] = ['qty' => 0.0, 'amount' => 0.0];
+        }
+        $target['days'][$date]['qty'] += (float) ($values['qty'] ?? 0);
+        $target['days'][$date]['amount'] += (float) ($values['amount'] ?? 0);
+    }
+}
+
+/**
+ * @param array<string, array<string, mixed>> $target
+ * @param array<string, mixed> $source
+ */
+function consus_add_bucket_months(array &$target, array $source): void
+{
+    foreach ($source as $bucket => $stats) {
+        if (!is_string($bucket) || !is_array($stats) || !isset(CONSUS_BUCKETS[$bucket])) {
+            continue;
+        }
+        if (!isset($target[$bucket]) || !is_array($target[$bucket])) {
+            $target[$bucket] = consus_empty_period_stats();
+        }
+        consus_add_period_months($target[$bucket], $stats);
+    }
+}
+
+/**
+ * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
+ * @param array{months:array<string, array{qty:float,amount:float}>,days:array<string, array{qty:float,amount:float}>,m:array{qty:float,amount:float},q:array{qty:float,amount:float},y:array{qty:float,amount:float}} $stats
+ */
+function consus_recompute_period_stats(array &$stats, array $windows): void
+{
+    $stats['m'] = ['qty' => 0.0, 'amount' => 0.0];
+    $stats['q'] = ['qty' => 0.0, 'amount' => 0.0];
+    $stats['y'] = ['qty' => 0.0, 'amount' => 0.0];
+    $months = [];
+    foreach ($stats['months'] ?? [] as $month => $values) {
+        if (!is_string($month) || preg_match('/^\d{4}-\d{2}$/', $month) !== 1 || !is_array($values)) {
+            continue;
+        }
+        $monthStart = $month . '-01';
+        if ($monthStart < (string) ($windows['history_start'] ?? '') || $monthStart > (string) ($windows['as_of'] ?? '')) {
+            continue;
+        }
+        $qty = (float) ($values['qty'] ?? 0);
+        $amount = (float) ($values['amount'] ?? 0);
+        if (abs($qty) < 0.0000001) {
+            $qty = 0.0;
+        }
+        if (abs($amount) < 0.0000001) {
+            $amount = 0.0;
+        }
+        if ($qty == 0.0 && $amount == 0.0) {
+            continue;
+        }
+        $months[$month] = ['qty' => $qty, 'amount' => $amount];
+        if ($monthStart >= (string) ($windows['month_start'] ?? '')) {
+            $stats['m']['qty'] += $qty;
+            $stats['m']['amount'] += $amount;
+        }
+        if ($monthStart >= (string) ($windows['quarter_start'] ?? '')) {
+            $stats['q']['qty'] += $qty;
+            $stats['q']['amount'] += $amount;
+        }
+        if ($monthStart >= (string) ($windows['year_start'] ?? '')) {
+            $stats['y']['qty'] += $qty;
+            $stats['y']['amount'] += $amount;
+        }
+    }
+    ksort($months);
+    $stats['months'] = $months;
+}
+
+/**
+ * @param array{months:array<string, array{qty:float,amount:float}>,days:array<string, array{qty:float,amount:float}>} $stats
+ */
+function consus_prune_period_days(array &$stats, string $retainFrom, string $asOf): void
+{
+    $retainFrom = consus_parse_date($retainFrom);
+    $asOf = consus_parse_date($asOf);
+    $kept = [];
+    foreach ($stats['days'] ?? [] as $date => $values) {
+        if (!is_array($values)) {
+            continue;
+        }
+        $parsed = consus_parse_date($date);
+        if ($parsed === '') {
+            continue;
+        }
+        if ($retainFrom !== '' && $parsed < $retainFrom) {
+            continue;
+        }
+        if ($asOf !== '' && $parsed > $asOf) {
+            continue;
+        }
+        $qty = (float) ($values['qty'] ?? 0);
+        $amount = (float) ($values['amount'] ?? 0);
+        if (abs($qty) < 0.0000001 && abs($amount) < 0.0000001) {
+            continue;
+        }
+        $kept[$parsed] = ['qty' => $qty, 'amount' => $amount];
+    }
+    ksort($kept);
+    $stats['days'] = $kept;
+}
+
+/**
+ * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string,retain_days_from?:string} $windows
+ * @param array<string, array<string, mixed>> $map
+ */
+function consus_finalize_bucket_map(array &$map, array $windows): void
+{
+    $drop = [];
+    foreach ($map as $bucket => $stats) {
+        if (!is_string($bucket) || !isset(CONSUS_BUCKETS[$bucket]) || !is_array($stats)) {
+            $drop[] = $bucket;
+            continue;
+        }
+        consus_recompute_period_stats($stats, $windows);
+        consus_prune_period_days($stats, (string) ($windows['retain_days_from'] ?? ''), (string) ($windows['as_of'] ?? ''));
+        $map[$bucket] = $stats;
+        if (($stats['months'] ?? []) === [] && ($stats['days'] ?? []) === []) {
+            $drop[] = $bucket;
+        }
+    }
+    foreach ($drop as $bucket) {
+        unset($map[$bucket]);
+    }
+}
+
+function consus_snapshot_row_key(array $row): string
+{
+    return implode('|', [
+        (string) ($row['company_key'] ?? ''),
+        trim((string) ($row['vendor_no'] ?? '')),
+        trim((string) ($row['cost_center'] ?? '')),
+        strtoupper(trim((string) ($row['location'] ?? ''))),
+    ]);
+}
+
+/**
+ * @return array<string, bool>
+ */
+function consus_item_no_map(array $row): array
+{
+    $map = [];
+    $raw = $row['item_nos'] ?? null;
+    if (!is_array($raw)) {
+        return $map;
+    }
+    foreach ($raw as $key => $value) {
+        if (is_string($key) && !is_int($key) && $key !== '') {
+            $map[$key] = true;
+            continue;
+        }
+        $itemNo = trim((string) $value);
+        if ($itemNo !== '') {
+            $map[$itemNo] = true;
+        }
+    }
+
+    return $map;
+}
+
+function consus_bucket_map_has_movement(array $map): bool
+{
+    foreach ($map as $stats) {
+        if (!is_array($stats)) {
+            continue;
+        }
+        if (($stats['months'] ?? []) !== [] || ($stats['days'] ?? []) !== []) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Warme merge: voorraad van de nieuwe rollup, maandtotalen van de vorige rijen
+ * plus de delta. De overlapdag wordt eerst afgetrokken, daarna komt de verse
+ * query (diezelfde dag plus nieuwere postings) erbij. Oudere maanden blijven.
+ *
+ * @param array<int, array<string, mixed>> $previousRows
+ * @param array<int, array<string, mixed>> $freshRows
+ * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string,retain_days_from?:string} $windows
+ * @return array<int, array<string, mixed>>
+ */
+function consus_merge_warm_company_rows(
+    array $previousRows,
+    array $freshRows,
+    array $windows,
+    string $overlapFrom,
+    string $overlapThrough
+): array {
+    $previous = [];
+    foreach ($previousRows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $previous[consus_snapshot_row_key($row)] = $row;
+    }
+    $fresh = [];
+    $freshItems = [];
+    foreach ($freshRows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $key = consus_snapshot_row_key($row);
+        $fresh[$key] = $row;
+        foreach (array_keys(consus_item_no_map($row)) as $itemNo) {
+            $freshItems[$itemNo] = $key;
+        }
+    }
+
+    $merged = [];
+    foreach (array_unique(array_merge(array_keys($previous), array_keys($fresh))) as $key) {
+        $prev = $previous[$key] ?? null;
+        $new = $fresh[$key] ?? null;
+        $base = is_array($new) ? $new : (is_array($prev) ? $prev : null);
+        if (!is_array($base)) {
+            continue;
+        }
+
+        $sales = is_array($prev) && is_array($prev['sales'] ?? null) ? consus_copy_bucket_map($prev['sales']) : [];
+        $consumption = is_array($prev) && is_array($prev['consumption'] ?? null) ? consus_copy_bucket_map($prev['consumption']) : [];
+        if (is_array($prev)) {
+            consus_subtract_bucket_days($sales, $overlapFrom, $overlapThrough);
+            consus_subtract_bucket_days($consumption, $overlapFrom, $overlapThrough);
+        }
+        if (is_array($new)) {
+            consus_add_bucket_months($sales, is_array($new['sales'] ?? null) ? $new['sales'] : []);
+            consus_add_bucket_months($consumption, is_array($new['consumption'] ?? null) ? $new['consumption'] : []);
+        }
+        consus_finalize_bucket_map($sales, $windows);
+        consus_finalize_bucket_map($consumption, $windows);
+
+        $itemNos = [];
+        if (is_array($new)) {
+            $itemNos = consus_item_no_map($new);
+        }
+        if (is_array($prev)) {
+            foreach (array_keys(consus_item_no_map($prev)) as $itemNo) {
+                if (isset($freshItems[$itemNo]) && $freshItems[$itemNo] !== $key) {
+                    continue;
+                }
+                if (!is_array($new) && isset($freshItems[$itemNo])) {
+                    continue;
+                }
+                $itemNos[$itemNo] = true;
+            }
+        }
+
+        $inventory = is_array($new) ? (float) ($new['inventory'] ?? 0) : 0.0;
+        $safety = is_array($new) ? (float) ($new['safety_stock'] ?? 0) : 0.0;
+        $reorder = is_array($new) ? (float) ($new['reorder_point'] ?? 0) : 0.0;
+        if (
+            abs($inventory) < 0.0000001
+            && abs($safety) < 0.0000001
+            && abs($reorder) < 0.0000001
+            && !consus_bucket_map_has_movement($sales)
+            && !consus_bucket_map_has_movement($consumption)
+        ) {
+            continue;
+        }
+
+        $vendorName = trim((string) ($base['vendor_name'] ?? ''));
+        if (is_array($new) && trim((string) ($new['vendor_name'] ?? '')) !== '') {
+            $vendorName = trim((string) $new['vendor_name']);
+        } elseif (is_array($prev) && trim((string) ($prev['vendor_name'] ?? '')) !== '') {
+            $vendorName = trim((string) $prev['vendor_name']);
+        }
+
+        $merged[] = [
+            'company_key' => (string) ($base['company_key'] ?? ''),
+            'company_name' => (string) ($base['company_name'] ?? ''),
+            'vendor_no' => trim((string) ($base['vendor_no'] ?? '')),
+            'vendor_name' => $vendorName,
+            'cost_center' => trim((string) ($base['cost_center'] ?? '')),
+            'location' => strtoupper(trim((string) ($base['location'] ?? ''))),
+            'inventory' => $inventory,
+            'safety_stock' => $safety,
+            'reorder_point' => $reorder,
+            'item_count' => count($itemNos),
+            'item_nos' => $itemNos,
+            'sales' => $sales,
+            'consumption' => $consumption,
+        ];
+    }
+
+    usort($merged, consus_compare_snapshot_rows(...));
+
+    return $merged;
+}
+
+/**
+ * @return array{ledger_through?:string,ledger_overlap_from?:string}
+ */
+function consus_ledger_marker_from_stat(array $stat): array
+{
+    $through = consus_parse_date($stat['ledger_through'] ?? '');
+    $overlap = consus_parse_date($stat['ledger_overlap_from'] ?? '');
+    if ($through === '' || $overlap === '') {
+        return [];
+    }
+
+    return [
+        'ledger_through' => $through,
+        'ledger_overlap_from' => $overlap,
+    ];
+}
+
+/**
+ * Lege string = koude run over twaalf maanden. Anders Posting_Date ge die dag.
+ * Eén dag overlap: ledger_overlap_from is de laatste succesvolle peildatum,
+ * die opnieuw wordt opgehaald voor late postings.
+ */
+function consus_warm_ledger_from(array $stat, array $windows, bool $hasRows, bool $fullLedger): string
+{
+    if ($fullLedger || !$hasRows) {
+        return '';
+    }
+
+    $marker = consus_ledger_marker_from_stat($stat);
+    if ($marker === []) {
+        return '';
+    }
+
+    $history = (string) ($windows['history_start'] ?? '');
+    $asOf = (string) ($windows['as_of'] ?? '');
+    $through = $marker['ledger_through'];
+    $overlap = $marker['ledger_overlap_from'];
+    if ($history === '' || $asOf === '') {
+        return '';
+    }
+    if ($through < $history || $through > $asOf || $overlap < $history || $overlap > $through) {
+        return '';
+    }
+
+    return $overlap;
+}
+
+/**
+ * @param array<string, mixed> $stat
+ * @param array{as_of:string,history_start:string} $windows
+ * @return array{mode:string,from:string,overlap_through:string,chunks:array<int, array{from:string,to:string}>}
+ */
+function consus_ledger_plan(array $stat, array $windows, bool $hasRows, bool $fullLedger): array
+{
+    $warmFrom = consus_warm_ledger_from($stat, $windows, $hasRows, $fullLedger);
+    $from = $warmFrom !== '' ? $warmFrom : (string) ($windows['history_start'] ?? '');
+
+    return [
+        'mode' => $warmFrom !== '' ? 'warm' : 'cold',
+        'from' => $from,
+        'overlap_through' => $warmFrom !== '' ? consus_parse_date($stat['ledger_through'] ?? '') : '',
+        'chunks' => consus_ledger_date_chunks([
+            'history_start' => $from,
+            'as_of' => (string) ($windows['as_of'] ?? ''),
+        ]),
+    ];
+}
+
+/**
+ * @param array<string, mixed>|null $previousStat
+ * @return array{company:string,company_key:string,stale:bool,resumed:bool,duration_ms:int,ledger_through?:string,ledger_overlap_from?:string}
+ */
+function consus_failed_company_stat(
+    string $company,
+    string $companyKey,
+    int $durationMs,
+    ?array $previousStat,
+    bool $keepPreviousRows
+): array {
+    $stat = [
+        'company' => $company,
+        'company_key' => $companyKey,
+        'stale' => true,
+        'resumed' => false,
+        'duration_ms' => $durationMs,
+    ];
+    if ($keepPreviousRows && is_array($previousStat)) {
+        foreach (consus_ledger_marker_from_stat($previousStat) as $key => $value) {
+            $stat[$key] = $value;
+        }
+    }
+
+    return $stat;
+}
+
+/**
+ * Voorraad zonder grootboek is geen geldig watermerk.
+ *
+ * @param array<string, mixed> $stat
+ * @return array<string, mixed>
+ */
+function consus_stock_only_company_stat(array $stat): array
+{
+    unset($stat['ledger_through'], $stat['ledger_overlap_from'], $stat['ledger_mode']);
+
+    return $stat;
+}
+
+/**
+ * @param array{as_of:string,retain_days_from?:string} $windows
+ * @return array<string, mixed>
+ */
+function consus_completed_company_stat(
+    string $company,
+    string $companyKey,
+    array $windows,
+    int $durationMs,
+    string $mode,
+    bool $checkpointResumed
+): array {
+    $overlap = consus_parse_date($windows['retain_days_from'] ?? '');
+    if ($overlap === '') {
+        $overlap = (string) ($windows['as_of'] ?? '');
+    }
+
+    return [
+        'company' => $company,
+        'company_key' => $companyKey,
+        'stale' => false,
+        'resumed' => false,
+        'checkpoint_resumed' => $checkpointResumed,
+        'refreshed_on' => (string) ($windows['as_of'] ?? ''),
+        'ledger_through' => (string) ($windows['as_of'] ?? ''),
+        'ledger_overlap_from' => $overlap,
+        'ledger_mode' => $mode,
+        'duration_ms' => $durationMs,
+    ];
 }
 
 /**
@@ -1208,7 +1857,7 @@ function consus_with_snapshot_lock(callable $callback): mixed
     if (file_exists($lockPath) && !is_file($lockPath)) {
         throw new RuntimeException(
             'Snapshot-lock kon niet worden geopend: ' . $lockPath
-            . '. Het pad is geen gewoon bestand. De map web/data moet schrijfbaar zijn voor de webgebruiker.'
+            . '. Het pad is geen gewoon bestand. ' . consus_snapshot_directory_hint()
         );
     }
 
@@ -1216,7 +1865,7 @@ function consus_with_snapshot_lock(callable $callback): mixed
     if ($lock === false) {
         throw new RuntimeException(
             'Snapshot-lock kon niet worden geopend: ' . $lockPath
-            . '. De map web/data moet schrijfbaar zijn voor de webgebruiker.'
+            . '. ' . consus_snapshot_directory_hint()
         );
     }
 
@@ -1782,15 +2431,462 @@ function consus_page_size_warning(string $entity): string
     return $entity . ': paginagrootte ' . CONSUS_ODATA_PAGE_SIZE . ' geweigerd, BC-standaard gebruikt.';
 }
 
+function consus_checkpoint_directory(): string
+{
+    return consus_snapshot_file() . '.checkpoint';
+}
+
+function consus_checkpoint_manifest_file(): string
+{
+    return consus_snapshot_file() . '.checkpoint.json';
+}
+
 /**
- * Artikelposten per maand. Het venster blijft twaalf maanden; een maand
- * is alleen een kleinere BC-query. Een geweigerd documentbereik geldt voor
- * de resterende maanden van dit type.
+ * @param array{as_of?:string,history_start?:string} $windows
+ * @return array{version:int,as_of:string,history_start:string,companies:array<string, mixed>}
+ */
+function consus_empty_checkpoint(array $windows): array
+{
+    return [
+        'version' => CONSUS_SNAPSHOT_VERSION,
+        'as_of' => (string) ($windows['as_of'] ?? ''),
+        'history_start' => (string) ($windows['history_start'] ?? ''),
+        'companies' => [],
+    ];
+}
+
+function consus_checkpoint_basename(string $companyKey, string $stepId, string $from = ''): string
+{
+    $companyKey = strtolower((string) (preg_replace('/[^a-z0-9_-]/i', '', $companyKey) ?? ''));
+    $stepId = strtolower((string) (preg_replace('/[^a-z0-9_-]/i', '', $stepId) ?? ''));
+    $from = (string) (preg_replace('/[^0-9-]/', '', $from) ?? '');
+    if ($companyKey === '' || $stepId === '') {
+        throw new InvalidArgumentException('Ongeldige tussenstap.');
+    }
+
+    $name = $companyKey . '-' . $stepId;
+    if ($from !== '') {
+        $name .= '-' . $from;
+    }
+
+    return $name . '.ndjson';
+}
+
+function consus_checkpoint_ensure_directory(): string
+{
+    $directory = consus_checkpoint_directory();
+    if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
+        throw new RuntimeException('Checkpointmap kon niet worden aangemaakt.');
+    }
+
+    return $directory;
+}
+
+/**
+ * @return array{tmp:string,final:string,handle:resource|null,rows:int}
+ */
+function consus_checkpoint_begin_file(string $basename): array
+{
+    $directory = consus_checkpoint_ensure_directory();
+    $final = $directory . '/' . basename($basename);
+    $tmp = $final . '.tmp.' . getmypid();
+    $handle = @fopen($tmp, 'wb');
+    if ($handle === false) {
+        throw new RuntimeException('Tussenstand kon niet worden weggeschreven.');
+    }
+    @chmod($tmp, 0600);
+
+    return [
+        'tmp' => $tmp,
+        'final' => $final,
+        'handle' => $handle,
+        'rows' => 0,
+    ];
+}
+
+/**
+ * @param array{tmp:string,final:string,handle:resource|null,rows:int} $writer
+ */
+function consus_checkpoint_write_row(array &$writer, array $row): void
+{
+    $handle = $writer['handle'] ?? null;
+    if (!is_resource($handle)) {
+        throw new RuntimeException('Tussenstand kon niet worden weggeschreven.');
+    }
+    $encoded = json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!is_string($encoded) || fwrite($handle, $encoded . "\n") === false) {
+        throw new RuntimeException('Tussenstand kon niet worden weggeschreven.');
+    }
+    $writer['rows']++;
+}
+
+/**
+ * @param array{tmp:string,final:string,handle:resource|null,rows:int} $writer
+ */
+function consus_checkpoint_commit_file(array &$writer): int
+{
+    $handle = $writer['handle'] ?? null;
+    if (is_resource($handle)) {
+        fflush($handle);
+        fclose($handle);
+    }
+    $writer['handle'] = null;
+    if (!@rename((string) $writer['tmp'], (string) $writer['final'])) {
+        @unlink((string) $writer['tmp']);
+        throw new RuntimeException('Tussenstand kon niet worden opgeslagen.');
+    }
+
+    return (int) $writer['rows'];
+}
+
+/**
+ * @param array{tmp?:string,handle?:resource|null}|null $writer
+ */
+function consus_checkpoint_abort_file(?array $writer): void
+{
+    if ($writer === null) {
+        return;
+    }
+    $handle = $writer['handle'] ?? null;
+    if (is_resource($handle)) {
+        fclose($handle);
+    }
+    $tmp = (string) ($writer['tmp'] ?? '');
+    if ($tmp !== '' && is_file($tmp)) {
+        @unlink($tmp);
+    }
+}
+
+function consus_checkpoint_replay(string $basename, callable $onRow): int
+{
+    $basename = basename($basename);
+    if ($basename === '' || $basename === '.' || $basename === '..') {
+        return -1;
+    }
+    $path = consus_checkpoint_directory() . '/' . $basename;
+    if (!is_file($path)) {
+        return -1;
+    }
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        throw new RuntimeException('Tussenstand kon niet worden gelezen.');
+    }
+
+    $count = 0;
+    try {
+        while (($line = fgets($handle)) !== false) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            $row = json_decode($line, true);
+            if (!is_array($row)) {
+                throw new RuntimeException('Tussenstand bevat een onleesbare regel.');
+            }
+            $onRow($row);
+            $count++;
+        }
+    } finally {
+        fclose($handle);
+    }
+
+    return $count;
+}
+
+/**
+ * @param array<string, mixed> $company
+ * @return array<int, string>
+ */
+function consus_checkpoint_files_in_company(array $company): array
+{
+    $files = [];
+    $steps = $company['steps'] ?? [];
+    if (!is_array($steps)) {
+        return [];
+    }
+    foreach ($steps as $step) {
+        if (!is_array($step)) {
+            continue;
+        }
+        $file = basename((string) ($step['file'] ?? ''));
+        if ($file !== '' && $file !== '.' && $file !== '..') {
+            $files[$file] = true;
+        }
+        $months = $step['months'] ?? [];
+        if (!is_array($months)) {
+            continue;
+        }
+        foreach ($months as $month) {
+            if (!is_array($month)) {
+                continue;
+            }
+            $monthFile = basename((string) ($month['file'] ?? ''));
+            if ($monthFile !== '' && $monthFile !== '.' && $monthFile !== '..') {
+                $files[$monthFile] = true;
+            }
+        }
+    }
+
+    return array_keys($files);
+}
+
+/**
+ * @param array<string, mixed> $checkpoint
+ * @return array<string, bool>
+ */
+function consus_checkpoint_referenced_files(array $checkpoint): array
+{
+    $files = [];
+    $companies = $checkpoint['companies'] ?? [];
+    if (!is_array($companies)) {
+        return [];
+    }
+    foreach ($companies as $company) {
+        if (!is_array($company)) {
+            continue;
+        }
+        foreach (consus_checkpoint_files_in_company($company) as $file) {
+            $files[$file] = true;
+        }
+    }
+
+    return $files;
+}
+
+/**
+ * @param array<string, mixed> $checkpoint
+ */
+function consus_checkpoint_forget_company(array &$checkpoint, string $companyKey): void
+{
+    $company = $checkpoint['companies'][$companyKey] ?? null;
+    if (is_array($company)) {
+        $directory = consus_checkpoint_directory();
+        foreach (consus_checkpoint_files_in_company($company) as $file) {
+            $path = $directory . '/' . $file;
+            if (is_file($path)) {
+                @unlink($path);
+            }
+        }
+    }
+    unset($checkpoint['companies'][$companyKey]);
+}
+
+function consus_checkpoint_has_progress(array $company): bool
+{
+    $steps = $company['steps'] ?? [];
+    if (!is_array($steps)) {
+        return false;
+    }
+    foreach ($steps as $step) {
+        if (!is_array($step)) {
+            continue;
+        }
+        if (!empty($step['done'])) {
+            return true;
+        }
+        if (is_array($step['months'] ?? null) && $step['months'] !== []) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @param array<string, mixed> $stored
+ * @param array{mode?:string,from?:string} $plan
+ */
+function consus_checkpoint_plan_matches(array $stored, array $plan): bool
+{
+    return (string) ($stored['mode'] ?? '') === (string) ($plan['mode'] ?? '')
+        && (string) ($stored['ledger_from'] ?? '') === (string) ($plan['from'] ?? '');
+}
+
+function consus_clear_checkpoint(): void
+{
+    $directory = consus_checkpoint_directory();
+    if (is_dir($directory)) {
+        $entries = scandir($directory);
+        if (is_array($entries)) {
+            foreach ($entries as $entry) {
+                if ($entry === '.' || $entry === '..') {
+                    continue;
+                }
+                $path = $directory . '/' . $entry;
+                if (is_file($path)) {
+                    @unlink($path);
+                }
+            }
+        }
+        @rmdir($directory);
+    }
+    $manifest = consus_checkpoint_manifest_file();
+    if (is_file($manifest)) {
+        @unlink($manifest);
+    }
+}
+
+/**
+ * @param array<string, mixed> $checkpoint
+ */
+function consus_checkpoint_drop_orphans(array $checkpoint): void
+{
+    $directory = consus_checkpoint_directory();
+    if (!is_dir($directory)) {
+        return;
+    }
+    $referenced = consus_checkpoint_referenced_files($checkpoint);
+    $entries = scandir($directory);
+    if (!is_array($entries)) {
+        return;
+    }
+    foreach ($entries as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        $path = $directory . '/' . $entry;
+        if (!is_file($path)) {
+            continue;
+        }
+        if (str_contains($entry, '.tmp.') || !isset($referenced[$entry])) {
+            @unlink($path);
+        }
+    }
+}
+
+function consus_write_checkpoint(array $checkpoint): void
+{
+    $json = json_encode($checkpoint, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!is_string($json)) {
+        throw new RuntimeException('Tussenstand kon niet als JSON worden gecodeerd.');
+    }
+
+    $path = consus_checkpoint_manifest_file();
+    $directory = dirname($path);
+    if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
+        throw new RuntimeException('Snapshotmap kon niet worden aangemaakt.');
+    }
+
+    $temporary = $path . '.tmp.' . getmypid();
+    if (@file_put_contents($temporary, $json, LOCK_EX) === false) {
+        throw new RuntimeException('Tussenstand kon niet worden weggeschreven.');
+    }
+    if (!@rename($temporary, $path)) {
+        @unlink($temporary);
+        throw new RuntimeException('Tussenstand kon niet worden opgeslagen.');
+    }
+}
+
+/**
+ * @param array{as_of?:string,history_start?:string} $windows
+ * @return array{version:int,as_of:string,history_start:string,companies:array<string, mixed>}
+ */
+function consus_load_checkpoint(array $windows): array
+{
+    $expected = consus_empty_checkpoint($windows);
+    $path = consus_checkpoint_manifest_file();
+    $raw = is_file($path) ? @file_get_contents($path) : false;
+    $decoded = is_string($raw) ? json_decode($raw, true) : null;
+    if (
+        !is_array($decoded)
+        || (int) ($decoded['version'] ?? 0) !== CONSUS_SNAPSHOT_VERSION
+        || (string) ($decoded['as_of'] ?? '') !== $expected['as_of']
+        || (string) ($decoded['history_start'] ?? '') !== $expected['history_start']
+        || !is_array($decoded['companies'] ?? null)
+    ) {
+        consus_clear_checkpoint();
+
+        return $expected;
+    }
+
+    $decoded['version'] = CONSUS_SNAPSHOT_VERSION;
+    $decoded['as_of'] = $expected['as_of'];
+    $decoded['history_start'] = $expected['history_start'];
+    consus_checkpoint_drop_orphans($decoded);
+
+    return $decoded;
+}
+
+/**
+ * @param array<string, mixed> $steps
+ * @param callable(array<string, mixed>):void $replayRow
+ * @param callable(?array &$writer):array $fetchInto
+ * @return array{replayed:bool,missing:bool,rows:int,result:array<string, mixed>|null}
+ */
+function consus_collect_entity_with_checkpoint(
+    array &$steps,
+    string $companyKey,
+    string $stepId,
+    callable $replayRow,
+    callable $fetchInto,
+    callable $saveState,
+    bool $persist
+): array {
+    $existing = is_array($steps[$stepId] ?? null) ? $steps[$stepId] : null;
+    if (is_array($existing) && !empty($existing['done'])) {
+        $file = (string) ($existing['file'] ?? '');
+        $replayed = $file === '' ? 0 : consus_checkpoint_replay($file, $replayRow);
+        if ($replayed >= 0) {
+            return [
+                'replayed' => true,
+                'missing' => false,
+                'rows' => $replayed,
+                'result' => null,
+            ];
+        }
+        unset($steps[$stepId]);
+        if ($persist) {
+            $saveState();
+        }
+    }
+
+    if (!$persist) {
+        $writer = null;
+        $result = $fetchInto($writer);
+
+        return [
+            'replayed' => false,
+            'missing' => false,
+            'rows' => 0,
+            'result' => $result,
+        ];
+    }
+
+    $basename = consus_checkpoint_basename($companyKey, $stepId);
+    $writer = consus_checkpoint_begin_file($basename);
+    try {
+        $result = $fetchInto($writer);
+        $rows = consus_checkpoint_commit_file($writer);
+        $steps[$stepId] = [
+            'done' => true,
+            'file' => $basename,
+            'rows' => $rows,
+        ];
+        $saveState();
+
+        return [
+            'replayed' => false,
+            'missing' => is_array($existing) && !empty($existing['done']),
+            'rows' => $rows,
+            'result' => $result,
+        ];
+    } catch (Throwable $error) {
+        consus_checkpoint_abort_file($writer);
+        throw $error;
+    }
+}
+
+/**
+ * Artikelposten per maand. Een maand wordt pas vastgelegd nadat de hele
+ * paginaketen binnen is; een afgebroken maand blijft uit de tussenstand.
+ * Een geweigerd documentbereik geldt voor de resterende maanden van dit type.
  *
  * @param array<int, string> $entryTypes
  * @param array<string, array<string, mixed>> $items
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
- * @return array{count:int,missing_optional:array<int, string>,document_filter_rejected:bool,page_size_fallback:bool}
+ * @param array<int, array{from:string,to:string}>|null $chunks
+ * @param array<string, mixed>|null $stepState
+ * @return array{count:int,missing_optional:array<int, string>,document_filter_rejected:bool,page_size_fallback:bool,replayed_missing:bool}
  */
 function consus_collect_ledger(
     string $company,
@@ -1801,46 +2897,129 @@ function consus_collect_ledger(
     bool $includeAmount,
     array &$items,
     array $windows,
-    ?callable $onProgress = null
+    ?callable $onProgress = null,
+    ?array $chunks = null,
+    ?callable $fetchRows = null,
+    ?array &$stepState = null,
+    ?callable $saveState = null,
+    string $stepId = '',
+    string $mode = ''
 ): array {
+    $chunks ??= consus_ledger_date_chunks($windows);
+    $persist = $stepState !== null && $saveState !== null && $stepId !== '';
+    if ($stepState !== null && !isset($stepState['months'])) {
+        $stepState['months'] = [];
+    }
     $odataPrefix = trim($documentPrefix);
     $includeDocument = $odataPrefix !== '';
     $rejected = false;
+    if ($stepState !== null && !empty($stepState['document_filter_rejected'])) {
+        $rejected = true;
+        $odataPrefix = '';
+        $includeDocument = $documentPrefix !== '';
+    }
     $pageSizeFallback = false;
+    $replayedMissing = false;
     $missing = [];
     $count = 0;
+    $progressStep = $kind === 'sales' ? 'verkoop' : 'verbruik';
 
-    foreach (consus_ledger_date_chunks($windows) as $chunk) {
+    foreach ($chunks as $chunk) {
+        if (!is_array($chunk)) {
+            continue;
+        }
+        $from = (string) ($chunk['from'] ?? '');
+        $to = (string) ($chunk['to'] ?? '');
+        if ($from === '' || $to === '') {
+            continue;
+        }
         $context = [
             'company' => $company,
             'company_key' => $companyKey,
-            'step' => $kind === 'sales' ? 'verkoop' : 'verbruik',
+            'step' => $progressStep,
             'entry_type' => implode(', ', $entryTypes),
-            'from' => $chunk['from'],
-            'to' => $chunk['to'],
+            'from' => $from,
+            'to' => $to,
             'pages' => 0,
             'rows' => 0,
         ];
+        if ($mode !== '') {
+            $context['mode'] = $mode;
+        }
+
+        $storedMonth = null;
+        if (is_array($stepState) && is_array($stepState['months'][$from] ?? null)) {
+            $storedMonth = $stepState['months'][$from];
+        }
+        if (is_array($storedMonth)) {
+            $file = (string) ($storedMonth['file'] ?? '');
+            $replayed = $file === '' ? 0 : consus_checkpoint_replay($file, static function (array $row) use (&$items, $companyKey, $windows, $kind): void {
+                consus_apply_ledger_row($items, $row, $companyKey, $kind, $windows);
+            });
+            if ($replayed >= 0) {
+                $count += $replayed;
+                $context['rows'] = $replayed;
+                $context['resumed'] = true;
+                if ($onProgress !== null) {
+                    $onProgress($context);
+                }
+                continue;
+            }
+            unset($stepState['months'][$from]);
+            if ($saveState !== null) {
+                $saveState();
+            }
+            $replayedMissing = true;
+        }
+
         if ($onProgress !== null) {
             $onProgress($context);
         }
 
-        $result = consus_each_ledger_entry_type(
-            $company,
-            $entryTypes,
-            $chunk['from'],
-            $chunk['to'],
-            $includeAmount,
-            $odataPrefix,
-            $includeDocument,
-            static function (array $row) use (&$items, $companyKey, $windows, $kind, $documentPrefix): void {
-                if (!consus_document_no_has_prefix($row, $documentPrefix)) {
-                    return;
+        $writer = null;
+        $basename = $persist ? consus_checkpoint_basename($companyKey, $stepId, $from) : '';
+        if ($persist) {
+            $writer = consus_checkpoint_begin_file($basename);
+        }
+        try {
+            $result = consus_each_ledger_entry_type(
+                $company,
+                $entryTypes,
+                $from,
+                $to,
+                $includeAmount,
+                $odataPrefix,
+                $includeDocument,
+                static function (array $row) use (&$items, &$writer, $companyKey, $windows, $kind, $documentPrefix): void {
+                    if (!consus_document_no_has_prefix($row, $documentPrefix)) {
+                        return;
+                    }
+                    consus_apply_ledger_row($items, $row, $companyKey, $kind, $windows);
+                    if ($writer !== null) {
+                        consus_checkpoint_write_row($writer, $row);
+                    }
+                },
+                consus_page_progress($onProgress, $context),
+                $fetchRows
+            );
+            if ($writer !== null && $stepState !== null && $saveState !== null) {
+                $storedRows = consus_checkpoint_commit_file($writer);
+                $writer = null;
+                $stepState['months'][$from] = [
+                    'to' => $to,
+                    'file' => $basename,
+                    'rows' => $storedRows,
+                ];
+                if (!empty($result['document_filter_rejected'])) {
+                    $stepState['document_filter_rejected'] = true;
                 }
-                consus_apply_ledger_row($items, $row, $companyKey, $kind, $windows);
-            },
-            consus_page_progress($onProgress, $context)
-        );
+                $saveState();
+            }
+        } catch (Throwable $error) {
+            consus_checkpoint_abort_file($writer);
+            throw $error;
+        }
+
         $count += (int) ($result['count'] ?? 0);
         if (!empty($result['document_filter_rejected'])) {
             $rejected = true;
@@ -1862,12 +3041,15 @@ function consus_collect_ledger(
         'missing_optional' => $missing,
         'document_filter_rejected' => $rejected,
         'page_size_fallback' => $pageSizeFallback,
+        'replayed_missing' => $replayedMissing,
     ];
 }
 
 /**
  * @param array<string, array<string, mixed>> $items
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
+ * @param array{mode?:string,from?:string,chunks?:array<int, array{from:string,to:string}>}|null $plan
+ * @param array<string, mixed>|null $checkpoint
  * @return array{warnings:array<int, string>,foreign_spills:array<string, string>}
  */
 function consus_collect_company(
@@ -1875,150 +3057,283 @@ function consus_collect_company(
     string $companyKey,
     array &$items,
     array $windows,
-    ?callable $onProgress = null
+    ?callable $onProgress = null,
+    ?array $plan = null,
+    ?array &$checkpoint = null,
+    ?callable $saveCheckpoint = null,
+    ?callable $fetchRows = null
 ): array {
+    $persist = $checkpoint !== null && $saveCheckpoint !== null;
+    if ($checkpoint === null) {
+        $checkpoint = ['companies' => []];
+    }
+    if (!$persist) {
+        $saveCheckpoint = static function (): void {
+        };
+    }
+    if (!isset($checkpoint['companies'][$companyKey]) || !is_array($checkpoint['companies'][$companyKey])) {
+        $checkpoint['companies'][$companyKey] = [
+            'company' => $company,
+            'company_key' => $companyKey,
+            'mode' => (string) ($plan['mode'] ?? 'cold'),
+            'ledger_from' => (string) ($plan['from'] ?? ($windows['history_start'] ?? '')),
+            'steps' => [],
+            'warnings' => [],
+        ];
+    }
+    if (!isset($checkpoint['companies'][$companyKey]['steps']) || !is_array($checkpoint['companies'][$companyKey]['steps'])) {
+        $checkpoint['companies'][$companyKey]['steps'] = [];
+    }
+
     $warnings = [];
+    $storedWarnings = $checkpoint['companies'][$companyKey]['warnings'] ?? [];
+    if (is_array($storedWarnings)) {
+        foreach ($storedWarnings as $warning) {
+            $warning = (string) $warning;
+            if ($warning !== '' && !in_array($warning, $warnings, true)) {
+                $warnings[] = $warning;
+            }
+        }
+    }
+    $addWarning = static function (string $warning) use (&$warnings, &$checkpoint, $companyKey, $saveCheckpoint): void {
+        if ($warning === '' || in_array($warning, $warnings, true)) {
+            return;
+        }
+        $warnings[] = $warning;
+        $checkpoint['companies'][$companyKey]['warnings'] = $warnings;
+        $saveCheckpoint();
+    };
+
+    $mode = (string) ($checkpoint['companies'][$companyKey]['mode'] ?? ($plan['mode'] ?? ''));
+    $chunks = is_array($plan['chunks'] ?? null) ? $plan['chunks'] : null;
     $foreignSpills = [];
-    $note = static function (array $extra) use ($onProgress, $company, $companyKey): void {
+    $note = static function (array $extra) use ($onProgress, $company, $companyKey, $mode): void {
         if ($onProgress === null) {
             return;
         }
-        $onProgress(array_merge([
+        $base = [
             'company' => $company,
             'company_key' => $companyKey,
             'pages' => 0,
             'rows' => 0,
-        ], $extra));
+        ];
+        if ($mode !== '') {
+            $base['mode'] = $mode;
+        }
+        $onProgress(array_merge($base, $extra));
     };
 
     try {
-        $note(['step' => 'voorraad', 'entry_type' => CONSUS_STOCK_ENTITY]);
-        $stockResult = consus_each_entity_rows(
-            $company,
-            CONSUS_STOCK_ENTITY,
-            CONSUS_STOCK_FIELDS,
-            CONSUS_STOCK_OPTIONAL_FIELDS,
-            '',
-            static function (array $row) use (&$items, &$foreignSpills, $company, $companyKey): void {
-                $target = consus_stock_company_key($row, $company);
-                if ($target === '' || $target === $companyKey) {
-                    consus_apply_stock_row($items, $row, $company);
-                    return;
-                }
-                consus_foreign_spill_write($foreignSpills, $target, $row);
+        $stockOutcome = consus_collect_entity_with_checkpoint(
+            $checkpoint['companies'][$companyKey]['steps'],
+            $companyKey,
+            'voorraad',
+            static function (array $row) use (&$items, $company): void {
+                consus_apply_stock_row($items, $row, $company);
             },
-            null,
-            consus_page_progress($onProgress, [
-                'company' => $company,
-                'company_key' => $companyKey,
+            static function (?array &$writer) use (&$items, &$foreignSpills, $company, $companyKey, $onProgress): array {
+                return consus_each_entity_rows(
+                    $company,
+                    CONSUS_STOCK_ENTITY,
+                    CONSUS_STOCK_FIELDS,
+                    CONSUS_STOCK_OPTIONAL_FIELDS,
+                    '',
+                    static function (array $row) use (&$items, &$foreignSpills, &$writer, $company, $companyKey): void {
+                        $target = consus_stock_company_key($row, $company);
+                        if ($target === '' || $target === $companyKey) {
+                            consus_apply_stock_row($items, $row, $company);
+                            if ($writer !== null) {
+                                consus_checkpoint_write_row($writer, $row);
+                            }
+                            return;
+                        }
+                        consus_foreign_spill_write($foreignSpills, $target, $row);
+                    },
+                    null,
+                    consus_page_progress($onProgress, [
+                        'company' => $company,
+                        'company_key' => $companyKey,
+                        'step' => 'voorraad',
+                        'entry_type' => CONSUS_STOCK_ENTITY,
+                    ])
+                );
+            },
+            $saveCheckpoint,
+            $persist
+        );
+        if (!empty($stockOutcome['replayed'])) {
+            $note([
                 'step' => 'voorraad',
                 'entry_type' => CONSUS_STOCK_ENTITY,
-            ])
-        );
-        if (($stockResult['missing_optional'] ?? []) !== []) {
-            $warnings[] = CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $stockResult['missing_optional']) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.';
-        }
-        if (!empty($stockResult['page_size_fallback'])) {
-            $warnings[] = consus_page_size_warning(CONSUS_STOCK_ENTITY);
-        }
-
-        $salesResult = consus_collect_ledger(
-            $company,
-            $companyKey,
-            CONSUS_SALES_ENTRY_TYPES,
-            'sales',
-            '',
-            true,
-            $items,
-            $windows,
-            $onProgress
-        );
-        if (($salesResult['missing_optional'] ?? []) !== []) {
-            $warnings[] = 'Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $salesResult['missing_optional']) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.';
-        }
-        if (!empty($salesResult['page_size_fallback'])) {
-            $warnings[] = consus_page_size_warning(CONSUS_LEDGER_ENTITY);
+                'rows' => (int) $stockOutcome['rows'],
+                'resumed' => true,
+            ]);
+        } else {
+            if (!empty($stockOutcome['missing'])) {
+                $addWarning('Opgeslagen voorraad ontbreekt en wordt opnieuw opgehaald.');
+            }
+            $stockResult = is_array($stockOutcome['result'] ?? null) ? $stockOutcome['result'] : [];
+            if (($stockResult['missing_optional'] ?? []) !== []) {
+                $addWarning(CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $stockResult['missing_optional']) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.');
+            }
+            if (!empty($stockResult['page_size_fallback'])) {
+                $addWarning(consus_page_size_warning(CONSUS_STOCK_ENTITY));
+            }
         }
 
-        foreach (consus_wo_ledger_parts() as $part) {
-            $prefix = (string) $part['document_prefix'];
-            $consumptionResult = consus_collect_ledger(
+        foreach (consus_ledger_steps() as $step) {
+            $stepId = (string) $step['id'];
+            if (!isset($checkpoint['companies'][$companyKey]['steps'][$stepId]) || !is_array($checkpoint['companies'][$companyKey]['steps'][$stepId])) {
+                $checkpoint['companies'][$companyKey]['steps'][$stepId] = [
+                    'months' => [],
+                    'document_filter_rejected' => false,
+                ];
+            }
+            $ledgerResult = consus_collect_ledger(
                 $company,
                 $companyKey,
-                $part['entry_types'],
-                'consumption',
-                $prefix,
-                false,
+                $step['entry_types'],
+                $step['kind'],
+                $step['document_prefix'],
+                (bool) $step['include_amount'],
                 $items,
                 $windows,
-                $onProgress
+                $onProgress,
+                $chunks,
+                $fetchRows,
+                $checkpoint['companies'][$companyKey]['steps'][$stepId],
+                $saveCheckpoint,
+                $stepId,
+                $mode
             );
-            if (!empty($consumptionResult['document_filter_rejected']) && $prefix !== '') {
-                $warnings[] = 'Werkorderfilter op documentnummer wordt door BC geweigerd. Negatieve correcties worden volledig opgehaald en lokaal op prefix ' . $prefix . ' gefilterd.';
+            if (!empty($ledgerResult['replayed_missing'])) {
+                $addWarning('Opgeslagen tussenstap ontbreekt en wordt opnieuw opgehaald.');
             }
-            if (!empty($consumptionResult['page_size_fallback'])) {
-                $warnings[] = consus_page_size_warning(CONSUS_LEDGER_ENTITY);
+            if (($ledgerResult['missing_optional'] ?? []) !== [] && $step['kind'] === 'sales') {
+                $addWarning('Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $ledgerResult['missing_optional']) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.');
+            }
+            if (!empty($ledgerResult['document_filter_rejected']) && $step['document_prefix'] !== '') {
+                $addWarning('Werkorderfilter op documentnummer wordt door BC geweigerd. Negatieve correcties worden volledig opgehaald en lokaal op prefix ' . $step['document_prefix'] . ' gefilterd.');
+            }
+            if (!empty($ledgerResult['page_size_fallback'])) {
+                $addWarning(consus_page_size_warning(CONSUS_LEDGER_ENTITY));
             }
         }
 
         try {
-            $note(['step' => 'artikelen', 'entry_type' => CONSUS_ITEM_ENTITY]);
-            $vendorResult = consus_each_entity_rows(
-                $company,
-                CONSUS_ITEM_ENTITY,
-                CONSUS_ITEM_FIELDS,
-                CONSUS_ITEM_OPTIONAL_FIELDS,
-                '',
+            $vendorOutcome = consus_collect_entity_with_checkpoint(
+                $checkpoint['companies'][$companyKey]['steps'],
+                $companyKey,
+                'artikelen',
                 static function (array $row) use (&$items, $companyKey): void {
                     consus_apply_vendor_row($items, $row, $companyKey);
                 },
-                null,
-                consus_page_progress($onProgress, [
-                    'company' => $company,
-                    'company_key' => $companyKey,
+                static function (?array &$writer) use (&$items, $company, $companyKey, $onProgress): array {
+                    return consus_each_entity_rows(
+                        $company,
+                        CONSUS_ITEM_ENTITY,
+                        CONSUS_ITEM_FIELDS,
+                        CONSUS_ITEM_OPTIONAL_FIELDS,
+                        '',
+                        static function (array $row) use (&$items, &$writer, $companyKey): void {
+                            consus_apply_vendor_row($items, $row, $companyKey);
+                            if ($writer !== null) {
+                                consus_checkpoint_write_row($writer, $row);
+                            }
+                        },
+                        null,
+                        consus_page_progress($onProgress, [
+                            'company' => $company,
+                            'company_key' => $companyKey,
+                            'step' => 'artikelen',
+                            'entry_type' => CONSUS_ITEM_ENTITY,
+                        ])
+                    );
+                },
+                $saveCheckpoint,
+                $persist
+            );
+            if (!empty($vendorOutcome['replayed'])) {
+                $note([
                     'step' => 'artikelen',
                     'entry_type' => CONSUS_ITEM_ENTITY,
-                ])
-            );
-            if ($vendorResult['optional_fields'] === false && CONSUS_ITEM_OPTIONAL_FIELDS !== []) {
-                $warnings[] = CONSUS_ITEM_ENTITY . ': optionele velden (' . implode(', ', CONSUS_ITEM_OPTIONAL_FIELDS) . ') niet beschikbaar.';
-            }
-            if (!empty($vendorResult['page_size_fallback'])) {
-                $warnings[] = consus_page_size_warning(CONSUS_ITEM_ENTITY);
+                    'rows' => (int) $vendorOutcome['rows'],
+                    'resumed' => true,
+                ]);
+            } else {
+                if (!empty($vendorOutcome['missing'])) {
+                    $addWarning('Opgeslagen artikelen ontbreken en worden opnieuw opgehaald.');
+                }
+                $vendorResult = is_array($vendorOutcome['result'] ?? null) ? $vendorOutcome['result'] : [];
+                if (($vendorResult['optional_fields'] ?? null) === false && CONSUS_ITEM_OPTIONAL_FIELDS !== []) {
+                    $addWarning(CONSUS_ITEM_ENTITY . ': optionele velden (' . implode(', ', CONSUS_ITEM_OPTIONAL_FIELDS) . ') niet beschikbaar.');
+                }
+                if (!empty($vendorResult['page_size_fallback'])) {
+                    $addWarning(consus_page_size_warning(CONSUS_ITEM_ENTITY));
+                }
             }
         } catch (Throwable $error) {
-            $warnings[] = 'Artikelen (leverancier) niet geladen: ' . $error->getMessage();
+            $addWarning('Artikelen (leverancier) niet geladen: ' . $error->getMessage());
         }
 
         try {
-            $note(['step' => 'kostenplaats', 'entry_type' => CONSUS_DIMENSION_ENTITY]);
             $dimensionQuery = consus_dimension_query();
-            $dimensionResult = consus_each_entity_rows(
-                $company,
-                CONSUS_DIMENSION_ENTITY,
-                CONSUS_DIMENSION_FIELDS,
-                [],
-                (string) ($dimensionQuery['$filter'] ?? ''),
+            $dimensionOutcome = consus_collect_entity_with_checkpoint(
+                $checkpoint['companies'][$companyKey]['steps'],
+                $companyKey,
+                'kostenplaats',
                 static function (array $row) use (&$items, $companyKey): void {
                     consus_apply_dimension_row($items, $row, $companyKey);
                 },
-                null,
-                consus_page_progress($onProgress, [
-                    'company' => $company,
-                    'company_key' => $companyKey,
+                static function (?array &$writer) use (&$items, $company, $companyKey, $onProgress, $dimensionQuery): array {
+                    return consus_each_entity_rows(
+                        $company,
+                        CONSUS_DIMENSION_ENTITY,
+                        CONSUS_DIMENSION_FIELDS,
+                        [],
+                        (string) ($dimensionQuery['$filter'] ?? ''),
+                        static function (array $row) use (&$items, &$writer, $companyKey): void {
+                            consus_apply_dimension_row($items, $row, $companyKey);
+                            if ($writer !== null) {
+                                consus_checkpoint_write_row($writer, $row);
+                            }
+                        },
+                        null,
+                        consus_page_progress($onProgress, [
+                            'company' => $company,
+                            'company_key' => $companyKey,
+                            'step' => 'kostenplaats',
+                            'entry_type' => CONSUS_DIMENSION_ENTITY,
+                        ])
+                    );
+                },
+                $saveCheckpoint,
+                $persist
+            );
+            if (!empty($dimensionOutcome['replayed'])) {
+                $note([
                     'step' => 'kostenplaats',
                     'entry_type' => CONSUS_DIMENSION_ENTITY,
-                ])
-            );
-            if (!empty($dimensionResult['page_size_fallback'])) {
-                $warnings[] = consus_page_size_warning(CONSUS_DIMENSION_ENTITY);
+                    'rows' => (int) $dimensionOutcome['rows'],
+                    'resumed' => true,
+                ]);
+            } else {
+                if (!empty($dimensionOutcome['missing'])) {
+                    $addWarning('Opgeslagen kostenplaats ontbreekt en wordt opnieuw opgehaald.');
+                }
+                $dimensionResult = is_array($dimensionOutcome['result'] ?? null) ? $dimensionOutcome['result'] : [];
+                if (!empty($dimensionResult['page_size_fallback'])) {
+                    $addWarning(consus_page_size_warning(CONSUS_DIMENSION_ENTITY));
+                }
             }
         } catch (Throwable $error) {
-            $warnings[] = 'Kostenplaats (dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ') niet geladen: ' . $error->getMessage();
+            $addWarning('Kostenplaats (dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ') niet geladen: ' . $error->getMessage());
         }
 
+        $checkpoint['companies'][$companyKey]['warnings'] = $warnings;
+
         return [
-            'warnings' => array_values(array_unique($warnings)),
+            'warnings' => array_values($warnings),
             'foreign_spills' => consus_foreign_spill_finish($foreignSpills, false),
         ];
     } catch (Throwable $error) {
@@ -2356,7 +3671,7 @@ function consus_publish_nightly_snapshot(
     return $snapshot;
 }
 
-function consus_run_nightly(bool $force = false): array
+function consus_run_nightly(bool $force = false, bool $fullLedger = false): array
 {
     $discovered = auth_discover_companies_across_active_environments();
     $names = is_array($discovered['companies'] ?? null) ? $discovered['companies'] : [];
@@ -2417,6 +3732,25 @@ function consus_run_nightly(bool $force = false): array
         );
     };
 
+    // Zelfde peildatum: eerst de tussenstand binnen het bedrijf. Die houdt cold of
+    // warm vast. Zonder tussenstand beslist het watermerk. --force wist de
+    // tussenstand. --full negeert het watermerk en haalt twaalf maanden.
+    if ($force) {
+        consus_clear_checkpoint();
+    }
+    $checkpoint = consus_load_checkpoint($windows);
+    $saveCheckpoint = static function () use (&$checkpoint): void {
+        consus_write_checkpoint($checkpoint);
+    };
+    $releaseCheckpoint = static function (string $companyKey) use (&$checkpoint): void {
+        consus_checkpoint_forget_company($checkpoint, $companyKey);
+        if (($checkpoint['companies'] ?? []) === []) {
+            consus_clear_checkpoint();
+            return;
+        }
+        consus_write_checkpoint($checkpoint);
+    };
+
     foreach ($companies as $companyInfo) {
         $startedAt = hrtime(true);
         $company = (string) $companyInfo['company'];
@@ -2430,14 +3764,23 @@ function consus_run_nightly(bool $force = false): array
             }
             unset($foreignSpills[$companyKey]);
             $existing = consus_find_company_stat($previousStats, $companyKey);
-            $companyStats[] = [
+            $skipped = [
                 'company' => $company,
                 'company_key' => $companyKey,
                 'stale' => false,
                 'resumed' => true,
                 'refreshed_on' => $windows['as_of'],
-                'duration_ms' => (int) ($existing['duration_ms'] ?? 0),
+                'duration_ms' => (int) (is_array($existing) ? ($existing['duration_ms'] ?? 0) : 0),
             ];
+            if (is_array($existing)) {
+                foreach (consus_ledger_marker_from_stat($existing) as $markerKey => $markerValue) {
+                    $skipped[$markerKey] = $markerValue;
+                }
+                if (isset($existing['ledger_mode']) && is_string($existing['ledger_mode'])) {
+                    $skipped['ledger_mode'] = $existing['ledger_mode'];
+                }
+            }
+            $companyStats[] = $skipped;
             consus_write_progress([
                 'company' => $company,
                 'company_key' => $companyKey,
@@ -2446,8 +3789,32 @@ function consus_run_nightly(bool $force = false): array
                 'rows' => count($freshRows[$companyKey]),
             ]);
             $publish(true);
+            $releaseCheckpoint($companyKey);
             continue;
         }
+
+        $existing = consus_find_company_stat($previousStats, $companyKey);
+        $plan = consus_ledger_plan(
+            is_array($existing) ? $existing : [],
+            $windows,
+            ($previousRows[$companyKey] ?? []) !== [],
+            $fullLedger
+        );
+        $storedCheckpoint = $checkpoint['companies'][$companyKey] ?? null;
+        if (!is_array($storedCheckpoint) || !consus_checkpoint_plan_matches($storedCheckpoint, $plan)) {
+            consus_checkpoint_forget_company($checkpoint, $companyKey);
+            $checkpoint['companies'][$companyKey] = [
+                'company' => $company,
+                'company_key' => $companyKey,
+                'mode' => $plan['mode'],
+                'ledger_from' => $plan['from'],
+                'overlap_through' => $plan['overlap_through'],
+                'steps' => [],
+                'warnings' => [],
+            ];
+            $saveCheckpoint();
+        }
+        $checkpointResumed = consus_checkpoint_has_progress($checkpoint['companies'][$companyKey]);
 
         $localItems = [];
         try {
@@ -2458,12 +3825,24 @@ function consus_run_nightly(bool $force = false): array
                 $windows,
                 static function (array $progress): void {
                     consus_write_progress($progress);
-                }
+                },
+                $plan,
+                $checkpoint,
+                $saveCheckpoint
             );
             $rolled = consus_rollup_items($localItems, $windows);
             $localItems = [];
             $freshRows[$companyKey] = $rolled['rows'];
             unset($rolled);
+            if ($plan['mode'] === 'warm') {
+                $freshRows[$companyKey] = consus_merge_warm_company_rows(
+                    $previousRows[$companyKey] ?? [],
+                    $freshRows[$companyKey],
+                    $windows,
+                    $plan['from'],
+                    $plan['overlap_through']
+                );
+            }
             foreach ($foreignSpills[$companyKey] ?? [] as $path) {
                 if (is_string($path)) {
                     consus_release_temp_file($path);
@@ -2483,26 +3862,27 @@ function consus_run_nightly(bool $force = false): array
             foreach ($result['warnings'] as $warning) {
                 $warnings[] = ['company' => $company, 'warning' => $warning];
             }
-            $companyStats[] = [
-                'company' => $company,
-                'company_key' => $companyKey,
-                'stale' => false,
-                'resumed' => false,
-                'refreshed_on' => $windows['as_of'],
-                'duration_ms' => (int) round((hrtime(true) - $startedAt) / 1_000_000),
-            ];
+            $companyStats[] = consus_completed_company_stat(
+                $company,
+                $companyKey,
+                $windows,
+                (int) round((hrtime(true) - $startedAt) / 1_000_000),
+                $plan['mode'],
+                $checkpointResumed
+            );
             $publish(true);
+            $releaseCheckpoint($companyKey);
         } catch (Throwable $error) {
             $localItems = [];
             gc_collect_cycles();
             $errors[] = ['company' => $company, 'error' => $error->getMessage()];
-            $companyStats[] = [
-                'company' => $company,
-                'company_key' => $companyKey,
-                'stale' => true,
-                'resumed' => false,
-                'duration_ms' => (int) round((hrtime(true) - $startedAt) / 1_000_000),
-            ];
+            $companyStats[] = consus_failed_company_stat(
+                $company,
+                $companyKey,
+                (int) round((hrtime(true) - $startedAt) / 1_000_000),
+                is_array($existing) ? $existing : null,
+                ($previousRows[$companyKey] ?? []) !== []
+            );
             $publish(true);
         }
     }
@@ -2545,6 +3925,11 @@ function consus_run_nightly(bool $force = false): array
         unset($foreignOnly);
         $freshRows[$key] = $rolled['rows'];
         unset($rolled);
+        foreach ($companyStats as $index => $stat) {
+            if (is_array($stat) && (string) ($stat['company_key'] ?? '') === $key) {
+                $companyStats[$index] = consus_stock_only_company_stat($stat);
+            }
+        }
         $warnings[] = [
             'company' => $key,
             'warning' => 'Alleen voorraad uit een andere bedrijfsquery. Verkoop en verbruik ontbreken tot dit bedrijf zelf geladen kan worden.',

@@ -18,17 +18,19 @@
  * Tests laden alleen de helpers via define('CONSUS_NIGHTLY_LIBRARY', true).
  */
 
-function consus_nightly_force_requested(mixed $env, mixed $query, array $argv = []): bool
+function consus_nightly_flag_requested(mixed $env, mixed $query, array $argv, string $name): bool
 {
+    $long = '--' . $name;
+    $prefix = $name . '=';
     foreach ($argv as $arg) {
         if (!is_string($arg)) {
             continue;
         }
-        if ($arg === '--force') {
+        if ($arg === $long) {
             return true;
         }
-        if (str_starts_with($arg, 'force=')) {
-            $env = substr($arg, 6);
+        if (str_starts_with($arg, $prefix)) {
+            $env = substr($arg, strlen($prefix));
         }
     }
 
@@ -43,6 +45,16 @@ function consus_nightly_force_requested(mixed $env, mixed $query, array $argv = 
     }
 
     return false;
+}
+
+function consus_nightly_force_requested(mixed $env, mixed $query, array $argv = []): bool
+{
+    return consus_nightly_flag_requested($env, $query, $argv, 'force');
+}
+
+function consus_nightly_full_ledger_requested(mixed $env, mixed $query, array $argv = []): bool
+{
+    return consus_nightly_flag_requested($env, $query, $argv, 'full');
 }
 
 function consus_nightly_log_debug_enabled(mixed $value, string $sapi): bool
@@ -356,14 +368,20 @@ require_once __DIR__ . '/consus_data.php';
 
 $startedAt = hrtime(true);
 $GLOBALS['consus_progress_echo'] = PHP_SAPI === 'cli';
+$cliArgv = PHP_SAPI === 'cli' && isset($argv) && is_array($argv) ? $argv : [];
 $force = consus_nightly_force_requested(
     getenv('CONSUS_NIGHTLY_FORCE'),
     PHP_SAPI === 'cli' ? null : ($_GET['force'] ?? null),
-    PHP_SAPI === 'cli' && isset($argv) && is_array($argv) ? $argv : []
+    $cliArgv
+);
+$fullLedger = consus_nightly_full_ledger_requested(
+    getenv('CONSUS_FULL_LEDGER'),
+    PHP_SAPI === 'cli' ? null : ($_GET['full'] ?? null),
+    $cliArgv
 );
 
 try {
-    $snapshot = consus_run_nightly($force);
+    $snapshot = consus_run_nightly($force, $fullLedger);
     $payload = [
         'ok' => ($snapshot['errors'] ?? []) === [],
         'generated_at' => (string) ($snapshot['generated_at'] ?? gmdate('c')),
@@ -389,6 +407,11 @@ try {
                 $note = ' (oude data behouden)';
             } elseif (!empty($company['resumed'])) {
                 $note = ' (al ververst vandaag, overgeslagen)';
+            } elseif (!empty($company['checkpoint_resumed'])) {
+                $note = ' (hervat binnen het bedrijf)';
+            }
+            if (($company['ledger_mode'] ?? '') === 'warm' && empty($company['resumed']) && empty($company['stale'])) {
+                $note .= ' (grootboek sinds ' . (string) ($company['ledger_overlap_from'] ?? '') . ')';
             }
             echo sprintf(
                 "  %s: duration=%dms%s\n",
