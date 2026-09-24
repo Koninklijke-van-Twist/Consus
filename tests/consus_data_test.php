@@ -264,6 +264,10 @@ test_assert(consus_stock_company_key(['Company_Name' => 'KVT'], 'Hunter van Twis
 test_assert(consus_stock_company_key(['Company_Name' => 'K.V.T.'], 'Hunter van Twist') === 'kvt', 'K.V.T. in de HVT-query blijft van KVT');
 test_assert(consus_stock_company_key(['Company_Name' => ''], 'Hunter van Twist') === 'hvt', 'lege Company_Name hoort bij de query');
 test_assert(consus_stock_company_key(['Company_Name' => 'ACME'], 'Hunter van Twist') === '', 'onbekend bedrijf valt niet terug op de query');
+test_assert(consus_stock_company_key(['Company_Name' => '', 'Bedrijfsnaam' => 'KVT'], 'Hunter van Twist') === 'kvt', 'lege Company_Name leest Bedrijfsnaam');
+test_assert(consus_stock_company_key(['Company_Name' => '', 'Bedrijfsnaam' => 'ACME'], 'Hunter van Twist') === '', 'onbekende Bedrijfsnaam valt niet terug op de query');
+test_assert(consus_stock_company_key(['Company_Name' => 'Hunter van Twist', 'Bedrijfsnaam' => 'KVT'], 'Hunter van Twist') === 'kvt', 'bedrijfsnaam wint als Company_Name alleen de query-bron is');
+test_assert(consus_stock_company_key(['Company_Name' => 'KVT', 'Bedrijfsnaam' => 'HVT'], 'Hunter van Twist') === 'kvt', 'een Company_Name van het andere bedrijf blijft leidend');
 
 $misrouted = [];
 consus_apply_stock_row($misrouted, [
@@ -296,6 +300,34 @@ consus_apply_stock_row($unknownCompany, [
     'Inventory' => 5,
 ], 'Hunter van Twist');
 test_assert($unknownCompany === [], 'onbekende Company_Name wordt niet op HVT gezet');
+$aliasStock = [];
+consus_apply_stock_row($aliasStock, [
+    'Item_No' => 'Q1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Voorraad' => 12,
+], 'Koninklijke van Twist');
+consus_apply_stock_row($aliasStock, [
+    'Item_No' => 'Q2',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Inventory' => 0,
+    'Voorraad' => 12,
+], 'Koninklijke van Twist');
+consus_apply_stock_row($aliasStock, [
+    'Item_No' => 'Q4',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Inventory' => 10,
+    'Voorraad' => 99,
+], 'Koninklijke van Twist');
+consus_apply_stock_row($aliasStock, [
+    'Item_No' => 'Q3',
+    'Company_Name' => 'Hunter van Twist',
+    'Bedrijfsnaam' => 'KVT',
+    'Inventory' => 4,
+], 'Hunter van Twist');
+test_assert((float) $aliasStock['kvt|Q1']['inventory'] === 12.0, 'Voorraad vult een ontbrekende Inventory');
+test_assert((float) $aliasStock['kvt|Q2']['inventory'] === 0.0, 'aanwezige Inventory 0 blijft 0');
+test_assert((float) $aliasStock['kvt|Q4']['inventory'] === 10.0, 'gevulde Inventory wint van Voorraad');
+test_assert(isset($aliasStock['kvt|Q3']) && !isset($aliasStock['hvt|Q3']), 'Bedrijfsnaam KVT zet de regel niet op HVT');
 
 $routedItems = [];
 $routedSpills = [];
@@ -453,6 +485,270 @@ foreach ($hvtUntouched as $hvtRow) {
 }
 test_assert(!in_array('kvt', $hvtKeys, true), 'KVT-artikel komt niet in de HVT-rijen');
 
+$rehomeConsumption = consus_empty_consumption_qty();
+$rehomeConsumption['y'] = 2.0;
+$rehomeConsumption['months'] = ['2026-09' => 2.0];
+$rehomeRows = [
+    'kvt' => [[
+        'company_key' => 'kvt',
+        'company_name' => 'Koninklijke van Twist',
+        'vendor_no' => 'PERK',
+        'vendor_name' => 'Perkins',
+        'cost_center' => '',
+        'location' => 'KVT',
+        'inventory' => 0.0,
+        'safety_stock' => 5.0,
+        'reorder_point' => 2.0,
+        'item_count' => 2,
+        'item_nos' => ['A1' => true, 'A2' => true],
+        'sales' => [],
+        'consumption' => [],
+    ]],
+    'hvt' => [[
+        'company_key' => 'hvt',
+        'company_name' => 'Hunter van Twist',
+        'vendor_no' => '',
+        'vendor_name' => '',
+        'cost_center' => '',
+        'location' => 'M001',
+        'inventory' => 12.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'item_count' => 1,
+        'item_nos' => ['A1' => true],
+        'sales' => [],
+        'consumption' => [],
+    ], [
+        'company_key' => 'hvt',
+        'company_name' => 'Hunter van Twist',
+        'vendor_no' => '',
+        'vendor_name' => '',
+        'cost_center' => '',
+        'location' => 'HVT',
+        'inventory' => 9.0,
+        'safety_stock' => 1.0,
+        'reorder_point' => 0.0,
+        'item_count' => 1,
+        'item_nos' => ['H1' => true],
+        'sales' => [],
+        'consumption' => [],
+    ], [
+        'company_key' => 'hvt',
+        'company_name' => 'Hunter van Twist',
+        'vendor_no' => '',
+        'vendor_name' => '',
+        'cost_center' => '',
+        'location' => 'LAS',
+        'inventory' => 5.0,
+        'safety_stock' => 7.0,
+        'reorder_point' => 0.0,
+        'item_count' => 1,
+        'item_nos' => ['A2' => true],
+        'sales' => [],
+        'consumption' => [],
+    ]],
+];
+$rehomeArticles = [
+    'kvt' => [[
+        'company_key' => 'kvt',
+        'company_name' => 'Koninklijke van Twist',
+        'item_no' => 'A1',
+        'description' => 'Filter',
+        'vendor_no' => 'PERK',
+        'vendor_name' => 'Perkins',
+        'cost_center' => '',
+        'location' => 'KVT',
+        'inventory' => 0.0,
+        'safety_stock' => 4.0,
+        'reorder_point' => 2.0,
+        'consumption' => $rehomeConsumption,
+    ], [
+        'company_key' => 'kvt',
+        'company_name' => 'Koninklijke van Twist',
+        'item_no' => 'A2',
+        'description' => 'Pakking',
+        'vendor_no' => 'PERK',
+        'vendor_name' => 'Perkins',
+        'cost_center' => '',
+        'location' => 'KVT',
+        'inventory' => 0.0,
+        'safety_stock' => 1.0,
+        'reorder_point' => 0.0,
+        'consumption' => $rehomeConsumption,
+    ]],
+    'hvt' => [[
+        'company_key' => 'hvt',
+        'company_name' => 'Hunter van Twist',
+        'item_no' => 'A1',
+        'description' => '',
+        'vendor_no' => '',
+        'vendor_name' => '',
+        'cost_center' => '',
+        'location' => 'M001',
+        'inventory' => 12.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'consumption' => consus_empty_consumption_qty(),
+    ], [
+        'company_key' => 'hvt',
+        'company_name' => 'Hunter van Twist',
+        'item_no' => 'H1',
+        'description' => 'HVT-eigen',
+        'vendor_no' => '',
+        'vendor_name' => '',
+        'cost_center' => '',
+        'location' => 'HVT',
+        'inventory' => 9.0,
+        'safety_stock' => 1.0,
+        'reorder_point' => 0.0,
+        'consumption' => $rehomeConsumption,
+    ], [
+        'company_key' => 'hvt',
+        'company_name' => 'Hunter van Twist',
+        'item_no' => 'A2',
+        'description' => '',
+        'vendor_no' => '',
+        'vendor_name' => '',
+        'cost_center' => '',
+        'location' => 'LAS',
+        'inventory' => 5.0,
+        'safety_stock' => 7.0,
+        'reorder_point' => 0.0,
+        'consumption' => consus_empty_consumption_qty(),
+    ]],
+];
+$rehomeWarnings = consus_rehome_stranded_inventory($rehomeRows, $rehomeArticles);
+$rehomeSnapshot = [
+    'rows' => array_merge($rehomeRows['kvt'], $rehomeRows['hvt']),
+    'articles' => array_merge($rehomeArticles['kvt'], $rehomeArticles['hvt']),
+    'version' => CONSUS_SNAPSHOT_VERSION,
+];
+$rehomeKvt = consus_summarize($rehomeSnapshot, 'kvt', '', '', '');
+$rehomeHvt = consus_summarize($rehomeSnapshot, 'hvt', '', '', '');
+$rehomeAll = consus_summarize($rehomeSnapshot, '', '', '', '');
+test_assert(abs((float) $rehomeKvt['inventory'] - 17) < 0.0001, 'KVT krijgt de voorraad die op HVT stond');
+test_assert(abs((float) $rehomeKvt['safety_stock'] - 5) < 0.0001, 'verplaatsen telt veiligheidsvoorraad niet nog eens');
+test_assert(abs((float) $rehomeKvt['reorder_point'] - 2) < 0.0001, 'verplaatsen telt bestelpunt niet nog eens');
+test_assert(abs((float) $rehomeHvt['inventory'] - 9) < 0.0001, 'HVT-voorraad met verbruik blijft op HVT');
+test_assert(abs((float) $rehomeAll['inventory'] - 26) < 0.0001, 'totale voorraad over alle bedrijven blijft gelijk');
+test_assert((string) $rehomeRows['kvt'][0]['vendor_no'] === 'PERK', 'de KVT-leverancier blijft bij het verplaatsen');
+$rehomeHvtSafety = 0.0;
+foreach ($rehomeRows['hvt'] as $rehomeHvtRow) {
+    if (is_array($rehomeHvtRow['item_nos'] ?? null) && isset($rehomeHvtRow['item_nos']['A2'])) {
+        $rehomeHvtSafety += (float) ($rehomeHvtRow['safety_stock'] ?? 0);
+        test_assert(abs((float) ($rehomeHvtRow['inventory'] ?? 0)) < 0.0001, 'verplaatste HVT-regel houdt geen hoeveelheid');
+    }
+}
+test_assert(abs($rehomeHvtSafety - 7) < 0.0001, 'veiligheidsvoorraad van HVT blijft op HVT');
+$rehomeListed = consus_list_articles($rehomeSnapshot, 'kvt', '', '', '');
+$rehomeListedInventory = [];
+foreach ($rehomeListed as $rehomeArticle) {
+    $rehomeListedInventory[(string) $rehomeArticle['item_no']] = (float) $rehomeArticle['inventory'];
+}
+test_assert(abs(($rehomeListedInventory['A1'] ?? 0) - 12) < 0.0001, 'artikeltabel KVT toont de verplaatste voorraad');
+test_assert(abs(($rehomeListedInventory['A2'] ?? 0) - 5) < 0.0001, 'tweede KVT-artikel krijgt alleen zijn eigen hoeveelheid');
+$rehomeHvtItems = [];
+foreach ($rehomeArticles['hvt'] as $rehomeHvtArticle) {
+    $rehomeHvtItems[] = (string) ($rehomeHvtArticle['item_no'] ?? '');
+}
+test_assert(!in_array('A1', $rehomeHvtItems, true), 'lege HVT-artikelregel zonder verbruik verdwijnt');
+test_assert(in_array('H1', $rehomeHvtItems, true), 'HVT-artikel met verbruik blijft');
+test_assert(count($rehomeWarnings) === 1 && str_contains((string) ($rehomeWarnings[0]['warning'] ?? ''), 'verplaatst'), 'verplaatsen wordt als opmerking gemeld');
+
+$blockedRows = [
+    'kvt' => [[
+        'company_key' => 'kvt',
+        'vendor_no' => 'PERK',
+        'cost_center' => '',
+        'location' => 'KVT',
+        'inventory' => 0.0,
+        'safety_stock' => 4.0,
+        'reorder_point' => 0.0,
+        'item_nos' => ['B1' => true],
+    ]],
+    'hvt' => [[
+        'company_key' => 'hvt',
+        'vendor_no' => '',
+        'cost_center' => '',
+        'location' => 'HVT',
+        'inventory' => 8.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'item_nos' => ['B1' => true],
+    ]],
+];
+$blockedArticles = [
+    'kvt' => [[
+        'company_key' => 'kvt',
+        'item_no' => 'B1',
+        'location' => 'KVT',
+        'inventory' => 0.0,
+        'safety_stock' => 4.0,
+        'reorder_point' => 0.0,
+        'consumption' => $rehomeConsumption,
+    ]],
+    'hvt' => [[
+        'company_key' => 'hvt',
+        'item_no' => 'B1',
+        'location' => 'HVT',
+        'inventory' => 8.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'consumption' => $rehomeConsumption,
+    ]],
+];
+$blockedWarnings = consus_rehome_stranded_inventory($blockedRows, $blockedArticles);
+test_assert(abs((float) $blockedRows['kvt'][0]['inventory']) < 0.0001, 'voorraad met verbruik aan de andere kant blijft daar');
+test_assert(abs((float) $blockedRows['hvt'][0]['inventory'] - 8) < 0.0001, 'HVT houdt voorraad die ook verbruik heeft');
+test_assert(count($blockedWarnings) === 1 && str_contains((string) ($blockedWarnings[0]['warning'] ?? ''), 'verbruik'), 'blokkade door verbruik wordt uitgelegd');
+
+$unmatchedRows = [
+    'kvt' => [[
+        'company_key' => 'kvt',
+        'vendor_no' => 'PERK',
+        'cost_center' => '',
+        'location' => 'KVT',
+        'inventory' => 0.0,
+        'safety_stock' => 4.0,
+        'reorder_point' => 1.0,
+        'item_nos' => ['Z1' => true],
+    ]],
+    'hvt' => [[
+        'company_key' => 'hvt',
+        'vendor_no' => '',
+        'cost_center' => '',
+        'location' => 'HVT',
+        'inventory' => 6.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'item_nos' => ['Y1' => true],
+    ]],
+];
+$unmatchedArticles = [
+    'kvt' => [[
+        'company_key' => 'kvt',
+        'item_no' => 'Z1',
+        'location' => 'KVT',
+        'inventory' => 0.0,
+        'safety_stock' => 4.0,
+        'reorder_point' => 1.0,
+        'consumption' => consus_empty_consumption_qty(),
+    ]],
+    'hvt' => [[
+        'company_key' => 'hvt',
+        'item_no' => 'Y1',
+        'location' => 'HVT',
+        'inventory' => 6.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'consumption' => consus_empty_consumption_qty(),
+    ]],
+];
+$unmatchedWarnings = consus_rehome_stranded_inventory($unmatchedRows, $unmatchedArticles);
+test_assert(abs((float) $unmatchedRows['kvt'][0]['inventory']) < 0.0001, 'zonder gedeeld artikelnummer blijft KVT op 0');
+test_assert(abs((float) $unmatchedRows['hvt'][0]['inventory'] - 6) < 0.0001, 'losse HVT-voorraad blijft op HVT');
+test_assert(count($unmatchedWarnings) === 1 && str_contains((string) ($unmatchedWarnings[0]['warning'] ?? ''), 'artikelnummer'), 'ontbrekend artikelnummer wordt uitgelegd');
+
 $cardItems = [];
 consus_apply_stock_row($cardItems, [
     'Item_No' => 'A1',
@@ -553,6 +849,25 @@ consus_apply_stock_row($openGaps, [
 $openGapWarnings = consus_planning_gap_warnings($openGaps, 'kvt');
 test_assert(count($openGapWarnings) === 4, 'gevulde voorraad zonder planning, afdeling en locatie waarschuwt');
 test_assert(consus_is_planning_gap_warning($openGapWarnings[0]), 'uitkomstwaarschuwing is herkenbaar');
+$zeroDept = [];
+consus_apply_ledger_row($zeroDept, [
+    'Item_No' => 'Z1',
+    'Quantity' => -1,
+    'Posting_Date' => '2026-09-10',
+    'Location_Code' => 'KVT',
+    'Document_No' => 'WO9',
+], 'kvt', 'consumption', $windows);
+consus_apply_vendor_row($zeroDept, [
+    'No' => 'Z1',
+    'Vendor_No' => 'PERK',
+    'Safety_Stock_Quantity' => 4,
+    'Global_Dimension_2_Code' => 'DIM2',
+], 'kvt');
+test_assert((string) $zeroDept['kvt|Z1']['cost_center'] === '', 'globale dimensie 2 is geen afdeling');
+$zeroDeptWarnings = consus_planning_gap_warnings($zeroDept, 'kvt');
+test_assert(count($zeroDeptWarnings) === 1 && str_starts_with($zeroDeptWarnings[0], 'Geen afdeling op de artikelen.'), 'afdeling ontbreekt ook als de voorraad nog 0 is');
+$zeroDept['kvt|Z1']['cost_center'] = 'WERK';
+test_assert(consus_planning_gap_warnings($zeroDept, 'kvt') === [], 'gevulde afdeling zonder voorraad geeft geen opmerking');
 $warningLines = consus_warning_lines([
     ['company' => 'KVT', 'warning' => 'locatie ontbreekt'],
     'losse regel',
@@ -1287,6 +1602,56 @@ try {
         test_assert(str_contains($dimensionNetwork->getMessage(), 'cURL error'), 'dimensie-netwerkfout wordt niet als filterfout behandeld');
     }
     test_assert($dimensionNetworkCalls === 2, 'netwerkfout probeert het dimensiefilter niet opnieuw');
+
+    $alternateDimensionCalls = [];
+    $alternateApplied = [];
+    $alternateResult = consus_each_dimension_rows(
+        'Koninklijke van Twist',
+        static function (array $row) use (&$alternateApplied): void {
+            $alternateApplied[] = (string) ($row['Dimension_Value_Code'] ?? '');
+        },
+        static function (string $url, array $auth, callable $onRow) use (&$alternateDimensionCalls): int {
+            unset($auth);
+            $decoded = rawurldecode($url);
+            $alternateDimensionCalls[] = $decoded;
+            if (str_contains($decoded, "Dimension_Code eq '15'")) {
+                return 0;
+            }
+            test_assert(str_contains($decoded, "Dimension_Code eq 'KOSTENPLAATS'"), 'lege dimensie 15 probeert KOSTENPLAATS');
+            test_assert(!str_contains($decoded, 'AFDELING') && !str_contains($decoded, "eq 'CC'"), 'een gevulde alias stopt de volgende codes');
+            $onRow(['No' => 'P1', 'Dimension_Code' => 'KOSTENPLAATS', 'Dimension_Value_Code' => 'LAS']);
+
+            return 1;
+        }
+    );
+    test_assert($alternateResult['dimension_code'] === 'KOSTENPLAATS', 'de gebruikte dimensiecode blijft zichtbaar');
+    test_assert($alternateResult['filter_fallback'] === false, 'KOSTENPLAATS lukt met het tabelfilter');
+    test_assert($alternateApplied === ['LAS'], 'alias-dimensie wordt één keer toegepast');
+    $sawFifteen = false;
+    foreach ($alternateDimensionCalls as $alternateUrl) {
+        if (str_contains($alternateUrl, "Dimension_Code eq '15'")) {
+            $sawFifteen = true;
+        }
+    }
+    test_assert($sawFifteen, 'dimensie 15 wordt eerst geprobeerd');
+
+    $dimensionItems = [];
+    consus_apply_stock_row($dimensionItems, [
+        'Item_No' => 'C1',
+        'Company_Name' => 'Koninklijke van Twist',
+        'Inventory' => 1,
+    ], 'Koninklijke van Twist');
+    consus_apply_dimension_row($dimensionItems, [
+        'No' => 'C1',
+        'Dimension_Code' => 'AFDELING',
+        'Dimension_Value_Code' => 'LAS',
+    ], 'kvt');
+    consus_apply_dimension_row($dimensionItems, [
+        'No' => 'C1',
+        'Dimension_Code' => '99',
+        'Dimension_Value_Code' => 'NEE',
+    ], 'kvt');
+    test_assert((string) $dimensionItems['kvt|C1']['cost_center'] === 'LAS', 'AFDELING vult de kostenplaats');
 
     $fatalCalls = 0;
     try {

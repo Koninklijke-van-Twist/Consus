@@ -554,30 +554,88 @@ function consus_document_no_has_prefix(array $row, string $prefix): bool
 }
 
 /**
+ * Dimensie 15 eerst. Alleen als die geen regels oplevert volgen de aliassen.
+ * Nooit een ongefilterde DefaultDimensions-pagina.
+ *
+ * @return array<int, string>
+ */
+function consus_cost_center_dimension_codes(): array
+{
+    $codes = [
+        CONSUS_COST_CENTER_DIMENSION_CODE,
+        'KOSTENPLAATS',
+        'AFDELING',
+        'CC',
+    ];
+    $unique = [];
+    foreach ($codes as $code) {
+        $code = trim((string) $code);
+        if ($code === '') {
+            continue;
+        }
+        foreach ($unique as $existing) {
+            if (strcasecmp($existing, $code) === 0) {
+                continue 2;
+            }
+        }
+        $unique[] = $code;
+    }
+
+    return $unique;
+}
+
+function consus_is_cost_center_dimension_code(string $code): bool
+{
+    if (trim($code) === '') {
+        return true;
+    }
+    foreach (consus_cost_center_dimension_codes() as $allowed) {
+        if (strcasecmp($code, $allowed) === 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @return array<int, string>
+ */
+function consus_dimension_filters_for_code(string $code): array
+{
+    $escaped = consus_escape_odata_string($code);
+
+    return [
+        'Table_ID eq ' . (int) CONSUS_DIMENSION_TABLE_ID . " and Dimension_Code eq '" . $escaped . "'",
+        "Dimension_Code eq '" . $escaped . "'",
+    ];
+}
+
+/**
  * @return array<string, string>
  */
 function consus_dimension_query(): array
 {
-    $code = consus_escape_odata_string(CONSUS_COST_CENTER_DIMENSION_CODE);
-    $filter = 'Table_ID eq ' . (int) CONSUS_DIMENSION_TABLE_ID . " and Dimension_Code eq '" . $code . "'";
+    $filters = consus_dimension_filters_for_code(CONSUS_COST_CENTER_DIMENSION_CODE);
 
-    return consus_entity_query(CONSUS_DIMENSION_FIELDS, $filter);
+    return consus_entity_query(CONSUS_DIMENSION_FIELDS, $filters[0]);
 }
 
 function consus_dimension_code_filter(): string
 {
-    $code = consus_escape_odata_string(CONSUS_COST_CENTER_DIMENSION_CODE);
+    $filters = consus_dimension_filters_for_code(CONSUS_COST_CENTER_DIMENSION_CODE);
 
-    return "Dimension_Code eq '" . $code . "'";
+    return $filters[1];
 }
 
 /**
  * Eerst tabel 27 én dimensie 15. Weigert BC dat tabelfilter, dan alleen
- * dimensie 15 — niet de hele DefaultDimensions-pagina.
+ * dimensie 15. Levert die niets, dan dezelfde twee filters voor KOSTENPLAATS,
+ * AFDELING en CC. Nooit de hele DefaultDimensions-pagina.
  *
  * @param callable(array<string, mixed>):void $onRow
  * @param callable(string, array<string, mixed>, callable(array<string, mixed>):void):int|null $fetchRows
- * @return array{count:int,optional_fields:bool,missing_optional:array<int, string>,page_size_fallback:bool,filter_fallback:bool}
+ * @return array{count:int,optional_fields:bool,missing_optional:array<int, string>,page_size_fallback:bool,filter_fallback:bool,dimension_code?:string}
  */
 function consus_each_dimension_rows(
     string $company,
@@ -585,33 +643,40 @@ function consus_each_dimension_rows(
     ?callable $fetchRows = null,
     ?callable $onPage = null
 ): array {
-    $filters = [
-        (string) (consus_dimension_query()['$filter'] ?? ''),
-        consus_dimension_code_filter(),
-    ];
     $lastError = null;
-    foreach ($filters as $index => $filter) {
-        try {
-            $result = consus_each_entity_rows(
-                $company,
-                CONSUS_DIMENSION_ENTITY,
-                CONSUS_DIMENSION_FIELDS,
-                CONSUS_DIMENSION_OPTIONAL_FIELDS,
-                $filter,
-                $onRow,
-                $fetchRows,
-                $onPage
-            );
-            $result['filter_fallback'] = $index > 0;
-
-            return $result;
-        } catch (Throwable $error) {
-            $lastError = $error;
-            if ($index === 0 && consus_odata_error_allows_entry_type_fallback($error)) {
-                continue;
+    $lastZero = null;
+    foreach (consus_cost_center_dimension_codes() as $code) {
+        $filters = consus_dimension_filters_for_code($code);
+        foreach ($filters as $index => $filter) {
+            try {
+                $result = consus_each_entity_rows(
+                    $company,
+                    CONSUS_DIMENSION_ENTITY,
+                    CONSUS_DIMENSION_FIELDS,
+                    CONSUS_DIMENSION_OPTIONAL_FIELDS,
+                    $filter,
+                    $onRow,
+                    $fetchRows,
+                    $onPage
+                );
+                $result['filter_fallback'] = $index > 0;
+                $result['dimension_code'] = $code;
+                if ((int) ($result['count'] ?? 0) > 0) {
+                    return $result;
+                }
+                $lastZero = $result;
+            } catch (Throwable $error) {
+                $lastError = $error;
+                if ($index === 0 && consus_odata_error_allows_entry_type_fallback($error)) {
+                    continue;
+                }
+                throw $error;
             }
-            throw $error;
         }
+    }
+
+    if (is_array($lastZero)) {
+        return $lastZero;
     }
 
     throw $lastError ?? new RuntimeException(CONSUS_DIMENSION_ENTITY . ' voor ' . $company . ' mislukt.');
@@ -1587,17 +1652,57 @@ function consus_vendor_name_from_item(array $row): string
  * @param array<string, array<string, mixed>> $items keyed by company_key|item_no
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
  */
+/**
+ * @param array<int, string> $names
+ */
+function consus_stock_company_name(array $row): string
+{
+    $primary = consus_scalar_string($row['Company_Name'] ?? '');
+    if ($primary !== '') {
+        return $primary;
+    }
+
+    return consus_first_filled_string($row, [
+        'CompanyName',
+        'Bedrijfsnaam',
+        'Bedrijf',
+        'Firma',
+        'Company',
+    ]);
+}
+
 function consus_stock_company_key(array $row, string $sourceCompany): string
 {
-    $companyName = consus_scalar_string($row['Company_Name'] ?? '');
-    if ($companyName === '') {
-        return consus_company_key_for_name($sourceCompany);
+    $sourceKey = consus_company_key_for_name($sourceCompany);
+    $primary = consus_scalar_string($row['Company_Name'] ?? '');
+    $alternate = consus_first_filled_string($row, [
+        'CompanyName',
+        'Bedrijfsnaam',
+        'Bedrijf',
+        'Firma',
+        'Company',
+    ]);
+    if ($primary === '') {
+        if ($alternate === '') {
+            return $sourceKey;
+        }
+
+        return consus_company_key_for_name($alternate);
     }
 
     // Een gevulde Company_Name die we niet kennen hoort niet bij het bedrijf
     // van de query. Anders landt KVT-voorraad op HVT zodra de pagina alleen
-    // het label "KVT" meestuurt.
-    return consus_company_key_for_name($companyName);
+    // het label "KVT" meestuurt. Wijst Company_Name alleen naar de query-bron
+    // en een ander veld naar KVT of HVT, dan hoort de regel bij dat veld.
+    $primaryKey = consus_company_key_for_name($primary);
+    if ($alternate !== '') {
+        $alternateKey = consus_company_key_for_name($alternate);
+        if ($alternateKey !== '' && $primaryKey === $sourceKey && $alternateKey !== $primaryKey) {
+            return $alternateKey;
+        }
+    }
+
+    return $primaryKey;
 }
 
 function consus_apply_stock_row(array &$items, array $row, string $sourceCompany): void
@@ -1607,7 +1712,7 @@ function consus_apply_stock_row(array &$items, array $row, string $sourceCompany
         return;
     }
 
-    $companyName = consus_scalar_string($row['Company_Name'] ?? '');
+    $companyName = consus_stock_company_name($row);
     $companyKey = consus_stock_company_key($row, $sourceCompany);
     if ($companyKey === '') {
         return;
@@ -1632,8 +1737,13 @@ function consus_apply_stock_row(array &$items, array $row, string $sourceCompany
     // twee keer, eerst met nullen. De eerste niet-nul per veld wint; een
     // nulregel blokkeert de echte voorraad niet en een tweede niet-nul telt
     // niet nog eens op.
+    // Inventory telt als het veld er is, ook als het 0 is. Een tweede kolom
+    // alleen gebruiken als Inventory ontbreekt, anders telt dezelfde
+    // hoeveelheid op KVT én op HVT.
     $incoming = [
-        'inventory' => consus_scalar_float($row['Inventory'] ?? 0),
+        'inventory' => array_key_exists('Inventory', $row)
+            ? consus_scalar_float($row['Inventory'])
+            : consus_first_nonzero_float($row, ['Voorraad', 'Quantity_on_Hand', 'Qty_on_Hand', 'In_voorraad']),
         'safety_stock' => consus_first_nonzero_float($row, ['Safety_Stock_Quantity', 'Veiligheidsvoorraad', 'SafetyStockQuantity']),
         'reorder_point' => consus_first_nonzero_float($row, ['Reorder_Point', 'Bestelpunt', 'ReorderPoint']),
     ];
@@ -1758,9 +1868,14 @@ function consus_planning_gap_warnings(array $items, string $companyKey): array
     $reorder = 0.0;
     $withCost = 0;
     $locatedInventory = 0;
+    $companyItems = 0;
     foreach ($items as $item) {
         if (!is_array($item) || (string) ($item['company_key'] ?? '') !== $companyKey) {
             continue;
+        }
+        $companyItems++;
+        if (trim((string) ($item['cost_center'] ?? '')) !== '') {
+            $withCost++;
         }
         if (abs((float) ($item['inventory'] ?? 0)) < 0.0000001) {
             continue;
@@ -1768,9 +1883,6 @@ function consus_planning_gap_warnings(array $items, string $companyKey): array
         $withInventory++;
         $safety += abs((float) ($item['safety_stock'] ?? 0));
         $reorder += abs((float) ($item['reorder_point'] ?? 0));
-        if (trim((string) ($item['cost_center'] ?? '')) !== '') {
-            $withCost++;
-        }
         $locations = is_array($item['by_location'] ?? null) ? $item['by_location'] : [];
         foreach ($locations as $code => $metrics) {
             if (!is_array($metrics) || trim((string) $code) === '') {
@@ -1781,21 +1893,23 @@ function consus_planning_gap_warnings(array $items, string $companyKey): array
             }
         }
     }
-    if ($withInventory === 0) {
+    if ($companyItems === 0) {
         return [];
     }
 
     $warnings = [];
-    if ($safety < 0.0000001) {
+    if ($withInventory > 0 && $safety < 0.0000001) {
         $warnings[] = 'Voorraad is gevuld, maar veiligheidsvoorraad blijft 0. VoorraadPerBedrijf en de artikelkaart gaven geen Safety_Stock_Quantity.';
     }
-    if ($reorder < 0.0000001) {
+    if ($withInventory > 0 && $reorder < 0.0000001) {
         $warnings[] = 'Bestelpunt blijft 0. Noch Reorder_Point noch Bestelpunt was gevuld op voorraad of de artikelkaart.';
     }
     if ($withCost === 0) {
-        $warnings[] = 'Geen afdeling op de artikelen. COST_CENTER, globale dimensie 1 en dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ' leverden niets.';
+        $warnings[] = 'Geen afdeling op de artikelen. COST_CENTER en Global_Dimension_1_Code op de artikelkaart zijn leeg of ontbreken, en DefaultDimensions (dimensie '
+            . implode(', ', consus_cost_center_dimension_codes())
+            . ') leverde geen waarde.';
     }
-    if ($locatedInventory === 0) {
+    if ($withInventory > 0 && $locatedInventory === 0) {
         $warnings[] = 'Voorraad staat zonder locatie. Location_Code ontbreekt op VoorraadPerBedrijf; de regels vallen onder (zonder locatie).';
     }
 
@@ -1857,7 +1971,7 @@ function consus_apply_dimension_row(array &$items, array $row, string $companyKe
     }
 
     $dimensionCode = consus_scalar_string($row['Dimension_Code'] ?? '');
-    if ($dimensionCode !== '' && strcasecmp($dimensionCode, CONSUS_COST_CENTER_DIMENSION_CODE) !== 0) {
+    if (!consus_is_cost_center_dimension_code($dimensionCode)) {
         return;
     }
 
@@ -3556,6 +3670,420 @@ function consus_overlay_stock_on_articles(
     }
 }
 
+function consus_article_has_consumption(array $article): bool
+{
+    $consumption = $article['consumption'] ?? null;
+    if (!is_array($consumption)) {
+        return false;
+    }
+    foreach (['m', 'q', 'y'] as $period) {
+        if (abs((float) ($consumption[$period] ?? 0)) >= 0.0000001) {
+            return true;
+        }
+    }
+    foreach (['months', 'days'] as $bucket) {
+        $values = $consumption[$bucket] ?? null;
+        if (!is_array($values)) {
+            continue;
+        }
+        foreach ($values as $qty) {
+            if (abs((float) $qty) >= 0.0000001) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+function consus_published_record_has_item(array $record, string $itemNo, string $itemField): bool
+{
+    if ($itemField === 'item_no') {
+        return (string) ($record['item_no'] ?? '') === $itemNo;
+    }
+    $nos = $record['item_nos'] ?? null;
+
+    return is_array($nos) && (isset($nos[$itemNo]) || in_array($itemNo, $nos, true));
+}
+
+/**
+ * @param array<int, array<string, mixed>> $records
+ */
+function consus_find_published_index(array $records, string $companyKey, string $itemNo, string $location, string $itemField): ?int
+{
+    $exact = null;
+    $fallback = null;
+    $locationCode = strtoupper(trim($location));
+    foreach ($records as $index => $record) {
+        if (!is_array($record) || (string) ($record['company_key'] ?? '') !== $companyKey) {
+            continue;
+        }
+        if (!consus_published_record_has_item($record, $itemNo, $itemField)) {
+            continue;
+        }
+        if (strtoupper(trim((string) ($record['location'] ?? ''))) === $locationCode) {
+            $exact = $index;
+            break;
+        }
+        if ($fallback === null) {
+            $fallback = $index;
+        }
+    }
+
+    return $exact ?? $fallback;
+}
+
+/**
+ * Alleen de hoeveelheid. Veiligheidsvoorraad en bestelpunt blijven staan.
+ *
+ * @param array<int, array<string, mixed>> $rows
+ * @param array<int, array<string, mixed>> $articles
+ * @param array<string, mixed> $hint
+ */
+function consus_adjust_published_inventory(
+    array &$rows,
+    array &$articles,
+    string $companyKey,
+    string $itemNo,
+    string $location,
+    float $delta,
+    array $hint
+): bool {
+    if ($companyKey === '' || $itemNo === '' || abs($delta) < 0.0000001) {
+        return false;
+    }
+    $locationCode = strtoupper(trim($location));
+    $articleIndex = consus_find_published_index($articles, $companyKey, $itemNo, $locationCode, 'item_no');
+    $rowIndex = consus_find_published_index($rows, $companyKey, $itemNo, $locationCode, 'item_nos');
+    if ($delta < 0 && ($articleIndex === null || $rowIndex === null)) {
+        return false;
+    }
+    if ($articleIndex === null) {
+        $articles[] = [
+            'company_key' => $companyKey,
+            'company_name' => consus_company_display_name($companyKey, (string) ($hint['company_name'] ?? '')),
+            'item_no' => $itemNo,
+            'description' => (string) ($hint['description'] ?? ''),
+            'vendor_no' => (string) ($hint['vendor_no'] ?? ''),
+            'vendor_name' => (string) ($hint['vendor_name'] ?? ''),
+            'cost_center' => (string) ($hint['cost_center'] ?? ''),
+            'location' => $locationCode,
+            'inventory' => $delta,
+            'safety_stock' => 0.0,
+            'reorder_point' => 0.0,
+            'consumption' => consus_empty_consumption_qty(),
+        ];
+    } else {
+        $next = (float) ($articles[$articleIndex]['inventory'] ?? 0) + $delta;
+        $articles[$articleIndex]['inventory'] = abs($next) < 0.0000001 ? 0.0 : $next;
+    }
+
+    if ($rowIndex === null) {
+        $rows[] = [
+            'company_key' => $companyKey,
+            'company_name' => consus_company_display_name($companyKey, (string) ($hint['company_name'] ?? '')),
+            'vendor_no' => (string) ($hint['vendor_no'] ?? ''),
+            'vendor_name' => (string) ($hint['vendor_name'] ?? ''),
+            'cost_center' => (string) ($hint['cost_center'] ?? ''),
+            'location' => $locationCode,
+            'inventory' => $delta,
+            'safety_stock' => 0.0,
+            'reorder_point' => 0.0,
+            'item_count' => 1,
+            'item_nos' => [$itemNo => true],
+            'sales' => consus_empty_bucket_map(),
+            'consumption' => consus_empty_bucket_map(),
+        ];
+
+        return true;
+    }
+    $next = (float) ($rows[$rowIndex]['inventory'] ?? 0) + $delta;
+    $rows[$rowIndex]['inventory'] = abs($next) < 0.0000001 ? 0.0 : $next;
+    if ($delta > 0) {
+        $nos = $rows[$rowIndex]['item_nos'] ?? [];
+        if (!is_array($nos)) {
+            $nos = [];
+        }
+        if (!isset($nos[$itemNo]) && !in_array($itemNo, $nos, true)) {
+            $nos[$itemNo] = true;
+            $rows[$rowIndex]['item_nos'] = $nos;
+            $rows[$rowIndex]['item_count'] = count($nos);
+        }
+    }
+
+    return true;
+}
+
+function consus_drop_empty_articles(array $articles): array
+{
+    $kept = [];
+    foreach ($articles as $article) {
+        if (!is_array($article)) {
+            continue;
+        }
+        if (
+            abs((float) ($article['inventory'] ?? 0)) < 0.0000001
+            && abs((float) ($article['safety_stock'] ?? 0)) < 0.0000001
+            && abs((float) ($article['reorder_point'] ?? 0)) < 0.0000001
+            && !consus_article_has_consumption($article)
+        ) {
+            continue;
+        }
+        $kept[] = $article;
+    }
+
+    return $kept;
+}
+
+/**
+ * Voorraad die op het andere bedrijf is blijven staan, terwijl dit bedrijf
+ * hetzelfde artikel verbruikt of als veiligheidsvoorraad of bestelpunt heeft
+ * en zelf geen hoeveelheid heeft. Alleen verplaatsen als de andere kant geen
+ * verbruik heeft, zodat echte HVT-voorraad blijft liggen. Het totaal over
+ * alle bedrijven blijft gelijk.
+ *
+ * @param array<string, array<int, array<string, mixed>>> $rowsByCompany
+ * @param array<string, array<int, array<string, mixed>>> $articlesByCompany
+ * @return array<int, array{company:string,warning:string}>
+ */
+function consus_rehome_stranded_inventory(array &$rowsByCompany, array &$articlesByCompany): array
+{
+    $rows = [];
+    $articles = [];
+    $companies = [];
+    foreach ($rowsByCompany as $key => $companyRows) {
+        $companies[(string) $key] = true;
+        if (!is_array($companyRows)) {
+            continue;
+        }
+        foreach ($companyRows as $row) {
+            if (is_array($row)) {
+                $rows[] = $row;
+            }
+        }
+    }
+    foreach ($articlesByCompany as $key => $companyArticles) {
+        $companies[(string) $key] = true;
+        if (!is_array($companyArticles)) {
+            continue;
+        }
+        foreach ($companyArticles as $article) {
+            if (is_array($article)) {
+                $articles[] = $article;
+            }
+        }
+    }
+
+    $byItem = [];
+    foreach ($articles as $article) {
+        $itemNo = trim((string) ($article['item_no'] ?? ''));
+        $companyKey = (string) ($article['company_key'] ?? '');
+        if ($itemNo === '' || !isset(CONSUS_COMPANIES[$companyKey])) {
+            continue;
+        }
+        if (!isset($byItem[$itemNo][$companyKey])) {
+            $byItem[$itemNo][$companyKey] = [
+                'inventory' => 0.0,
+                'safety' => 0.0,
+                'reorder' => 0.0,
+                'consumption' => false,
+            ];
+        }
+        $byItem[$itemNo][$companyKey]['inventory'] += (float) ($article['inventory'] ?? 0);
+        $byItem[$itemNo][$companyKey]['safety'] += abs((float) ($article['safety_stock'] ?? 0));
+        $byItem[$itemNo][$companyKey]['reorder'] += abs((float) ($article['reorder_point'] ?? 0));
+        if (consus_article_has_consumption($article)) {
+            $byItem[$itemNo][$companyKey]['consumption'] = true;
+        }
+    }
+
+    $moved = [];
+    $blocked = [];
+    $shared = [];
+    foreach ($byItem as $itemNo => $stats) {
+        $donors = [];
+        $blockedDonors = [];
+        $recipients = [];
+        foreach ($stats as $companyKey => $stat) {
+            if ((float) $stat['inventory'] > 0.0000001) {
+                if (!empty($stat['consumption'])) {
+                    $blockedDonors[] = (string) $companyKey;
+                } else {
+                    $donors[] = (string) $companyKey;
+                }
+                continue;
+            }
+            if (
+                (float) $stat['safety'] >= 0.0000001
+                || (float) $stat['reorder'] >= 0.0000001
+                || !empty($stat['consumption'])
+            ) {
+                $recipients[] = (string) $companyKey;
+            }
+        }
+        if (count($stats) > 1) {
+            foreach (array_keys($stats) as $companyKey) {
+                $shared[(string) $companyKey] = true;
+            }
+        }
+        if ($recipients === []) {
+            continue;
+        }
+        if (count($donors) !== 1 || $blockedDonors !== []) {
+            if ($blockedDonors !== [] && $donors === []) {
+                foreach ($recipients as $recipient) {
+                    $blocked[$recipient] = true;
+                }
+            }
+            continue;
+        }
+        if (count($recipients) !== 1) {
+            continue;
+        }
+        $donor = $donors[0];
+        $recipient = $recipients[0];
+        $moves = [];
+        foreach ($articles as $article) {
+            if ((string) ($article['company_key'] ?? '') !== $donor || (string) ($article['item_no'] ?? '') !== (string) $itemNo) {
+                continue;
+            }
+            $qty = (float) ($article['inventory'] ?? 0);
+            if ($qty <= 0.0000001) {
+                continue;
+            }
+            $moves[] = [
+                'location' => (string) ($article['location'] ?? ''),
+                'qty' => $qty,
+            ];
+        }
+        $movedQty = 0.0;
+        foreach ($moves as $move) {
+            $hint = [];
+            foreach ($articles as $article) {
+                if ((string) ($article['company_key'] ?? '') === $recipient && (string) ($article['item_no'] ?? '') === (string) $itemNo) {
+                    $hint = $article;
+                    break;
+                }
+            }
+            $location = (string) $move['location'];
+            $qty = (float) $move['qty'];
+            if (!consus_adjust_published_inventory($rows, $articles, $recipient, (string) $itemNo, $location, $qty, $hint)) {
+                continue;
+            }
+            if (!consus_adjust_published_inventory($rows, $articles, $donor, (string) $itemNo, $location, -$qty, [])) {
+                consus_adjust_published_inventory($rows, $articles, $recipient, (string) $itemNo, $location, -$qty, $hint);
+                continue;
+            }
+            $movedQty += $qty;
+        }
+        if ($movedQty > 0.0000001) {
+            $moved[$recipient] = ($moved[$recipient] ?? 0.0) + $movedQty;
+        }
+    }
+
+    $articles = consus_drop_empty_articles($articles);
+    $rebuiltRows = [];
+    $rebuiltArticles = [];
+    foreach (array_keys($companies) as $key) {
+        $rebuiltRows[$key] = [];
+        $rebuiltArticles[$key] = [];
+    }
+    foreach ($rows as $row) {
+        $key = (string) ($row['company_key'] ?? '');
+        if (!isset($rebuiltRows[$key])) {
+            $rebuiltRows[$key] = [];
+        }
+        $rebuiltRows[$key][] = $row;
+    }
+    foreach ($articles as $article) {
+        $key = (string) ($article['company_key'] ?? '');
+        if (!isset($rebuiltArticles[$key])) {
+            $rebuiltArticles[$key] = [];
+        }
+        $rebuiltArticles[$key][] = $article;
+    }
+    foreach (array_keys($companies) as $key) {
+        if (array_key_exists($key, $rowsByCompany)) {
+            $rowsByCompany[$key] = $rebuiltRows[$key] ?? [];
+        }
+        if (array_key_exists($key, $articlesByCompany)) {
+            $articlesByCompany[$key] = $rebuiltArticles[$key] ?? [];
+        }
+    }
+
+    $inventoryByCompany = [];
+    foreach ($rowsByCompany as $key => $companyRows) {
+        $total = 0.0;
+        if (is_array($companyRows)) {
+            foreach ($companyRows as $row) {
+                if (is_array($row)) {
+                    $total += (float) ($row['inventory'] ?? 0);
+                }
+            }
+        }
+        $inventoryByCompany[(string) $key] = $total;
+    }
+    $activeCompanies = [];
+    foreach ($articlesByCompany as $key => $companyArticles) {
+        if (!is_array($companyArticles)) {
+            continue;
+        }
+        foreach ($companyArticles as $article) {
+            if (!is_array($article)) {
+                continue;
+            }
+            if (
+                abs((float) ($article['safety_stock'] ?? 0)) >= 0.0000001
+                || abs((float) ($article['reorder_point'] ?? 0)) >= 0.0000001
+                || consus_article_has_consumption($article)
+                || abs((float) ($article['inventory'] ?? 0)) >= 0.0000001
+            ) {
+                $activeCompanies[(string) $key] = true;
+                break;
+            }
+        }
+    }
+
+    $warnings = [];
+    foreach (array_keys(CONSUS_COMPANIES) as $companyKey) {
+        $movedQty = (float) ($moved[$companyKey] ?? 0);
+        if ($movedQty > 0.0000001) {
+            $warnings[] = [
+                'company' => consus_company_display_name($companyKey),
+                'warning' => 'Voorraad van ' . $movedQty . ' stond op een ander bedrijf en is verplaatst naar dit bedrijf, omdat dit bedrijf het artikel verbruikt of als veiligheidsvoorraad of bestelpunt heeft en de andere kant geen verbruik had. Het totaal over alle bedrijven blijft gelijk.',
+            ];
+            continue;
+        }
+        if (($inventoryByCompany[$companyKey] ?? 0) > 0.0000001 || empty($activeCompanies[$companyKey])) {
+            continue;
+        }
+        $elsewhere = 0.0;
+        foreach ($inventoryByCompany as $otherKey => $total) {
+            if ($otherKey !== $companyKey) {
+                $elsewhere += $total;
+            }
+        }
+        if ($elsewhere <= 0.0000001) {
+            continue;
+        }
+        if (!empty($blocked[$companyKey])) {
+            $warnings[] = [
+                'company' => consus_company_display_name($companyKey),
+                'warning' => 'Totale voorraad blijft 0. Dezelfde artikelnummers hebben op het andere bedrijf ook verbruik, dus die voorraad is niet verplaatst.',
+            ];
+            continue;
+        }
+        if (empty($shared[$companyKey])) {
+            $warnings[] = [
+                'company' => consus_company_display_name($companyKey),
+                'warning' => 'Totale voorraad blijft 0. De aantallen staan op een ander bedrijf, maar geen enkel artikelnummer komt op beide bedrijven voor, dus er is niets verplaatst.',
+            ];
+        }
+    }
+
+    return $warnings;
+}
+
 /**
  * @param array<string, mixed> $context
  */
@@ -4494,7 +5022,16 @@ function consus_collect_company(
                 }
                 $dimensionResult = is_array($dimensionOutcome['result'] ?? null) ? $dimensionOutcome['result'] : [];
                 if (!empty($dimensionResult['filter_fallback'])) {
-                    $addWarning(CONSUS_DIMENSION_ENTITY . ': Table_ID werd geweigerd. Kostenplaats is alsnog opgehaald met alleen dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . '.');
+                    $usedDimension = (string) ($dimensionResult['dimension_code'] ?? CONSUS_COST_CENTER_DIMENSION_CODE);
+                    $addWarning(CONSUS_DIMENSION_ENTITY . ': Table_ID werd geweigerd. Kostenplaats is alsnog opgehaald met alleen dimensie ' . $usedDimension . '.');
+                }
+                $usedDimension = (string) ($dimensionResult['dimension_code'] ?? '');
+                if (
+                    $usedDimension !== ''
+                    && strcasecmp($usedDimension, CONSUS_COST_CENTER_DIMENSION_CODE) !== 0
+                    && (int) ($dimensionResult['count'] ?? 0) > 0
+                ) {
+                    $addWarning('Kostenplaats komt van dimensie ' . $usedDimension . '. Dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ' leverde geen regels.');
                 }
                 $dimensionMissing = [];
                 foreach ($dimensionResult['missing_optional'] ?? [] as $field) {
@@ -5207,6 +5744,10 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         ];
     }
     unset($foreignSpills, $staleKeys);
+
+    foreach (consus_rehome_stranded_inventory($freshRows, $freshArticles) as $rehomeWarning) {
+        $warnings[] = $rehomeWarning;
+    }
 
     $snapshot = $publish(false);
     unset($freshRows, $previousRows, $freshArticles, $previousArticles);

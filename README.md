@@ -33,7 +33,7 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   filtert PHP als voorheen. Elke query gebruikt `$top` 20000; een geweigerde
   paginagrootte valt terug op de BC-standaard. Bedrijven blijven na elkaar, niet
   parallel.
-- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 10, of
+- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 11, of
   `full`) haalt nightly per kalendermaand het hele venster. Een oudere
   snapshotversie is ook koud, net als een bedrijf waarvan elke rij nog een
   lege leverancier heeft: anders blijft de historie op die lege groep staan.
@@ -88,21 +88,36 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   wint; een eerdere nulregel blokkeert die waarde niet en een tweede niet-nul
   telt niet dubbel. `Company_Name` mag de lange bedrijfsnaam of het label
   `KVT` / `HVT` zijn, ook als `K.V.T.` of `KVT B.V.`. `KVT Gas` blijft erbuiten.
-  Een gevulde naam die bij het andere bedrijf hoort wordt niet aan de
-  query-bron gehangen; die regel gaat mee in de checkpoint en bij een
-  hervatting opnieuw naar dat bedrijf. Een checkpoint met alleen nullen wordt
-  opnieuw opgehaald. Levert de eigen query geen aantallen, dan gebruikt
-  nightly die regels als ze in de query van het andere bedrijf stonden.
+  Een lege `Company_Name` kijkt nog naar `Bedrijfsnaam` of `Company`. Wijst
+  `Company_Name` alleen naar het bedrijf van de query en een ander veld naar
+  KVT of HVT, dan wint dat andere veld. Een gevulde naam die bij het andere
+  bedrijf hoort wordt niet aan de query-bron gehangen; die regel gaat mee in
+  de checkpoint en bij een hervatting opnieuw naar dat bedrijf. Een checkpoint
+  met alleen nullen wordt opnieuw opgehaald. Levert de eigen query geen
+  aantallen, dan gebruikt nightly die regels als ze in de query van het
+  andere bedrijf stonden. Blijft de hoeveelheid daarna toch op het andere
+  bedrijf staan, terwijl dit bedrijf hetzelfde artikelnummer verbruikt of als
+  veiligheidsvoorraad of bestelpunt heeft en de andere kant geen verbruik
+  heeft, dan verplaatst nightly alleen die hoeveelheid. Het totaal over alle
+  bedrijven blijft gelijk; veiligheidsvoorraad en bestelpunt worden niet
+  meegenomen. Komen de artikelnummers niet overeen, of heeft de andere kant
+  zelf verbruik, dan blijft de voorraad liggen en zet nightly een opmerking.
+  Voorraad leest `Inventory`. Ontbreekt dat veld, dan `Voorraad` of
+  `Quantity_on_Hand`. Een aanwezige 0 blijft 0.
   Leverancier en afdeling van die voorraad komen op de bestaande regel als
   die nog leeg was. Bestelpunt leest `Reorder_Point`, en anders `Bestelpunt`.
   Veiligheidsvoorraad en bestelpunt mogen op de artikelkaart staan als
   VoorraadPerBedrijf alleen de voorraad vult. Die waarde gaat één keer naar
-  de locatie die al voorraad heeft. Blijft een van die twee 0, of ontbreekt
-  de afdeling of de locatie terwijl er wel voorraad is, dan zet nightly een
-  opmerking in de snapshot. De pagina toont die onder de kop “De nachtrun is
-  afgerond, met opmerkingen.” Kostenplaats komt van `COST_CENTER` of globale
-  dimensie 1 op de artikelkaart, en anders van DefaultDimensions dimensie 15.
-  Weigert BC het tabelfilter, dan blijft het filter op dimensie 15 staan.
+  de locatie die al voorraad heeft. Blijft een van die twee 0 terwijl er wel
+  voorraad is, of ontbreekt de locatie terwijl er wel voorraad is, dan zet
+  nightly een opmerking in de snapshot. Ontbreekt de afdeling, ook als de
+  voorraad nog 0 is, dan eveneens. De pagina toont die onder de kop “De
+  nachtrun is afgerond, met opmerkingen.” Kostenplaats komt van `COST_CENTER`
+  of globale dimensie 1 op de artikelkaart, en anders van DefaultDimensions
+  dimensie 15. Levert dimensie 15 niets, dan volgen `KOSTENPLAATS`,
+  `AFDELING` en `CC`, nog steeds gefilterd. Weigert BC het tabelfilter, dan
+  blijft het filter op dezelfde dimensiecode staan. Globale dimensie 2 wordt
+  niet gelezen.
   Een geweigerd veld op AppItemCard (bijvoorbeeld
   omschrijving of `LVS_Vendor_Name`) wordt uit `$select` gehaald; nummer en
   leverancier blijven. Een lege tussenstap voor voorraad of artikelen wordt

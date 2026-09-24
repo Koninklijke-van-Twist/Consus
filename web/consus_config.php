@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 10;
+const CONSUS_SNAPSHOT_VERSION = 11;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
@@ -119,6 +119,15 @@ const CONSUS_STOCK_OPTIONAL_FIELDS = [
     'ReorderPoint',
     'Veiligheidsvoorraad',
     'SafetyStockQuantity',
+    'CompanyName',
+    'Bedrijfsnaam',
+    'Bedrijf',
+    'Firma',
+    'Company',
+    'Voorraad',
+    'Quantity_on_Hand',
+    'Qty_on_Hand',
+    'In_voorraad',
 ];
 
 const CONSUS_ITEM_ENTITY = 'AppItemCard';
@@ -171,9 +180,11 @@ const CONSUS_LEDGER_OPTIONAL_FIELDS = [
 
 /**
  * Kostenplaats voor de latere afdelingsdropdown.
- * Beste gok: dimensiecode 15 op artikel (tabel 27). De dimensiewaarde is de
- * afdeling en wordt niet gefilterd — Perkins loopt via de leverancier.
- * Een COST_CENTER-veld op AppItemCard wint van deze dimensie als het gevuld is.
+ * Eerst dimensiecode 15 op artikel (tabel 27). Levert die niets, dan
+ * KOSTENPLAATS, AFDELING en CC — nog steeds gefilterd, nooit de hele pagina.
+ * De dimensiewaarde is de afdeling en wordt niet gefilterd. Een COST_CENTER-
+ * veld op AppItemCard wint van deze dimensie als het gevuld is. Globale
+ * dimensie 2 wordt niet gebruikt.
  */
 const CONSUS_DIMENSION_ENTITY = 'DefaultDimensions';
 const CONSUS_DIMENSION_FIELDS = [
