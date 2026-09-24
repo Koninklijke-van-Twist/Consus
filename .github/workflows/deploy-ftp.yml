@@ -53,10 +53,17 @@ jobs:
             --exclude-glob analytics/*.sqlite \
             --exclude-glob analytics/*.sqlite-* \
             --exclude-glob auth.php \
+            --exclude-glob data/*.json \
+            --exclude-glob data/*.json.tmp.* \
+            --exclude-glob data/*.lock \
+            --exclude-glob data/*.checkpoint \
+            --exclude-glob data/*.checkpoint/** \
             ./web .
 
           set cmd:fail-exit false
           chmod 777 analytics
+          chmod 777 data
+          chmod 777 cache
 
           bye
           EOF
