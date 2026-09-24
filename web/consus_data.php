@@ -234,37 +234,35 @@ function consus_procurement_bucket_from_row(array $row): string
     );
 }
 
-/**
- * @param array<int, string> $entryTypes
- */
-function consus_entry_type_filter(array $entryTypes): string
+function consus_entry_type_filter(string $entryType): string
 {
-    $parts = [];
-    foreach ($entryTypes as $entryType) {
-        $entryType = trim((string) $entryType);
-        if ($entryType === '') {
-            continue;
-        }
-        $parts[] = "Entry_Type eq '" . consus_escape_odata_string($entryType) . "'";
-    }
-
-    if ($parts === []) {
+    $entryType = trim($entryType);
+    if ($entryType === '') {
         throw new InvalidArgumentException('Geen Entry_Type geconfigureerd.');
     }
 
-    if (count($parts) === 1) {
-        return $parts[0];
-    }
-
-    return '(' . implode(' or ', $parts) . ')';
+    return "Entry_Type eq '" . consus_escape_odata_string($entryType) . "'";
 }
 
 /**
+ * Eén Entry_Type per query. BC weigert OR over verschillende velden (HTTP 501).
+ *
  * @param array<int, string> $entryTypes
  * @return array<string, string>
  */
 function consus_ledger_query(array $entryTypes, string $fromDate): array
 {
+    $chosen = [];
+    foreach ($entryTypes as $entryType) {
+        $entryType = trim((string) $entryType);
+        if ($entryType !== '') {
+            $chosen[] = $entryType;
+        }
+    }
+    if (count($chosen) !== 1) {
+        throw new InvalidArgumentException('Artikelposten: één Entry_Type per query. OR in $filter wordt door BC geweigerd.');
+    }
+
     $fromDate = consus_parse_date($fromDate);
     if ($fromDate === '') {
         throw new InvalidArgumentException('Ongeldige vanaf-datum voor artikelposten.');
@@ -272,43 +270,63 @@ function consus_ledger_query(array $entryTypes, string $fromDate): array
 
     return consus_entity_query(
         CONSUS_LEDGER_FIELDS,
-        consus_entry_type_filter($entryTypes) . ' and Posting_Date ge ' . $fromDate
+        consus_entry_type_filter($chosen[0]) . ' and Posting_Date ge ' . $fromDate
     );
 }
 
-function consus_wo_entry_filter(): string
+/**
+ * Aparte filters, in de volgorde waarin nightly ze probeert.
+ *
+ * @param array<int, string> $entryTypes
+ * @return array<int, array<string, string>>
+ */
+function consus_ledger_filters(array $entryTypes, string $fromDate): array
 {
-    $primaryType = consus_escape_odata_string(CONSUS_WO_PRIMARY_ENTRY_TYPE);
-    $prefix = consus_escape_odata_string(CONSUS_WO_DOCUMENT_PREFIX);
-    $parts = [
-        "(Entry_Type eq '" . $primaryType . "' and startswith(Document_No,'" . $prefix . "'))",
-    ];
-    foreach (CONSUS_WO_ALSO_ENTRY_TYPES as $entryType) {
+    $queries = [];
+    foreach ($entryTypes as $entryType) {
         $entryType = trim((string) $entryType);
         if ($entryType === '') {
             continue;
         }
-        $parts[] = "Entry_Type eq '" . consus_escape_odata_string($entryType) . "'";
+        $queries[] = consus_ledger_query([$entryType], $fromDate);
+    }
+    if ($queries === []) {
+        throw new InvalidArgumentException('Geen Entry_Type geconfigureerd.');
     }
 
-    if (count($parts) === 1) {
-        return $parts[0];
-    }
-
-    return '(' . implode(' or ', $parts) . ')';
+    return $queries;
 }
 
-function consus_wo_ledger_query(string $fromDate): array
+/**
+ * Negatieve correctie (documentprefix WO, client-side) en assemblageverbruik.
+ * Kale consumption zit in geen van beide lijsten.
+ *
+ * @return array<int, array{entry_types:array<int, string>,document_prefix:string}>
+ */
+function consus_wo_ledger_parts(): array
 {
-    $fromDate = consus_parse_date($fromDate);
-    if ($fromDate === '') {
-        throw new InvalidArgumentException('Ongeldige vanaf-datum voor werkorderverbruik.');
+    return [
+        [
+            'entry_types' => CONSUS_WO_PRIMARY_ENTRY_TYPES,
+            'document_prefix' => CONSUS_WO_DOCUMENT_PREFIX,
+        ],
+        [
+            'entry_types' => CONSUS_WO_ALSO_ENTRY_TYPES,
+            'document_prefix' => '',
+        ],
+    ];
+}
+
+function consus_document_no_has_prefix(array $row, string $prefix): bool
+{
+    $prefix = trim($prefix);
+    if ($prefix === '') {
+        return true;
     }
 
-    return consus_entity_query(
-        CONSUS_LEDGER_FIELDS,
-        consus_wo_entry_filter() . ' and Posting_Date ge ' . $fromDate
-    );
+    $documentNo = consus_scalar_string($row['Document_No'] ?? '');
+
+    return $documentNo !== '' && strncasecmp($documentNo, $prefix, strlen($prefix)) === 0;
 }
 
 /**
@@ -1200,6 +1218,66 @@ function consus_each_entity_rows(
     );
 }
 
+function consus_odata_error_allows_entry_type_fallback(Throwable $error): bool
+{
+    $message = $error->getMessage();
+    if (preg_match('/HTTP (400|501) from OData/', $message) === 1) {
+        return true;
+    }
+
+    $lower = strtolower($message);
+
+    return str_contains($message, 'MethodNotImplemented')
+        || str_contains($lower, 'filterexpressie')
+        || str_contains($lower, 'filter expression')
+        || str_contains($lower, 'not supported')
+        || str_contains($lower, 'niet ondersteund');
+}
+
+/**
+ * Probeert Entry_Type-bijschriften na elkaar. Het eerste verzoek dat BC accepteert wint.
+ * Een geweigerd filter (verkeerd bijschrift of niet-ondersteunde expressie) probeert het volgende.
+ *
+ * @param array<int, string> $entryTypes
+ * @return array{count:int,optional_fields:bool,missing_optional:array<int, string>}
+ */
+function consus_each_ledger_entry_type(
+    string $company,
+    array $entryTypes,
+    string $fromDate,
+    callable $onRow
+): array {
+    $lastError = null;
+    foreach ($entryTypes as $entryType) {
+        $entryType = trim((string) $entryType);
+        if ($entryType === '') {
+            continue;
+        }
+        $query = consus_ledger_query([$entryType], $fromDate);
+        try {
+            return consus_each_entity_rows(
+                $company,
+                CONSUS_LEDGER_ENTITY,
+                CONSUS_LEDGER_FIELDS,
+                CONSUS_LEDGER_OPTIONAL_FIELDS,
+                (string) ($query['$filter'] ?? ''),
+                $onRow
+            );
+        } catch (Throwable $error) {
+            $lastError = $error;
+            if (!consus_odata_error_allows_entry_type_fallback($error)) {
+                throw $error;
+            }
+        }
+    }
+
+    if ($lastError !== null) {
+        throw $lastError;
+    }
+
+    throw new InvalidArgumentException('Geen Entry_Type geconfigureerd.');
+}
+
 /**
  * @param array<string, array<string, mixed>> $items
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
@@ -1229,13 +1307,10 @@ function consus_collect_company(string $company, string $companyKey, array &$ite
         $warnings[] = CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $stockResult['missing_optional']) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.';
     }
 
-    $salesQuery = consus_ledger_query(CONSUS_SALES_ENTRY_TYPES, $windows['history_start']);
-    $salesResult = consus_each_entity_rows(
+    $salesResult = consus_each_ledger_entry_type(
         $company,
-        CONSUS_LEDGER_ENTITY,
-        CONSUS_LEDGER_FIELDS,
-        CONSUS_LEDGER_OPTIONAL_FIELDS,
-        (string) ($salesQuery['$filter'] ?? ''),
+        CONSUS_SALES_ENTRY_TYPES,
+        $windows['history_start'],
         static function (array $row) use (&$items, $companyKey, $windows): void {
             consus_apply_ledger_row($items, $row, $companyKey, 'sales', $windows);
         }
@@ -1244,17 +1319,20 @@ function consus_collect_company(string $company, string $companyKey, array &$ite
         $warnings[] = 'Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $salesResult['missing_optional']) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.';
     }
 
-    $consumptionQuery = consus_wo_ledger_query($windows['history_start']);
-    consus_each_entity_rows(
-        $company,
-        CONSUS_LEDGER_ENTITY,
-        CONSUS_LEDGER_FIELDS,
-        CONSUS_LEDGER_OPTIONAL_FIELDS,
-        (string) ($consumptionQuery['$filter'] ?? ''),
-        static function (array $row) use (&$items, $companyKey, $windows): void {
-            consus_apply_ledger_row($items, $row, $companyKey, 'consumption', $windows);
-        }
-    );
+    foreach (consus_wo_ledger_parts() as $part) {
+        $prefix = (string) $part['document_prefix'];
+        consus_each_ledger_entry_type(
+            $company,
+            $part['entry_types'],
+            $windows['history_start'],
+            static function (array $row) use (&$items, $companyKey, $windows, $prefix): void {
+                if (!consus_document_no_has_prefix($row, $prefix)) {
+                    return;
+                }
+                consus_apply_ledger_row($items, $row, $companyKey, 'consumption', $windows);
+            }
+        );
+    }
 
     try {
         $vendorResult = consus_each_entity_rows(

@@ -18,7 +18,9 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
 - Eigen, EGT en dropship zijn inkooppaden, geen locatiecodes: leeg is magazijn,
   `DROP_SHIP` of leverancier `90052` is dropship, leverancier `90101` is EGT.
   KVT en HVT zijn alleen een hint voor eigen magazijn. Werkorderverbruik is
-  `Negative Adjmt.` met documentnummer `WO…`, plus `Assembly Consumption`.
+  een negatieve correctie met documentnummer `WO…`, plus assemblageverbruik.
+  OData filtert per Nederlands bijschrift (`Verkoop`, `Negatieve correctie`,
+  `Assemblageverbruik`); het WO-prefix past Consus zelf toe.
 
 Lokaal gebruikt Consus `~/Repositories/auth.php` (naast de repo). Op de server
 blijft dat `web/auth.php`.
