@@ -33,7 +33,7 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   filtert PHP als voorheen. Elke query gebruikt `$top` 20000; een geweigerde
   paginagrootte valt terug op de BC-standaard. Bedrijven blijven na elkaar, niet
   parallel.
-- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 9, of
+- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 10, of
   `full`) haalt nightly per kalendermaand het hele venster. Een oudere
   snapshotversie is ook koud, net als een bedrijf waarvan elke rij nog een
   lege leverancier heeft: anders blijft de historie op die lege groep staan.
