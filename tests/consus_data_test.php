@@ -228,6 +228,9 @@ $donePublish = consus_publish_nightly_snapshot(
     false
 );
 test_assert($donePublish['errors'] === [], 'afgeronde run zonder fouten heeft geen bezig-melding');
+test_assert((int) $donePublish['version'] === CONSUS_SNAPSHOT_VERSION, 'snapshot schrijft de versie');
+$nightlySource = (string) file_get_contents(__DIR__ . '/../web/nightly.php');
+test_assert(str_contains($nightlySource, "'version' => (int) (\$snapshot['version'] ?? CONSUS_SNAPSHOT_VERSION)"), 'nightly-JSON noemt de snapshotversie');
 @unlink($publishTemp);
 @unlink($publishTemp . '.lock');
 if ($savedPublishEnv === false) {
@@ -250,6 +253,114 @@ test_assert(!isset(consus_entity_query(CONSUS_STOCK_FIELDS, '', 0)['$top']), 'pa
 
 $scoped = consus_companies_in_scope(['KVT Gas', 'Hunter van Twist', 'Koninklijke van Twist B.V.']);
 test_assert(array_column($scoped, 'company_key') === ['kvt', 'hvt'], 'alleen KVT en HVT, KVT Gas valt buiten scope');
+test_assert(consus_company_key_for_name('KVT') === 'kvt', 'label KVT is Koninklijke van Twist');
+test_assert(consus_company_key_for_name('HVT') === 'hvt', 'label HVT is Hunter van Twist');
+test_assert(consus_company_key_for_name('KVT Gas') === '', 'KVT Gas blijft buiten het label');
+test_assert(consus_stock_company_key(['Company_Name' => 'KVT'], 'Hunter van Twist') === 'kvt', 'KVT-voorraad in de HVT-query blijft van KVT');
+test_assert(consus_stock_company_key(['Company_Name' => ''], 'Hunter van Twist') === 'hvt', 'lege Company_Name hoort bij de query');
+test_assert(consus_stock_company_key(['Company_Name' => 'ACME'], 'Hunter van Twist') === '', 'onbekend bedrijf valt niet terug op de query');
+
+$misrouted = [];
+consus_apply_stock_row($misrouted, [
+    'Item_No' => 'A1',
+    'Company_Name' => 'KVT',
+    'Locatiecode' => 'MAG',
+    'Inventory' => 12,
+    'Safety_Stock_Quantity' => 4,
+    'Reorder_Point' => 0,
+    'Bestelpunt' => 3,
+], 'Hunter van Twist');
+consus_apply_stock_row($misrouted, [
+    'No' => 'H1',
+    'Company_Name' => 'HVT',
+    'Inventory' => 9,
+    'Safety_Stock_Quantity' => 1,
+    'Reorder_Point' => 2,
+], 'Hunter van Twist');
+test_assert(isset($misrouted['kvt|A1']) && !isset($misrouted['hvt|A1']), 'kort label KVT maakt geen HVT-artikel');
+test_assert((float) $misrouted['kvt|A1']['inventory'] === 12.0, 'KVT-voorraad blijft op KVT');
+test_assert((float) $misrouted['kvt|A1']['safety_stock'] === 4.0, 'KVT-veiligheidsvoorraad blijft op KVT');
+test_assert((float) $misrouted['kvt|A1']['reorder_point'] === 3.0, 'Bestelpunt vult een leeg Reorder_Point');
+test_assert((string) array_key_first($misrouted['kvt|A1']['by_location']) === 'MAG', 'Locatiecode vult een ontbrekende Location_Code');
+test_assert((float) $misrouted['hvt|H1']['inventory'] === 9.0, 'HVT-voorraad blijft op HVT');
+test_assert((float) $misrouted['hvt|H1']['reorder_point'] === 2.0, 'gevuld Reorder_Point blijft het bestelpunt');
+$unknownCompany = [];
+consus_apply_stock_row($unknownCompany, [
+    'Item_No' => 'Z',
+    'Company_Name' => 'ACME',
+    'Inventory' => 5,
+], 'Hunter van Twist');
+test_assert($unknownCompany === [], 'onbekende Company_Name wordt niet op HVT gezet');
+
+$kvtLedgerRows = [[
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'vendor_no' => 'PERK',
+    'vendor_name' => 'Perkins',
+    'cost_center' => '',
+    'location' => 'KVT',
+    'inventory' => 0.0,
+    'safety_stock' => 0.0,
+    'reorder_point' => 0.0,
+    'item_count' => 1,
+    'item_nos' => ['A1' => true],
+    'sales' => [],
+    'consumption' => [],
+]];
+$kvtLedgerArticles = [[
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'item_no' => 'A1',
+    'description' => 'Filter',
+    'vendor_no' => 'PERK',
+    'vendor_name' => 'Perkins',
+    'cost_center' => '',
+    'location' => 'KVT',
+    'inventory' => 0.0,
+    'safety_stock' => 0.0,
+    'reorder_point' => 0.0,
+    'consumption' => consus_empty_consumption_qty(),
+]];
+test_assert(consus_rows_lack_stock($kvtLedgerRows), 'KVT zonder aantallen mag vreemde voorraad nog krijgen');
+consus_overlay_spilled_stock($kvtLedgerRows, $kvtLedgerArticles, $misrouted, 'kvt');
+test_assert(abs((float) $kvtLedgerRows[0]['inventory'] - 12) < 0.0001, 'spilled KVT-voorraad landt op de bestaande regel');
+test_assert(abs((float) $kvtLedgerRows[0]['safety_stock'] - 4) < 0.0001, 'spilled veiligheidsvoorraad landt op dezelfde regel');
+test_assert(abs((float) $kvtLedgerRows[0]['reorder_point'] - 3) < 0.0001, 'spilled bestelpunt landt op dezelfde regel');
+test_assert((string) $kvtLedgerRows[0]['vendor_no'] === 'PERK', 'de leverancier van de grootboekregel blijft');
+test_assert(abs((float) $kvtLedgerArticles[0]['inventory'] - 12) < 0.0001, 'artikeltabel krijgt dezelfde KVT-voorraad');
+test_assert(!consus_rows_lack_stock($kvtLedgerRows), 'na de spill heeft KVT voorraad');
+$hvtUntouched = [[
+    'company_key' => 'hvt',
+    'inventory' => 9.0,
+    'safety_stock' => 1.0,
+    'reorder_point' => 2.0,
+    'item_nos' => ['B2' => true],
+    'location' => '',
+]];
+$hvtArticles = [];
+consus_overlay_spilled_stock($hvtUntouched, $hvtArticles, $misrouted, 'hvt');
+test_assert(abs((float) $hvtUntouched[0]['inventory'] - 9) < 0.0001, 'KVT-spill telt niet bij een andere HVT-regel op');
+test_assert((string) $hvtUntouched[0]['company_key'] === 'hvt', 'de bestaande HVT-regel blijft HVT');
+$hvtKeys = [];
+foreach ($hvtUntouched as $hvtRow) {
+    $hvtKeys[] = (string) ($hvtRow['company_key'] ?? '');
+}
+test_assert(!in_array('kvt', $hvtKeys, true), 'KVT-artikel komt niet in de HVT-rijen');
+
+$cardItems = [];
+consus_apply_stock_row($cardItems, [
+    'Item_No' => 'A1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Inventory' => 1,
+], 'Koninklijke van Twist');
+consus_apply_vendor_row($cardItems, [
+    'No' => 'A1',
+    'Vendor_No' => 'PERK',
+    'Global_Dimension_1_Code' => 'WERK',
+], 'kvt');
+test_assert((string) $cardItems['kvt|A1']['cost_center'] === 'WERK', 'globale dimensie 1 vult een ontbrekende COST_CENTER');
+test_assert(consus_procurement_bucket_from_row(['Buy_from_Vendor_No' => '90101']) === 'egt', 'inkoop-leverancier op de artikelpost telt als EGT');
+test_assert(consus_procurement_bucket_from_row(['PurchasingCode' => 'DROP_SHIP']) === 'dropship', 'PurchasingCode telt als dropship');
 
 $items = [];
 consus_apply_stock_row($items, [

@@ -33,7 +33,7 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   filtert PHP als voorheen. Elke query gebruikt `$top` 20000; een geweigerde
   paginagrootte valt terug op de BC-standaard. Bedrijven blijven na elkaar, niet
   parallel.
-- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 7, of
+- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 8, of
   `full`) haalt nightly per kalendermaand het hele venster. Een oudere
   snapshotversie is ook koud, net als een bedrijf waarvan elke rij nog een
   lege leverancier heeft: anders blijft de historie op die lege groep staan.
@@ -86,7 +86,12 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
 - VoorraadPerBedrijf mag hetzelfde artikel op dezelfde locatie twee keer
   sturen. De eerste niet-nul van voorraad, veiligheidsvoorraad en bestelpunt
   wint; een eerdere nulregel blokkeert die waarde niet en een tweede niet-nul
-  telt niet dubbel. Een geweigerd veld op AppItemCard (bijvoorbeeld
+  telt niet dubbel. `Company_Name` mag de lange bedrijfsnaam of het label
+  `KVT` / `HVT` zijn. Een gevulde naam die bij het andere bedrijf hoort wordt
+  niet aan de query-bron gehangen. Levert de eigen query geen aantallen, dan
+  gebruikt nightly die regels als ze in de query van het andere bedrijf
+  stonden. Bestelpunt leest `Reorder_Point`, en anders `Bestelpunt`.
+  Een geweigerd veld op AppItemCard (bijvoorbeeld
   omschrijving of `LVS_Vendor_Name`) wordt uit `$select` gehaald; nummer en
   leverancier blijven. Een lege tussenstap voor voorraad of artikelen wordt
   opnieuw opgehaald, niet als klaar overgeslagen.
