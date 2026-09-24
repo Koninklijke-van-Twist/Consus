@@ -140,19 +140,98 @@ function consus_companies_in_scope(array $discovered): array
     return $ordered;
 }
 
-function consus_bucket_for_location(string $locationCode): string
+/**
+ * Bedrijven uit CONSUS_COMPANIES die discovery niet teruggegeven heeft.
+ * Die horen stale te blijven, anders verdwijnt hun vorige cache terwijl nightly OK meldt.
+ *
+ * @param array<int, array{company:string,company_key:string}> $companies
+ * @param array<int, mixed> $discoveryErrors
+ * @return array{errors:array<int, array{company:string,error:string}>,company_stats:array<int, array{company:string,company_key:string,stale:bool,duration_ms:int}>}
+ */
+function consus_missing_company_records(array $companies, array $discoveryErrors = []): array
 {
-    $code = strtoupper(trim($locationCode));
-    if ($code === '') {
-        return 'onbekend';
+    $foundKeys = [];
+    foreach ($companies as $company) {
+        if (!is_array($company)) {
+            continue;
+        }
+        $foundKeys[(string) ($company['company_key'] ?? '')] = true;
     }
 
-    $bucket = CONSUS_LOCATION_BUCKETS[$code] ?? '';
-    if (!isset(CONSUS_BUCKETS[$bucket])) {
-        return 'onbekend';
+    $detail = [];
+    foreach ($discoveryErrors as $error) {
+        $text = trim((string) $error);
+        if ($text !== '') {
+            $detail[] = $text;
+        }
+    }
+    $suffix = $detail === [] ? '' : ' ' . implode(' | ', $detail);
+
+    $errors = [];
+    $stats = [];
+    foreach (array_keys(CONSUS_COMPANIES) as $missingKey) {
+        if (isset($foundKeys[$missingKey])) {
+            continue;
+        }
+        $name = consus_company_display_name($missingKey);
+        $errors[] = [
+            'company' => $name,
+            'error' => 'Bedrijf niet gevonden bij discovery.' . $suffix,
+        ];
+        $stats[] = [
+            'company' => $name,
+            'company_key' => $missingKey,
+            'stale' => true,
+            'duration_ms' => 0,
+        ];
     }
 
-    return $bucket;
+    return [
+        'errors' => $errors,
+        'company_stats' => $stats,
+    ];
+}
+
+function consus_location_code(array $row): string
+{
+    if (!array_key_exists('Location_Code', $row)) {
+        return '';
+    }
+
+    return strtoupper(trim(consus_scalar_string($row['Location_Code'] ?? '')));
+}
+
+/**
+ * Eigen / EGT / dropship volgens inkooppad. Locatie speelt hier niet mee.
+ * Dropship wint als zowel DROP_SHIP als leverancier 90101 op één regel staan.
+ */
+function consus_procurement_bucket(string $purchasingCode, string $vendorNo): string
+{
+    $code = strtoupper(trim($purchasingCode));
+    $vendor = strtoupper(trim($vendorNo));
+    $dropCode = strtoupper(trim(CONSUS_DROPSHIP_PURCHASING_CODE));
+    $dropVendor = strtoupper(trim(CONSUS_DROPSHIP_VENDOR_NO));
+    $egtVendor = strtoupper(trim(CONSUS_EGT_VENDOR_NO));
+
+    if (($dropCode !== '' && $code === $dropCode) || ($dropVendor !== '' && $vendor === $dropVendor)) {
+        return 'dropship';
+    }
+    if ($egtVendor !== '' && $vendor === $egtVendor) {
+        return 'egt';
+    }
+
+    return 'eigen';
+}
+
+function consus_procurement_bucket_from_row(array $row): string
+{
+    $purchasingField = CONSUS_ILE_PURCHASING_CODE_FIELD;
+    $vendorField = CONSUS_ILE_VENDOR_NO_FIELD;
+
+    return consus_procurement_bucket(
+        consus_scalar_string($purchasingField !== '' ? ($row[$purchasingField] ?? '') : ''),
+        consus_scalar_string($vendorField !== '' ? ($row[$vendorField] ?? '') : '')
+    );
 }
 
 /**
@@ -194,6 +273,41 @@ function consus_ledger_query(array $entryTypes, string $fromDate): array
     return consus_entity_query(
         CONSUS_LEDGER_FIELDS,
         consus_entry_type_filter($entryTypes) . ' and Posting_Date ge ' . $fromDate
+    );
+}
+
+function consus_wo_entry_filter(): string
+{
+    $primaryType = consus_escape_odata_string(CONSUS_WO_PRIMARY_ENTRY_TYPE);
+    $prefix = consus_escape_odata_string(CONSUS_WO_DOCUMENT_PREFIX);
+    $parts = [
+        "(Entry_Type eq '" . $primaryType . "' and startswith(Document_No,'" . $prefix . "'))",
+    ];
+    foreach (CONSUS_WO_ALSO_ENTRY_TYPES as $entryType) {
+        $entryType = trim((string) $entryType);
+        if ($entryType === '') {
+            continue;
+        }
+        $parts[] = "Entry_Type eq '" . consus_escape_odata_string($entryType) . "'";
+    }
+
+    if (count($parts) === 1) {
+        return $parts[0];
+    }
+
+    return '(' . implode(' or ', $parts) . ')';
+}
+
+function consus_wo_ledger_query(string $fromDate): array
+{
+    $fromDate = consus_parse_date($fromDate);
+    if ($fromDate === '') {
+        throw new InvalidArgumentException('Ongeldige vanaf-datum voor werkorderverbruik.');
+    }
+
+    return consus_entity_query(
+        CONSUS_LEDGER_FIELDS,
+        consus_wo_entry_filter() . ' and Posting_Date ge ' . $fromDate
     );
 }
 
@@ -368,9 +482,27 @@ function consus_new_item_fact(string $companyKey, string $itemNo, string $compan
         'inventory' => 0.0,
         'safety_stock' => 0.0,
         'reorder_point' => 0.0,
-        'sales' => consus_empty_bucket_map(),
-        'consumption' => consus_empty_bucket_map(),
+        'by_location' => [],
     ];
+}
+
+/**
+ * @param array<string, mixed> $item
+ * @return array{inventory:float,safety_stock:float,reorder_point:float,sales:array,consumption:array}
+ */
+function consus_location_metrics(array &$item, string $location): array
+{
+    if (!isset($item['by_location'][$location]) || !is_array($item['by_location'][$location])) {
+        $item['by_location'][$location] = [
+            'inventory' => 0.0,
+            'safety_stock' => 0.0,
+            'reorder_point' => 0.0,
+            'sales' => consus_empty_bucket_map(),
+            'consumption' => consus_empty_bucket_map(),
+        ];
+    }
+
+    return $item['by_location'][$location];
 }
 
 function consus_vendor_name_from_item(array $row): string
@@ -417,23 +549,24 @@ function consus_apply_stock_row(array &$items, array $row, string $sourceCompany
     $key = $companyKey . '|' . $itemNo;
     if (!isset($items[$key])) {
         $items[$key] = consus_new_item_fact($companyKey, $itemNo, $companyName);
-        $items[$key]['inventory'] = consus_scalar_float($row['Inventory'] ?? 0);
-        $items[$key]['safety_stock'] = consus_scalar_float($row['Safety_Stock_Quantity'] ?? 0);
-        $items[$key]['reorder_point'] = consus_scalar_float($row['Reorder_Point'] ?? 0);
-        return;
     }
 
-    // Zelfde artikel kan via een geconsolideerde VoorraadPerBedrijf twee keer
-    // binnenkomen. Eerste niet-nulvoorraad wint; we tellen niet dubbel.
-    if ((float) $items[$key]['inventory'] === 0.0) {
-        $items[$key]['inventory'] = consus_scalar_float($row['Inventory'] ?? 0);
+    $location = consus_location_code($row);
+    if (!empty($items[$key]['_stock_seen'][$location])) {
+        return;
     }
-    if ((float) $items[$key]['safety_stock'] === 0.0) {
-        $items[$key]['safety_stock'] = consus_scalar_float($row['Safety_Stock_Quantity'] ?? 0);
-    }
-    if ((float) $items[$key]['reorder_point'] === 0.0) {
-        $items[$key]['reorder_point'] = consus_scalar_float($row['Reorder_Point'] ?? 0);
-    }
+    $items[$key]['_stock_seen'][$location] = true;
+
+    $metrics = consus_location_metrics($items[$key], $location);
+    $inventory = consus_scalar_float($row['Inventory'] ?? 0);
+    $safety = consus_scalar_float($row['Safety_Stock_Quantity'] ?? 0);
+    $reorder = consus_scalar_float($row['Reorder_Point'] ?? 0);
+    $items[$key]['by_location'][$location]['inventory'] = (float) $metrics['inventory'] + $inventory;
+    $items[$key]['by_location'][$location]['safety_stock'] = (float) $metrics['safety_stock'] + $safety;
+    $items[$key]['by_location'][$location]['reorder_point'] = (float) $metrics['reorder_point'] + $reorder;
+    $items[$key]['inventory'] += $inventory;
+    $items[$key]['safety_stock'] += $safety;
+    $items[$key]['reorder_point'] += $reorder;
 }
 
 /**
@@ -503,9 +636,8 @@ function consus_apply_dimension_row(array &$items, array $row, string $companyKe
 /**
  * @param array<string, array<string, mixed>> $items
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
- * @param array<string, true> $unmapped
  */
-function consus_apply_ledger_row(array &$items, array $row, string $companyKey, string $kind, array $windows, array &$unmapped): void
+function consus_apply_ledger_row(array &$items, array $row, string $companyKey, string $kind, array $windows): void
 {
     if ($companyKey === '' || ($kind !== 'sales' && $kind !== 'consumption')) {
         return;
@@ -517,10 +649,10 @@ function consus_apply_ledger_row(array &$items, array $row, string $companyKey, 
         return;
     }
 
-    $location = consus_scalar_string($row['Location_Code'] ?? '');
-    $bucket = consus_bucket_for_location($location);
-    if ($bucket === 'onbekend' && trim($location) !== '') {
-        $unmapped[strtoupper(trim($location))] = true;
+    $location = consus_location_code($row);
+    $bucket = consus_procurement_bucket_from_row($row);
+    if (!isset(CONSUS_BUCKETS[$bucket])) {
+        $bucket = 'eigen';
     }
 
     $key = $companyKey . '|' . $itemNo;
@@ -528,9 +660,10 @@ function consus_apply_ledger_row(array &$items, array $row, string $companyKey, 
         $items[$key] = consus_new_item_fact($companyKey, $itemNo);
     }
 
+    consus_location_metrics($items[$key], $location);
     $qty = consus_outbound_quantity($row['Quantity'] ?? 0);
     $amount = $kind === 'sales' ? consus_scalar_float($row['Sales_Amount_Actual'] ?? 0) : 0.0;
-    consus_add_to_period_stats($items[$key][$kind][$bucket], $date, $qty, $amount, $windows);
+    consus_add_to_period_stats($items[$key]['by_location'][$location][$kind][$bucket], $date, $qty, $amount, $windows);
 }
 
 /**
@@ -541,7 +674,7 @@ function consus_apply_ledger_row(array &$items, array $row, string $companyKey, 
  */
 function consus_rollup_items(array $items, array $windows, array $unmappedLocations = []): array
 {
-    unset($windows);
+    unset($windows, $unmappedLocations);
     $grouped = [];
     foreach ($items as $item) {
         if (!is_array($item)) {
@@ -558,44 +691,68 @@ function consus_rollup_items(array $items, array $windows, array $unmappedLocati
             $vendorName = $vendorNo !== '' ? $vendorNo : 'Geen leverancier';
         }
         $costCenter = trim((string) ($item['cost_center'] ?? ''));
-        $groupKey = $companyKey . '|' . $vendorNo . '|' . $costCenter;
-        if (!isset($grouped[$groupKey])) {
-            $grouped[$groupKey] = [
-                'company_key' => $companyKey,
-                'company_name' => consus_company_display_name($companyKey, (string) ($item['company_name'] ?? '')),
-                'vendor_no' => $vendorNo,
-                'vendor_name' => $vendorName,
-                'cost_center' => $costCenter,
-                'inventory' => 0.0,
-                'safety_stock' => 0.0,
-                'reorder_point' => 0.0,
-                'item_count' => 0,
+        $locations = is_array($item['by_location'] ?? null) ? $item['by_location'] : [];
+        if ($locations === []) {
+            $locations = ['' => [
+                'inventory' => (float) ($item['inventory'] ?? 0),
+                'safety_stock' => (float) ($item['safety_stock'] ?? 0),
+                'reorder_point' => (float) ($item['reorder_point'] ?? 0),
                 'sales' => consus_empty_bucket_map(),
                 'consumption' => consus_empty_bucket_map(),
-            ];
+            ]];
         }
 
-        if (strlen($vendorName) > strlen((string) $grouped[$groupKey]['vendor_name'])) {
-            $grouped[$groupKey]['vendor_name'] = $vendorName;
+        foreach ($locations as $location => $metrics) {
+            if (!is_array($metrics)) {
+                continue;
+            }
+            $locationCode = strtoupper(trim((string) $location));
+            $groupKey = $companyKey . '|' . $vendorNo . '|' . $costCenter . '|' . $locationCode;
+            if (!isset($grouped[$groupKey])) {
+                $grouped[$groupKey] = [
+                    'company_key' => $companyKey,
+                    'company_name' => consus_company_display_name($companyKey, (string) ($item['company_name'] ?? '')),
+                    'vendor_no' => $vendorNo,
+                    'vendor_name' => $vendorName,
+                    'cost_center' => $costCenter,
+                    'location' => $locationCode,
+                    'inventory' => 0.0,
+                    'safety_stock' => 0.0,
+                    'reorder_point' => 0.0,
+                    'item_count' => 0,
+                    'item_nos' => [],
+                    'sales' => consus_empty_bucket_map(),
+                    'consumption' => consus_empty_bucket_map(),
+                ];
+            }
+
+            if (strlen($vendorName) > strlen((string) $grouped[$groupKey]['vendor_name'])) {
+                $grouped[$groupKey]['vendor_name'] = $vendorName;
+            }
+            $grouped[$groupKey]['inventory'] += (float) ($metrics['inventory'] ?? 0);
+            $grouped[$groupKey]['safety_stock'] += (float) ($metrics['safety_stock'] ?? 0);
+            $grouped[$groupKey]['reorder_point'] += (float) ($metrics['reorder_point'] ?? 0);
+            $itemNo = trim((string) ($item['item_no'] ?? ''));
+            if ($itemNo !== '') {
+                $grouped[$groupKey]['item_nos'][$itemNo] = true;
+            }
+            $grouped[$groupKey]['item_count'] = count($grouped[$groupKey]['item_nos']);
+            consus_merge_bucket_maps($grouped[$groupKey]['sales'], is_array($metrics['sales'] ?? null) ? $metrics['sales'] : []);
+            consus_merge_bucket_maps($grouped[$groupKey]['consumption'], is_array($metrics['consumption'] ?? null) ? $metrics['consumption'] : []);
         }
-        $grouped[$groupKey]['inventory'] += (float) ($item['inventory'] ?? 0);
-        $grouped[$groupKey]['safety_stock'] += (float) ($item['safety_stock'] ?? 0);
-        $grouped[$groupKey]['reorder_point'] += (float) ($item['reorder_point'] ?? 0);
-        $grouped[$groupKey]['item_count']++;
-        consus_merge_bucket_maps($grouped[$groupKey]['sales'], is_array($item['sales'] ?? null) ? $item['sales'] : []);
-        consus_merge_bucket_maps($grouped[$groupKey]['consumption'], is_array($item['consumption'] ?? null) ? $item['consumption'] : []);
     }
 
     $rows = array_values($grouped);
     usort($rows, static function (array $left, array $right): int {
         return strnatcasecmp(
-            implode('|', [(string) $left['company_key'], (string) $left['vendor_name'], (string) $left['cost_center']]),
-            implode('|', [(string) $right['company_key'], (string) $right['vendor_name'], (string) $right['cost_center']])
+            implode('|', [(string) $left['company_key'], (string) $left['vendor_name'], (string) $left['cost_center'], (string) $left['location']]),
+            implode('|', [(string) $right['company_key'], (string) $right['vendor_name'], (string) $right['cost_center'], (string) $right['location']])
         );
     });
 
     $vendors = [];
     $costCenters = [];
+    $locations = [];
     foreach ($rows as $row) {
         $vendorNo = (string) $row['vendor_no'];
         if (!isset($vendors[$vendorNo])) {
@@ -608,6 +765,10 @@ function consus_rollup_items(array $items, array $windows, array $unmappedLocati
         if ($costCenter !== '') {
             $costCenters[$costCenter] = $costCenter;
         }
+        $location = (string) ($row['location'] ?? '');
+        if ($location !== '') {
+            $locations[$location] = $location;
+        }
     }
 
     $vendorList = array_values($vendors);
@@ -617,12 +778,113 @@ function consus_rollup_items(array $items, array $windows, array $unmappedLocati
     $costCenterList = array_values($costCenters);
     natcasesort($costCenterList);
 
+    $locationList = array_values($locations);
+    natcasesort($locationList);
+
     return [
         'rows' => $rows,
         'vendors' => $vendorList,
         'cost_centers' => array_values($costCenterList),
-        'unmapped_locations' => array_values($unmappedLocations),
+        'locations' => array_values($locationList),
     ];
+}
+
+function consus_filter_value_matches(string $actual, string $filter): bool
+{
+    if ($filter === '') {
+        return true;
+    }
+    if ($filter === '__none__') {
+        return $actual === '';
+    }
+
+    return strcasecmp($actual, $filter) === 0;
+}
+
+/**
+ * @param array<int, array<string, mixed>> $rows
+ * @return array<int, array<string, mixed>>
+ */
+function consus_matching_rows(array $rows, string $companyKey, string $costCenter = '', string $vendorNo = '', string $location = ''): array
+{
+    $matched = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        if ($companyKey !== '' && (string) ($row['company_key'] ?? '') !== $companyKey) {
+            continue;
+        }
+        if (!consus_filter_value_matches((string) ($row['cost_center'] ?? ''), $costCenter)) {
+            continue;
+        }
+        if (!consus_filter_value_matches((string) ($row['vendor_no'] ?? ''), $vendorNo)) {
+            continue;
+        }
+        if (!consus_filter_value_matches((string) ($row['location'] ?? ''), $location)) {
+            continue;
+        }
+        $matched[] = $row;
+    }
+
+    return $matched;
+}
+
+/**
+ * @param array<int, array<string, mixed>> $rows
+ * @return array<int, string>
+ */
+function consus_department_options(array $rows, string $companyKey): array
+{
+    $options = [];
+    foreach (consus_matching_rows($rows, $companyKey) as $row) {
+        $options[(string) ($row['cost_center'] ?? '')] = true;
+    }
+    $list = array_keys($options);
+    natcasesort($list);
+
+    return array_values($list);
+}
+
+/**
+ * @param array<int, array<string, mixed>> $rows
+ * @return array<int, array{vendor_no:string,vendor_name:string}>
+ */
+function consus_vendor_options(array $rows, string $companyKey, string $costCenter): array
+{
+    $options = [];
+    foreach (consus_matching_rows($rows, $companyKey, $costCenter) as $row) {
+        $vendorNo = (string) ($row['vendor_no'] ?? '');
+        $name = (string) ($row['vendor_name'] ?? '');
+        if (!isset($options[$vendorNo]) || strlen($name) > strlen((string) $options[$vendorNo]['vendor_name'])) {
+            $options[$vendorNo] = [
+                'vendor_no' => $vendorNo,
+                'vendor_name' => $name !== '' ? $name : ($vendorNo !== '' ? $vendorNo : 'Geen leverancier'),
+            ];
+        }
+    }
+    $list = array_values($options);
+    usort($list, static function (array $left, array $right): int {
+        return strnatcasecmp((string) $left['vendor_name'], (string) $right['vendor_name']);
+    });
+
+    return $list;
+}
+
+/**
+ * @param array<int, array<string, mixed>> $rows
+ * @return array<int, string>
+ */
+function consus_location_options(array $rows, string $companyKey, string $costCenter, string $vendorNo): array
+{
+    $options = [];
+    foreach (consus_matching_rows($rows, $companyKey, $costCenter, $vendorNo) as $row) {
+        $options[(string) ($row['location'] ?? '')] = true;
+    }
+    $list = array_keys($options);
+    natcasesort($list);
+
+    return array_values($list);
 }
 
 /**
@@ -663,35 +925,44 @@ function consus_turnover(float $salesQty, float $inventory): ?float
  * @param array<string, mixed> $snapshot
  * @return array<string, mixed>
  */
-function consus_summarize(array $snapshot, string $companyKey, string $vendorNo, string $costCenter): array
+function consus_summarize(array $snapshot, string $companyKey, string $vendorNo, string $costCenter, string $location = ''): array
 {
     $sales = consus_empty_bucket_map();
     $consumption = consus_empty_bucket_map();
     $inventory = 0.0;
     $safety = 0.0;
     $reorder = 0.0;
+    $seenItems = [];
     $itemCount = 0;
 
-    foreach ($snapshot['rows'] ?? [] as $row) {
+    $rows = consus_matching_rows(
+        is_array($snapshot['rows'] ?? null) ? $snapshot['rows'] : [],
+        $companyKey,
+        $costCenter,
+        $vendorNo,
+        $location
+    );
+    foreach ($rows as $row) {
         if (!is_array($row)) {
-            continue;
-        }
-        if ($companyKey !== '' && (string) ($row['company_key'] ?? '') !== $companyKey) {
-            continue;
-        }
-        if ($vendorNo !== '' && (string) ($row['vendor_no'] ?? '') !== $vendorNo) {
-            continue;
-        }
-        if ($costCenter !== '' && (string) ($row['cost_center'] ?? '') !== $costCenter) {
             continue;
         }
 
         $inventory += (float) ($row['inventory'] ?? 0);
         $safety += (float) ($row['safety_stock'] ?? 0);
         $reorder += (float) ($row['reorder_point'] ?? 0);
-        $itemCount += (int) ($row['item_count'] ?? 0);
+        $itemNos = $row['item_nos'] ?? null;
+        if (is_array($itemNos) && $itemNos !== []) {
+            foreach (array_keys($itemNos) as $itemNo) {
+                $seenItems[(string) ($row['company_key'] ?? '') . '|' . (string) $itemNo] = true;
+            }
+        } else {
+            $itemCount += (int) ($row['item_count'] ?? 0);
+        }
         consus_merge_bucket_maps($sales, is_array($row['sales'] ?? null) ? $row['sales'] : []);
         consus_merge_bucket_maps($consumption, is_array($row['consumption'] ?? null) ? $row['consumption'] : []);
+    }
+    if ($seenItems !== []) {
+        $itemCount += count($seenItems);
     }
 
     $turnover = [];
@@ -728,7 +999,7 @@ function consus_empty_snapshot(): array
         'warnings' => [],
         'vendors' => [],
         'cost_centers' => [],
-        'unmapped_locations' => [],
+        'locations' => [],
         'rows' => [],
     ];
 }
@@ -888,26 +1159,36 @@ function consus_each_entity_rows(
     $attempts[] = $required;
 
     $lastError = null;
+    $attemptCount = count($attempts);
     foreach ($attempts as $index => $fields) {
         $query = consus_entity_query($fields, $filter);
         $url = consus_company_entity_url((string) $baseUrl, $environment, $company, $entitySet, $query);
         $useOptionalAttempt = $index === 0 && $optional !== [];
         try {
-            if ($useOptionalAttempt) {
-                $buffered = [];
-                $count = consus_each_url_live($url, $auth, static function (array $row) use (&$buffered): void {
-                    $buffered[] = $row;
-                });
-                foreach ($buffered as $row) {
-                    $onRow($row);
+            $buffered = [];
+            $count = consus_each_url_live($url, $auth, static function (array $row) use (&$buffered): void {
+                $buffered[] = $row;
+            });
+            if ($useOptionalAttempt && $count === 0 && $index < $attemptCount - 1) {
+                continue;
+            }
+            foreach ($buffered as $row) {
+                $onRow($row);
+            }
+            $missing = [];
+            if ($optional !== []) {
+                $sample = $buffered[0] ?? null;
+                foreach ($optional as $field) {
+                    if (!is_array($sample) || !array_key_exists($field, $sample)) {
+                        $missing[] = $field;
+                    }
                 }
-            } else {
-                $count = consus_each_url_live($url, $auth, $onRow);
             }
 
             return [
                 'count' => $count,
-                'optional_fields' => $useOptionalAttempt,
+                'optional_fields' => $missing === [] && $optional !== [],
+                'missing_optional' => $missing,
             ];
         } catch (Throwable $error) {
             $lastError = $error;
@@ -922,44 +1203,56 @@ function consus_each_entity_rows(
 /**
  * @param array<string, array<string, mixed>> $items
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
- * @return array{warnings:array<int, string>,unmapped:array<string, true>,foreign:array<string, array<int, array<string, mixed>>>}
+ * @return array{warnings:array<int, string>,foreign:array<string, array<int, array<string, mixed>>>}
  */
 function consus_collect_company(string $company, string $companyKey, array &$items, array $windows): array
 {
     $warnings = [];
-    $unmapped = [];
     $foreign = [];
 
-    consus_each_entity_rows($company, CONSUS_STOCK_ENTITY, CONSUS_STOCK_FIELDS, [], '', static function (array $row) use (&$items, &$foreign, $company, $companyKey): void {
-        $target = consus_stock_company_key($row, $company);
-        if ($target === '' || $target === $companyKey) {
-            consus_apply_stock_row($items, $row, $company);
-            return;
-        }
-        $foreign[$target][] = $row;
-    });
-
-    $salesQuery = consus_ledger_query(CONSUS_SALES_ENTRY_TYPES, $windows['history_start']);
-    consus_each_entity_rows(
+    $stockResult = consus_each_entity_rows(
         $company,
-        CONSUS_LEDGER_ENTITY,
-        CONSUS_LEDGER_FIELDS,
-        [],
-        (string) ($salesQuery['$filter'] ?? ''),
-        static function (array $row) use (&$items, $companyKey, $windows, &$unmapped): void {
-            consus_apply_ledger_row($items, $row, $companyKey, 'sales', $windows, $unmapped);
+        CONSUS_STOCK_ENTITY,
+        CONSUS_STOCK_FIELDS,
+        CONSUS_STOCK_OPTIONAL_FIELDS,
+        '',
+        static function (array $row) use (&$items, &$foreign, $company, $companyKey): void {
+            $target = consus_stock_company_key($row, $company);
+            if ($target === '' || $target === $companyKey) {
+                consus_apply_stock_row($items, $row, $company);
+                return;
+            }
+            $foreign[$target][] = $row;
         }
     );
+    if (($stockResult['missing_optional'] ?? []) !== []) {
+        $warnings[] = CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $stockResult['missing_optional']) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.';
+    }
 
-    $consumptionQuery = consus_ledger_query(CONSUS_WO_ENTRY_TYPES, $windows['history_start']);
+    $salesQuery = consus_ledger_query(CONSUS_SALES_ENTRY_TYPES, $windows['history_start']);
+    $salesResult = consus_each_entity_rows(
+        $company,
+        CONSUS_LEDGER_ENTITY,
+        CONSUS_LEDGER_FIELDS,
+        CONSUS_LEDGER_OPTIONAL_FIELDS,
+        (string) ($salesQuery['$filter'] ?? ''),
+        static function (array $row) use (&$items, $companyKey, $windows): void {
+            consus_apply_ledger_row($items, $row, $companyKey, 'sales', $windows);
+        }
+    );
+    if (($salesResult['missing_optional'] ?? []) !== []) {
+        $warnings[] = 'Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $salesResult['missing_optional']) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.';
+    }
+
+    $consumptionQuery = consus_wo_ledger_query($windows['history_start']);
     consus_each_entity_rows(
         $company,
         CONSUS_LEDGER_ENTITY,
         CONSUS_LEDGER_FIELDS,
-        [],
+        CONSUS_LEDGER_OPTIONAL_FIELDS,
         (string) ($consumptionQuery['$filter'] ?? ''),
-        static function (array $row) use (&$items, $companyKey, $windows, &$unmapped): void {
-            consus_apply_ledger_row($items, $row, $companyKey, 'consumption', $windows, $unmapped);
+        static function (array $row) use (&$items, $companyKey, $windows): void {
+            consus_apply_ledger_row($items, $row, $companyKey, 'consumption', $windows);
         }
     );
 
@@ -999,7 +1292,6 @@ function consus_collect_company(string $company, string $companyKey, array &$ite
 
     return [
         'warnings' => $warnings,
-        'unmapped' => $unmapped,
         'foreign' => $foreign,
     ];
 }
@@ -1031,8 +1323,17 @@ function consus_run_nightly(): array
     $companyStats = [];
     $errors = [];
     $warnings = [];
-    $unmapped = [];
     $previous = consus_read_snapshot();
+    $missingCompanies = consus_missing_company_records(
+        $companies,
+        is_array($discovered['errors'] ?? null) ? $discovered['errors'] : []
+    );
+    foreach ($missingCompanies['errors'] as $error) {
+        $errors[] = $error;
+    }
+    foreach ($missingCompanies['company_stats'] as $stat) {
+        $companyStats[] = $stat;
+    }
 
     foreach ($companies as $companyInfo) {
         $startedAt = hrtime(true);
@@ -1051,10 +1352,6 @@ function consus_run_nightly(): array
             }
             foreach ($result['warnings'] as $warning) {
                 $warnings[] = ['company' => $company, 'warning' => $warning];
-            }
-            foreach ($result['unmapped'] as $code => $unused) {
-                unset($unused);
-                $unmapped[$code] = $code;
             }
             $companyStats[] = [
                 'company' => $company,
@@ -1097,7 +1394,7 @@ function consus_run_nightly(): array
         unset($staleKeys[$key]);
     }
 
-    $rolled = consus_rollup_items($items, $windows, array_values($unmapped));
+    $rolled = consus_rollup_items($items, $windows);
     $rows = [];
     foreach ($rolled['rows'] as $row) {
         if (!is_array($row)) {
@@ -1118,6 +1415,7 @@ function consus_run_nightly(): array
 
     $vendors = [];
     $costCenters = [];
+    $locations = [];
     foreach ($rows as $row) {
         if (!is_array($row)) {
             continue;
@@ -1133,6 +1431,10 @@ function consus_run_nightly(): array
         if ($costCenter !== '') {
             $costCenters[$costCenter] = $costCenter;
         }
+        $location = strtoupper(trim((string) ($row['location'] ?? '')));
+        if ($location !== '') {
+            $locations[$location] = $location;
+        }
     }
     $vendorList = array_values($vendors);
     usort($vendorList, static function (array $left, array $right): int {
@@ -1140,8 +1442,8 @@ function consus_run_nightly(): array
     });
     $costCenterList = array_values($costCenters);
     natcasesort($costCenterList);
-
-    natcasesort($unmapped);
+    $locationList = array_values($locations);
+    natcasesort($locationList);
 
     $snapshot = [
         'version' => CONSUS_SNAPSHOT_VERSION,
@@ -1153,7 +1455,7 @@ function consus_run_nightly(): array
         'warnings' => $warnings,
         'vendors' => $vendorList,
         'cost_centers' => array_values($costCenterList),
-        'unmapped_locations' => array_values($unmapped),
+        'locations' => array_values($locationList),
         'rows' => $rows,
     ];
 

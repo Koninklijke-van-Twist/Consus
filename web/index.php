@@ -47,6 +47,16 @@ function consus_format_generated_at(string $value): string
     }
 }
 
+function consus_period_total(array $byBucket, string $period, string $field): float
+{
+    $total = 0.0;
+    foreach (array_keys(CONSUS_BUCKETS) as $bucket) {
+        $total += (float) ($byBucket[$bucket][$period][$field] ?? 0);
+    }
+
+    return $total;
+}
+
 function consus_month_label(string $yearMonth): string
 {
     $date = DateTimeImmutable::createFromFormat('!Y-m', $yearMonth);
@@ -75,12 +85,21 @@ if (!isset(CONSUS_COMPANIES[$companyFilter])) {
     $companyFilter = '';
 }
 
-$vendors = is_array($snapshot['vendors'] ?? null) ? $snapshot['vendors'] : [];
+$rows = is_array($snapshot['rows'] ?? null) ? $snapshot['rows'] : [];
+$departments = consus_department_options($rows, $companyFilter);
+$costFilter = trim((string) ($_GET['cost_center'] ?? ''));
+$departmentValues = [];
+foreach ($departments as $department) {
+    $departmentValues[$department === '' ? '__none__' : $department] = true;
+}
+if ($costFilter !== '' && !isset($departmentValues[$costFilter])) {
+    $costFilter = '';
+}
+
+$vendors = consus_vendor_options($rows, $companyFilter, $costFilter);
 $vendorNumbers = [];
 foreach ($vendors as $vendor) {
-    if (is_array($vendor)) {
-        $vendorNumbers[(string) ($vendor['vendor_no'] ?? '')] = true;
-    }
+    $vendorNumbers[(string) ($vendor['vendor_no'] ?? '')] = true;
 }
 if (array_key_exists('vendor', $_GET)) {
     $vendorFilter = trim((string) $_GET['vendor']);
@@ -91,17 +110,20 @@ if ($vendorFilter !== '' && !isset($vendorNumbers[$vendorFilter])) {
     $vendorFilter = '';
 }
 
-$costCenters = is_array($snapshot['cost_centers'] ?? null) ? $snapshot['cost_centers'] : [];
-$costFilter = trim((string) ($_GET['cost_center'] ?? ''));
-if ($costFilter !== '' && !in_array($costFilter, $costCenters, true)) {
-    $costFilter = '';
+$locations = consus_location_options($rows, $companyFilter, $costFilter, $vendorFilter);
+$locationValues = [];
+foreach ($locations as $location) {
+    $locationValues[$location === '' ? '__none__' : $location] = true;
+}
+$locationFilter = trim((string) ($_GET['location'] ?? ''));
+if ($locationFilter !== '' && !isset($locationValues[$locationFilter])) {
+    $locationFilter = '';
 }
 
-$summary = consus_summarize($snapshot, $companyFilter, $vendorFilter, $costFilter);
+$summary = consus_summarize($snapshot, $companyFilter, $vendorFilter, $costFilter, $locationFilter);
 $sales = is_array($summary['sales'] ?? null) ? $summary['sales'] : [];
 $consumption = is_array($summary['consumption'] ?? null) ? $summary['consumption'] : [];
 $turnover = is_array($summary['turnover'] ?? null) ? $summary['turnover'] : [];
-$unmapped = is_array($snapshot['unmapped_locations'] ?? null) ? $snapshot['unmapped_locations'] : [];
 
 $selectedVendorName = 'Alle leveranciers';
 foreach ($vendors as $vendor) {
@@ -150,7 +172,7 @@ foreach ($vendors as $vendor) {
         .panel-head { padding: 16px 16px 0; }
         .panel-head p { margin: 6px 0 0; color: var(--kvt-muted); font-size: .84rem; }
         .toolbar {
-            display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)) auto;
+            display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)) auto;
             gap: 10px; padding: 16px; align-items: end;
         }
         .field { display: grid; gap: 5px; }
@@ -214,18 +236,15 @@ foreach ($vendors as $vendor) {
     <?php if (($snapshot['errors'] ?? []) !== []): ?>
         <div class="notice error">De laatste nachtelijke controle was niet voor ieder bedrijf succesvol. Eerdere cijfers zijn waar mogelijk behouden.</div>
     <?php endif; ?>
-    <?php if ($unmapped !== []): ?>
-        <div class="notice">Locaties zonder bucket: <?= consus_h(implode(', ', $unmapped)) ?>. Die verkopen staan onder Onbekend tot <strong>consus_config.php</strong> is bijgewerkt.</div>
-    <?php endif; ?>
-
     <section class="panel">
         <form class="toolbar" method="get">
             <div class="field">
-                <label for="company">Bedrijf</label>
-                <select id="company" name="company">
-                    <option value="">KVT en HVT</option>
-                    <?php foreach (CONSUS_COMPANIES as $key => $company): ?>
-                        <option value="<?= consus_h($key) ?>"<?= $companyFilter === $key ? ' selected' : '' ?>><?= consus_h($company['label'] ?? $key) ?></option>
+                <label for="cost_center">Afdeling</label>
+                <select id="cost_center" name="cost_center">
+                    <option value="">Alle afdelingen</option>
+                    <?php foreach ($departments as $department): ?>
+                        <?php $departmentValue = $department === '' ? '__none__' : $department; ?>
+                        <option value="<?= consus_h($departmentValue) ?>"<?= $costFilter === $departmentValue ? ' selected' : '' ?>><?= consus_h($department === '' ? '(geen afdeling)' : $department) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -234,18 +253,27 @@ foreach ($vendors as $vendor) {
                 <select id="vendor" name="vendor">
                     <option value="">Alle leveranciers</option>
                     <?php foreach ($vendors as $vendor): ?>
-                        <?php if (!is_array($vendor)) { continue; } ?>
                         <?php $number = (string) ($vendor['vendor_no'] ?? ''); if ($number === '') { continue; } ?>
                         <option value="<?= consus_h($number) ?>"<?= $vendorFilter === $number ? ' selected' : '' ?>><?= consus_h($vendor['vendor_name'] ?? $number) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
             <div class="field">
-                <label for="cost_center">Afdeling</label>
-                <select id="cost_center" name="cost_center">
-                    <option value="">Alle afdelingen</option>
-                    <?php foreach ($costCenters as $costCenter): ?>
-                        <option value="<?= consus_h($costCenter) ?>"<?= $costFilter === (string) $costCenter ? ' selected' : '' ?>><?= consus_h($costCenter) ?></option>
+                <label for="location">Locatie</label>
+                <select id="location" name="location">
+                    <option value="">Alle locaties</option>
+                    <?php foreach ($locations as $location): ?>
+                        <?php $locationValue = $location === '' ? '__none__' : $location; ?>
+                        <option value="<?= consus_h($locationValue) ?>"<?= $locationFilter === $locationValue ? ' selected' : '' ?>><?= consus_h($location === '' ? '(zonder locatie)' : $location) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="field">
+                <label for="company">Bedrijf</label>
+                <select id="company" name="company">
+                    <option value="">KVT en HVT</option>
+                    <?php foreach (CONSUS_COMPANIES as $key => $company): ?>
+                        <option value="<?= consus_h($key) ?>"<?= $companyFilter === $key ? ' selected' : '' ?>><?= consus_h($company['label'] ?? $key) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -269,19 +297,19 @@ foreach ($vendors as $vendor) {
         </div>
         <div class="stat">
             <span class="stat-label">Verkoop deze maand</span>
-            <strong class="stat-value"><?= consus_h(consus_format_qty((float) ($sales['eigen']['m']['qty'] ?? 0) + (float) ($sales['egt']['m']['qty'] ?? 0) + (float) ($sales['dropship']['m']['qty'] ?? 0) + (float) ($sales['onbekend']['m']['qty'] ?? 0))) ?></strong>
-            <span class="stat-sub"><?= consus_h(consus_format_money((float) ($sales['eigen']['m']['amount'] ?? 0) + (float) ($sales['egt']['m']['amount'] ?? 0) + (float) ($sales['dropship']['m']['amount'] ?? 0) + (float) ($sales['onbekend']['m']['amount'] ?? 0))) ?></span>
+            <strong class="stat-value"><?= consus_h(consus_format_qty(consus_period_total($sales, 'm', 'qty'))) ?></strong>
+            <span class="stat-sub"><?= consus_h(consus_format_money(consus_period_total($sales, 'm', 'amount'))) ?></span>
         </div>
         <div class="stat">
             <span class="stat-label">WO-verbruik dit jaar</span>
-            <strong class="stat-value"><?= consus_h(consus_format_qty((float) ($consumption['eigen']['y']['qty'] ?? 0) + (float) ($consumption['egt']['y']['qty'] ?? 0) + (float) ($consumption['dropship']['y']['qty'] ?? 0) + (float) ($consumption['onbekend']['y']['qty'] ?? 0))) ?></strong>
+            <strong class="stat-value"><?= consus_h(consus_format_qty(consus_period_total($consumption, 'y', 'qty'))) ?></strong>
         </div>
     </section>
 
     <section class="panel">
         <div class="panel-head">
             <h2>Omloopsnelheid</h2>
-            <p>Verkoophoeveelheid in de periode gedeeld door de totale voorraad. Eigen en EGT gebruiken dezelfde noemer, omdat VoorraadPerBedrijf niet per locatie is.</p>
+            <p>Verkoophoeveelheid in de periode gedeeld door de voorraad van de gekozen locaties. Eigen en EGT delen die noemer. Dropship heeft geen eigen voorraad. De split volgt het inkooppad, niet de locatiecode.</p>
         </div>
         <?php if (!$hasCache): ?>
             <div class="empty">Nog geen omloopsnelheid. De cache is leeg.</div>
@@ -314,7 +342,7 @@ foreach ($vendors as $vendor) {
     <section class="panel">
         <div class="panel-head">
             <h2>Verkopen per maand</h2>
-            <p>Hoeveelheid en omzet, gesplitst naar locatiegroep.</p>
+            <p>Hoeveelheid en omzet. Eigen is magazijnlevering, EGT is leverancier <?= consus_h(CONSUS_EGT_VENDOR_NO) ?>, dropship is inkoopcode <?= consus_h(CONSUS_DROPSHIP_PURCHASING_CODE) ?> of leverancier <?= consus_h(CONSUS_DROPSHIP_VENDOR_NO) ?>.</p>
         </div>
         <?php if (!$hasCache): ?>
             <div class="empty">Nog geen verkopen. De cache is leeg.</div>
@@ -351,7 +379,7 @@ foreach ($vendors as $vendor) {
     <section class="panel">
         <div class="panel-head">
             <h2>Werkorderverbruik</h2>
-            <p>Artikelposten met de entry types uit de configuratie. Hoeveelheid is positief bij verbruik.</p>
+            <p>Negative Adjmt. met documentnummer WO, plus Assembly Consumption. Hoeveelheid is positief bij verbruik.</p>
         </div>
         <?php if (!$hasCache): ?>
             <div class="empty">Nog geen verbruik. De cache is leeg.</div>
@@ -381,7 +409,7 @@ foreach ($vendors as $vendor) {
         <?php endif; ?>
     </section>
 
-    <p class="footnote">Cijfers komen uit de nachtelijke snapshot<?= $hasCache ? ' t/m ' . consus_h((string) ($windows['as_of'] ?? '')) : '' ?>. Locatiegroepen en werkorder-entrytypes staan in consus_config.php.</p>
+    <p class="footnote">Cijfers komen uit de nachtelijke snapshot<?= $hasCache ? ' t/m ' . consus_h((string) ($windows['as_of'] ?? '')) : '' ?>. Kies eerst een afdeling; leverancier en locatie tonen daarna alleen wat bij die afdeling hoort. Eigen magazijn is doorgaans <?= consus_h(implode(' of ', CONSUS_EIGEN_LOCATION_HINTS)) ?>, maar elke locatie uit de cache is te kiezen.</p>
 </main>
 </body>
 </html>

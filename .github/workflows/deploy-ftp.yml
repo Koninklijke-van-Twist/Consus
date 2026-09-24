@@ -5,6 +5,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -12,6 +15,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install lftp
         run: |
@@ -43,7 +48,10 @@ jobs:
           set cmd:fail-exit true
           set net:max-retries 1
           set net:timeout 20
-          set ftp:ssl-allow false
+          set ftp:ssl-allow true
+          set ftp:ssl-force true
+          set ftp:ssl-protect-data true
+          set ssl:verify-certificate yes
           set ftp:passive-mode yes
 
           cd "$FTP_REMOTE_DIR"
@@ -58,7 +66,7 @@ jobs:
             ./web .
 
           set cmd:fail-exit false
-          chmod 777 analytics
+          chmod 770 analytics
 
           bye
           EOF

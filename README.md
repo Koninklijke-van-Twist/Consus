@@ -8,13 +8,17 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
 
 ## Werking
 
-- `nightly.php` haalt per KVT/HVT-bedrijf voorraad, leverancier, verkopen en
-  werkorderverbruik op en schrijft `web/data/consus_snapshot.json`.
-- Omloopsnelheid (maand, kwartaal, jaar) = verkoophoeveelheid ÷ voorraad.
-- Leverancier en afdeling filteren op de pagina. De OData-filters zelf zitten
-  niet vast op Perkins of één afdeling.
-- Locatiecodes, werkorder-entrytypes en de standaardleverancier staan in
-  `web/consus_config.php`.
+- `nightly.php` haalt voor KVT en HVT alle artikelen, locaties, leveranciers,
+  voorraad, verkopen en werkorderverbruik op en schrijft
+  `web/data/consus_snapshot.json`. Niets wordt vastgezet op Perkins, 90052 of 90101.
+- Omloopsnelheid (maand, kwartaal, jaar) = verkoophoeveelheid ÷ voorraad van
+  de gekozen locaties. Eigen en EGT delen die noemer. Dropship telt niet mee.
+- De pagina filtert eerst op afdeling, daarna op leverancier en locatie uit
+  die cache. Perkins kan de eerste leverancierskeuze zijn en is te wissen.
+- Eigen, EGT en dropship zijn inkooppaden, geen locatiecodes: leeg is magazijn,
+  `DROP_SHIP` of leverancier `90052` is dropship, leverancier `90101` is EGT.
+  KVT en HVT zijn alleen een hint voor eigen magazijn. Werkorderverbruik is
+  `Negative Adjmt.` met documentnummer `WO…`, plus `Assembly Consumption`.
 
 Lokaal, zodra `web/auth.php` op de machine staat:
 

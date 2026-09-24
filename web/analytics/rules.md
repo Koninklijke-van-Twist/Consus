@@ -63,16 +63,10 @@ Verplichte gegevens uit de login-userdata (`$_SESSION['user']`, gezet door `C:\x
 | Veld | Bron | Transport |
 |------|------|-----------|
 | `user_email` | `$_SESSION['user']['email']` | query/body |
-| `api_key` | `$_SESSION['user']['api_key']` | header `X-API-Key` of query/body `api_key` |
+| `api_key` | `$_SESSION['user']['api_key']` | header `X-API-Key` (niet in de query) |
 | `oid` | `$_SESSION['user']['oid']` | query/body `oid` of header `X-OID` |
 
 Voorbeeld:
-
-```
-GET analytics/analytics.php?user_email=naam@kvt.nl&api_key=…&oid=…
-```
-
-of:
 
 ```
 GET analytics/analytics.php?user_email=naam@kvt.nl&oid=…
@@ -111,13 +105,17 @@ VALUES (:visited_at, :user_email);
 $analyticsEmail = strtolower(trim((string) ($_SESSION['user']['email'] ?? '')));
 $analyticsApiKey = trim((string) ($_SESSION['user']['api_key'] ?? ''));
 $analyticsOid = strtolower(trim((string) ($_SESSION['user']['oid'] ?? '')));
-if ($analyticsEmail !== '' && $analyticsApiKey !== '' && $analyticsOid !== '') {
-    $analyticsScheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+$httpsFlag = strtolower(trim((string) ($_SERVER['HTTPS'] ?? '')));
+$requestScheme = strtolower(trim((string) ($_SERVER['REQUEST_SCHEME'] ?? '')));
+$httpsOn = ($httpsFlag !== '' && $httpsFlag !== 'off')
+    || $requestScheme === 'https'
+    || (string) ($_SERVER['SERVER_PORT'] ?? '') === '443';
+if ($analyticsEmail !== '' && $analyticsApiKey !== '' && $analyticsOid !== '' && $httpsOn) {
+    $analyticsScheme = 'https';
     $analyticsHost = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');
     $analyticsBase = rtrim(str_replace('\\', '/', dirname((string) ($_SERVER['SCRIPT_NAME'] ?? '/index.php'))), '/');
     $analyticsUrl = $analyticsScheme . '://' . $analyticsHost . $analyticsBase . '/analytics/analytics.php?' . http_build_query([
         'user_email' => $analyticsEmail,
-        'api_key' => $analyticsApiKey,
         'oid' => $analyticsOid,
     ], '', '&', PHP_QUERY_RFC3986);
 
@@ -127,6 +125,10 @@ if ($analyticsEmail !== '' && $analyticsApiKey !== '' && $analyticsOid !== '') {
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_CONNECTTIMEOUT => 1,
             CURLOPT_TIMEOUT => 1,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
             CURLOPT_HTTPHEADER => ['X-API-Key: ' . $analyticsApiKey],
         ]);
         curl_exec($analyticsCurl);

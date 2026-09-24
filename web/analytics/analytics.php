@@ -75,11 +75,13 @@ function analytics_authorize(string $email, string $apiKey, string $oid): bool
 function analytics_ensure_db_writable(): void
 {
     $dir = dirname(ANALYTICS_DB_PATH);
-    if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
+    if (!is_dir($dir) && !mkdir($dir, 0770, true) && !is_dir($dir)) {
         throw new RuntimeException('Analytics directory could not be created');
     }
 
-    @chmod($dir, 0777);
+    if (!is_writable($dir)) {
+        @chmod($dir, 0770);
+    }
 
     if (!is_writable($dir)) {
         throw new RuntimeException('Analytics directory is not writable');
@@ -87,12 +89,21 @@ function analytics_ensure_db_writable(): void
 
     if (!is_file(ANALYTICS_DB_PATH)) {
         $created = @touch(ANALYTICS_DB_PATH);
-        if ($created) {
-            @chmod(ANALYTICS_DB_PATH, 0666);
+        if (!$created) {
+            throw new RuntimeException('Analytics database could not be created');
         }
+        @chmod(ANALYTICS_DB_PATH, 0660);
     } elseif (!is_writable(ANALYTICS_DB_PATH)) {
-        @chmod(ANALYTICS_DB_PATH, 0666);
+        @chmod(ANALYTICS_DB_PATH, 0660);
     }
+}
+
+function analytics_table_exists(PDO $pdo, string $table): bool
+{
+    $statement = $pdo->prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :name");
+    $statement->execute([':name' => $table]);
+
+    return (bool) $statement->fetchColumn();
 }
 
 function analytics_pdo(): PDO
@@ -114,43 +125,67 @@ function analytics_pdo(): PDO
 
 function analytics_migrate_visited_at_to_integer(PDO $pdo): void
 {
-    $columnType = '';
-    foreach ($pdo->query('PRAGMA table_info(visits)') as $column) {
-        if (strtolower((string) ($column['name'] ?? '')) === 'visited_at') {
-            $columnType = strtoupper((string) ($column['type'] ?? ''));
-            break;
+    $pdo->beginTransaction();
+    try {
+        $visitsExists = analytics_table_exists($pdo, 'visits');
+        $copyExists = analytics_table_exists($pdo, 'visits_integer');
+        if (!$visitsExists && $copyExists) {
+            $pdo->exec('ALTER TABLE visits_integer RENAME TO visits');
+            $visitsExists = true;
+        } elseif ($visitsExists && $copyExists) {
+            $pdo->exec('DROP TABLE visits_integer');
         }
+
+        if (!$visitsExists) {
+            $pdo->commit();
+            return;
+        }
+
+        $columnType = '';
+        foreach ($pdo->query('PRAGMA table_info(visits)') as $column) {
+            if (strtolower((string) ($column['name'] ?? '')) === 'visited_at') {
+                $columnType = strtoupper((string) ($column['type'] ?? ''));
+                break;
+            }
+        }
+
+        if ($columnType === 'INTEGER') {
+            $pdo->commit();
+            return;
+        }
+
+        $pdo->exec(
+            'CREATE TABLE visits_integer (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                visited_at INTEGER NOT NULL,
+                user_email TEXT NOT NULL
+            )'
+        );
+
+        $rows = $pdo->query('SELECT id, visited_at, user_email FROM visits')->fetchAll(PDO::FETCH_ASSOC);
+        $insert = $pdo->prepare(
+            'INSERT INTO visits_integer (id, visited_at, user_email) VALUES (:id, :visited_at, :user_email)'
+        );
+
+        foreach ($rows as $row) {
+            $raw = trim((string) ($row['visited_at'] ?? ''));
+            $timestamp = ctype_digit($raw) ? (int) $raw : (int) strtotime($raw);
+            $insert->execute([
+                ':id' => (int) ($row['id'] ?? 0),
+                ':visited_at' => $timestamp > 0 ? $timestamp : time(),
+                ':user_email' => (string) ($row['user_email'] ?? ''),
+            ]);
+        }
+
+        $pdo->exec('DROP TABLE visits');
+        $pdo->exec('ALTER TABLE visits_integer RENAME TO visits');
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
     }
-
-    if ($columnType === 'INTEGER') {
-        return;
-    }
-
-    $pdo->exec(
-        'CREATE TABLE visits_integer (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            visited_at INTEGER NOT NULL,
-            user_email TEXT NOT NULL
-        )'
-    );
-
-    $rows = $pdo->query('SELECT id, visited_at, user_email FROM visits')->fetchAll(PDO::FETCH_ASSOC);
-    $insert = $pdo->prepare(
-        'INSERT INTO visits_integer (id, visited_at, user_email) VALUES (:id, :visited_at, :user_email)'
-    );
-
-    foreach ($rows as $row) {
-        $raw = trim((string) ($row['visited_at'] ?? ''));
-        $timestamp = ctype_digit($raw) ? (int) $raw : (int) strtotime($raw);
-        $insert->execute([
-            ':id' => (int) ($row['id'] ?? 0),
-            ':visited_at' => $timestamp > 0 ? $timestamp : time(),
-            ':user_email' => (string) ($row['user_email'] ?? ''),
-        ]);
-    }
-
-    $pdo->exec('DROP TABLE visits');
-    $pdo->exec('ALTER TABLE visits_integer RENAME TO visits');
 }
 
 function analytics_record_visit(string $email): void
@@ -180,6 +215,10 @@ function analytics_record_visit(string $email): void
 /**
  * Page load
  */
+
+if (defined('ANALYTICS_LIBRARY_ONLY')) {
+    return;
+}
 
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'GET' && ($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     analytics_json(['ok' => false, 'error' => 'Method not allowed'], 405);

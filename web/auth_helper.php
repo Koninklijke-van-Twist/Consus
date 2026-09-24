@@ -192,9 +192,10 @@ function auth_fetch_companies_for_environment_via_curl(string $url, array $auth)
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_FOLLOWLOCATION => false,
         CURLOPT_CONNECTTIMEOUT => 30,
         CURLOPT_TIMEOUT => 120,
+        CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
         CURLOPT_HTTPHEADER => [
             'Accept: application/json',
             'Accept-Language: nl-NL,nl;q=0.9,en;q=0.8',

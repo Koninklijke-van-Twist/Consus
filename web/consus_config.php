@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 1;
+const CONSUS_SNAPSHOT_VERSION = 2;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
@@ -34,34 +34,41 @@ const CONSUS_COMPANIES = [
 const CONSUS_DEFAULT_VENDOR_MATCH = 'Perkins';
 
 /**
- * Location_Code → bucket (egt | dropship | eigen).
- *
- * Dit zijn gokken. Codes die hier niet staan vallen in "onbekend", zodat een
- * foute gok zichtbaar blijft in plaats van stilletjes in de verkeerde kolom.
- * Tim vervangt deze map door de echte BC-locaties.
- *
- * - KVT / HVT / MAGAZIJN / HOOFDMAGAZIJN: eigen magazijn
- * - EGT: locatie die letterlijk EGT heet
- * - DROP / DROPSHIP: dropshipment (ligt niet op voorraad)
+ * Eigen-magazijnlocaties. Alleen een suggestie in de UI (KVT Dordrecht / HVT).
+ * Nightly laadt élke Location_Code; de gebruiker filtert zelf.
+ * EGT en dropship zijn geen locaties.
  */
-const CONSUS_LOCATION_BUCKETS = [
-    'KVT' => 'eigen',
-    'HVT' => 'eigen',
-    'MAGAZIJN' => 'eigen',
-    'HOOFDMAGAZIJN' => 'eigen',
-    'EGT' => 'egt',
-    'DROP' => 'dropship',
-    'DROPSHIP' => 'dropship',
-];
+const CONSUS_EIGEN_LOCATION_HINTS = ['KVT', 'HVT'];
+
+/**
+ * Splitsing verkoop en omloopsnelheid, Joost (Asclepius #1032).
+ * Dit zijn labels voor de kolommen, geen OData-filters en geen scope.
+ *
+ * - leeg inkooppad = levering magazijn (eigen)
+ * - dropship = inkoopcode DROP_SHIP en/of leverancier 90052 (HVT IC → klant)
+ * - EGT = leverancier 90101 (Perkins UK)
+ *
+ * Veldnamen op ItemLedgerEntries (OData). Tabel 32 heeft standaard géén
+ * inkoopcode en géén leveranciersnr.; die staan op verkoopregels als
+ * Purchasing_Code. Buy_from_Vendor_No is de naam op inkoopregels.
+ * Nightly vraagt de namen hieronder mee en laat ze weg als BC ze weigert.
+ * Pas de constante aan als de KVT-pagina een andere naam publiceert
+ * (bijvoorbeeld een LVS_-veld). AppItemCard.Vendor_No blijft de
+ * artikelleverancier voor het leveranciersfilter, niet deze split.
+ */
+const CONSUS_ILE_PURCHASING_CODE_FIELD = 'Purchasing_Code';
+const CONSUS_ILE_VENDOR_NO_FIELD = 'Vendor_No';
+const CONSUS_DROPSHIP_PURCHASING_CODE = 'DROP_SHIP';
+const CONSUS_DROPSHIP_VENDOR_NO = '90052';
+const CONSUS_EGT_VENDOR_NO = '90101';
 
 const CONSUS_BUCKETS = [
     'eigen' => 'Eigen',
     'egt' => 'EGT',
     'dropship' => 'Dropship',
-    'onbekend' => 'Onbekend',
 ];
 
-/** Omloopsnelheid toont eigen voorraad versus EGT. Dropship telt niet mee. */
+/** Omloopsnelheid eigen versus EGT. Dropship heeft geen eigen voorraad. */
 const CONSUS_TURNOVER_BUCKETS = ['eigen', 'egt'];
 
 /**
@@ -74,10 +81,13 @@ const CONSUS_SALES_ENTRY_TYPES = [
 
 /**
  * Werkorderverbruik via artikelposten.
- * Beste gok: Assembly Consumption. Het kale type Consumption is vaak leeg.
- * Extra types (bijvoorbeeld Consumption) hier toevoegen om ze mee te nemen.
+ * Primair: Negative Adjmt. waarvan Document_No met WO begint.
+ * Daarnaast Assembly Consumption. Niet alleen Assembly Consumption:
+ * kale Consumption blijft buiten de query.
  */
-const CONSUS_WO_ENTRY_TYPES = [
+const CONSUS_WO_PRIMARY_ENTRY_TYPE = 'Negative Adjmt.';
+const CONSUS_WO_DOCUMENT_PREFIX = 'WO';
+const CONSUS_WO_ALSO_ENTRY_TYPES = [
     'Assembly Consumption',
 ];
 
@@ -88,6 +98,10 @@ const CONSUS_STOCK_FIELDS = [
     'Inventory',
     'Safety_Stock_Quantity',
     'Reorder_Point',
+];
+/** Meenemen als de pagina het veld heeft; anders blijft voorraad zonder locatie. */
+const CONSUS_STOCK_OPTIONAL_FIELDS = [
+    'Location_Code',
 ];
 
 const CONSUS_ITEM_ENTITY = 'AppItemCard';
@@ -110,6 +124,12 @@ const CONSUS_LEDGER_FIELDS = [
     'Sales_Amount_Actual',
     'Posting_Date',
     'Location_Code',
+    'Document_No',
+];
+/** Inkooppad op de artikelpost. Geen van beide beperkt de opgehaalde set. */
+const CONSUS_LEDGER_OPTIONAL_FIELDS = [
+    CONSUS_ILE_PURCHASING_CODE_FIELD,
+    CONSUS_ILE_VENDOR_NO_FIELD,
 ];
 
 /**

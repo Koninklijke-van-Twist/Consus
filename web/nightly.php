@@ -31,7 +31,7 @@ try {
         'companies' => $snapshot['companies'] ?? [],
         'warnings' => $snapshot['warnings'] ?? [],
         'errors' => $snapshot['errors'] ?? [],
-        'unmapped_locations' => $snapshot['unmapped_locations'] ?? [],
+        'locations' => $snapshot['locations'] ?? [],
         'total_duration_ms' => (int) round((hrtime(true) - $startedAt) / 1_000_000),
     ];
 
@@ -65,8 +65,8 @@ try {
                 (string) ($error['error'] ?? '')
             );
         }
-        if ($payload['unmapped_locations'] !== []) {
-            echo '  onbekende locaties: ' . implode(', ', $payload['unmapped_locations']) . "\n";
+        if ($payload['locations'] !== []) {
+            echo '  locaties: ' . implode(', ', $payload['locations']) . "\n";
         }
         exit($payload['ok'] ? 0 : 1);
     }

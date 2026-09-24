@@ -66,7 +66,10 @@ function odata_get_json(string $url, array $auth): array
     $userAgent = 'Consus-ODataClient/1.0 (Windows; nl-NL)';
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 30,
+        CURLOPT_TIMEOUT => 300,
+        CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
         CURLOPT_USERAGENT => $userAgent,
         CURLOPT_HTTPHEADER => [
             "Accept: application/json",
@@ -1346,6 +1349,18 @@ HTML;
 }
 
 $odataAction = (string) ($_GET['action'] ?? '');
+if (odata_is_direct_request() && $odataAction !== '') {
+    require_once __DIR__ . '/auth.php';
+    require_once __DIR__ . '/logincheck.php';
+    if (
+        ($odataAction === 'cache_delete' || $odataAction === 'cache_clear')
+        && strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'POST'
+    ) {
+        http_response_code(405);
+        header('Allow: POST');
+        exit;
+    }
+}
 if (odata_is_direct_request() && $odataAction === 'cache_status') {
     odata_send_cache_status_json();
 }
