@@ -46,16 +46,14 @@ test_assert(consus_procurement_bucket('DROP_SHIP', '90101') === 'dropship', 'dro
 test_assert(consus_procurement_bucket('', 'PERK') === 'eigen', 'artikelleverancier is geen EGT');
 test_assert(consus_procurement_bucket('', '') === 'eigen' && consus_procurement_bucket_from_row(['Location_Code' => 'BYKLANT']) === 'eigen', 'locatiecode maakt geen dropship');
 
+test_assert(CONSUS_SALES_ENTRY_TYPES === ['Sale'], 'verkoop is de Engelse optienaam Sale');
 $salesFilters = consus_ledger_filters(CONSUS_SALES_ENTRY_TYPES, '2025-10-01');
-test_assert(count($salesFilters) === 2, 'verkoop probeert Nederlands bijschrift en Engelse terugval apart');
+test_assert(count($salesFilters) === 1, 'verkoop is één Entry_Type-query');
 test_assert(
-    $salesFilters[0]['$filter'] === "Entry_Type eq 'Verkoop' and Posting_Date ge 2025-10-01",
-    'verkoopfilter gebruikt het Nederlandse bijschrift'
+    $salesFilters[0]['$filter'] === "Entry_Type eq 'Sale' and Posting_Date ge 2025-10-01",
+    'verkoopfilter gebruikt de Engelse optienaam'
 );
-test_assert(
-    $salesFilters[1]['$filter'] === "Entry_Type eq 'Sale' and Posting_Date ge 2025-10-01",
-    'Engelse enumnaam is een aparte terugval'
-);
+test_assert(!str_contains($salesFilters[0]['$filter'], 'Verkoop'), 'Nederlands bijschrift Verkoop is geen optie op ItemLedgerEntries');
 foreach ($salesFilters as $salesQuery) {
     test_assert(!str_contains($salesQuery['$filter'], ' or '), 'verkoopfilter heeft geen OR');
     test_assert(!str_contains(strtolower($salesQuery['$filter']), 'startswith'), 'verkoopfilter heeft geen startswith');
@@ -69,34 +67,30 @@ foreach ($salesFilters as $salesQuery) {
 }
 $combinedSales = false;
 try {
-    consus_ledger_query(CONSUS_SALES_ENTRY_TYPES, '2025-10-01');
+    consus_ledger_query(['Sale', 'Verkoop'], '2025-10-01');
 } catch (InvalidArgumentException $error) {
     $combinedSales = str_contains($error->getMessage(), 'OR');
 }
-test_assert($combinedSales, 'twee verkoopbijschriften worden niet met OR gecombineerd');
+test_assert($combinedSales, 'twee entry types worden niet met OR gecombineerd');
 
 $woParts = consus_wo_ledger_parts();
 test_assert(count($woParts) === 2, 'werkorderverbruik is twee aparte queries');
 test_assert($woParts[0]['document_prefix'] === 'WO', 'negatieve correctie houdt documentprefix WO');
 test_assert($woParts[1]['document_prefix'] === '', 'assemblageverbruik heeft geen documentprefix');
+test_assert($woParts[0]['entry_types'] === ['Negative Adjmt.'], 'primair verbruik is Negative Adjmt.');
+test_assert($woParts[1]['entry_types'] === ['Assembly Consumption'], 'tweede verbruikquery is Assembly Consumption');
 $primaryFilters = consus_ledger_filters($woParts[0]['entry_types'], '2025-10-01');
 $alsoFilters = consus_ledger_filters($woParts[1]['entry_types'], '2025-10-01');
 test_assert(
-    $primaryFilters[0]['$filter'] === "Entry_Type eq 'Negatieve correctie' and Posting_Date ge 2025-10-01",
-    'primair verbruik is het Nederlandse bijschrift Negatieve correctie'
+    $primaryFilters[0]['$filter'] === "Entry_Type eq 'Negative Adjmt.' and Posting_Date ge 2025-10-01",
+    'primair verbruik is Negative Adjmt. zonder startswith'
 );
 test_assert(
-    $primaryFilters[1]['$filter'] === "Entry_Type eq 'Negative Adjmt.' and Posting_Date ge 2025-10-01",
-    'Engelse Negative Adjmt. is een aparte terugval'
+    $alsoFilters[0]['$filter'] === "Entry_Type eq 'Assembly Consumption' and Posting_Date ge 2025-10-01",
+    'assemblageverbruik is een eigen query'
 );
-test_assert(
-    $alsoFilters[0]['$filter'] === "Entry_Type eq 'Assemblageverbruik' and Posting_Date ge 2025-10-01",
-    'assemblageverbruik gebruikt het Nederlandse bijschrift'
-);
-test_assert(
-    $alsoFilters[1]['$filter'] === "Entry_Type eq 'Assembly Consumption' and Posting_Date ge 2025-10-01",
-    'Engelse Assembly Consumption is een aparte terugval'
-);
+test_assert(!str_contains($primaryFilters[0]['$filter'], 'Negatieve correctie'), 'Negatieve correctie is geen optie');
+test_assert(!str_contains($alsoFilters[0]['$filter'], 'Assemblageverbruik'), 'Assemblageverbruik is geen optie');
 foreach (array_merge($primaryFilters, $alsoFilters) as $woQuery) {
     test_assert(!str_contains($woQuery['$filter'], ' or '), 'verbruikfilter heeft geen OR');
     test_assert(!str_contains(strtolower($woQuery['$filter']), 'startswith'), 'verbruikfilter heeft geen startswith');
@@ -114,6 +108,8 @@ test_assert(!consus_document_no_has_prefix(['Document_No' => ''], 'WO'), 'leeg d
 test_assert(consus_document_no_has_prefix(['Document_No' => 'ASM-1'], ''), 'zonder prefix blijft elke regel');
 $rejectedFilter = new RuntimeException('ItemLedgerEntries voor Koninklijke van Twist mislukt: HTTP 501 from OData: {"error":{"code":"BadRequest_MethodNotImplemented","message":"De OData-filterexpressie wordt niet ondersteund."}}');
 test_assert(consus_odata_error_allows_entry_type_fallback($rejectedFilter), '501 filterexpressie probeert het volgende bijschrift');
+$notAnOption = new RuntimeException("HTTP 400 Unknown: 'Verkoop' is not an option. The existing options are: Purchase,Sale,Positive Adjmt.,Negative Adjmt.,Transfer,Consumption,Output, ,Assembly Consumption,Assembly ...");
+test_assert(consus_odata_error_allows_entry_type_fallback($notAnOption), '400 is not an option probeert het volgende bijschrift');
 test_assert(!consus_odata_error_allows_entry_type_fallback(new RuntimeException('cURL error: timeout')), 'netwerkfout is geen filterfout');
 
 $dimensionQuery = consus_dimension_query();

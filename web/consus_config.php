@@ -68,32 +68,31 @@ const CONSUS_TURNOVER_BUCKETS = ['eigen', 'egt'];
  * Artikelposten verkoop. BC zet uitgaande hoeveelheid negatief;
  * de cache draait het teken om zodat verkoop positief is en retouren aftrekken.
  *
- * Deze on-prem ODataV4 spreekt Nederlandse optiebijschriften (nl-NL).
- * De Engelse enumnaam is alleen een aparte terugval als BC het bijschrift weigert.
- * Nooit samen in één $filter met OR.
+ * ItemLedgerEntries op deze on-prem ODataV4 wil de Engelse optienaam.
+ * Live: Entry_Type eq 'Sale' is HTTP 200; 'Verkoop' is HTTP 400
+ * ("is not an option"). Geldige opties: Purchase, Sale, Positive Adjmt.,
+ * Negative Adjmt., Transfer, Consumption, Output, Assembly Consumption,
+ * Assembly Output. Nooit meerdere Entry_Types met OR in één $filter.
  */
 const CONSUS_SALES_ENTRY_TYPES = [
-    'Verkoop',
     'Sale',
 ];
 
 /**
  * Werkorderverbruik via artikelposten.
- * Primair: negatieve correctie waarvan Document_No met WO begint.
- * Daarnaast assemblageverbruik. Kale consumption (Verbruik / Gebruik /
- * Consumption) blijft buiten de query.
+ * Primair: Negative Adjmt. waarvan Document_No met WO begint.
+ * Daarnaast Assembly Consumption. Kale Consumption blijft buiten de query.
  *
  * BC antwoordt HTTP 501 op OR over verschillende velden en op startswith.
  * Daarom één Entry_Type per verzoek; het WO-prefix filtert PHP.
- * Eerste waarde is het Nederlandse bijschrift, de tweede de Engelse terugval.
+ * Nederlandse bijschriften (Negatieve correctie, Assemblageverbruik) zijn
+ * op deze pagina geen optie.
  */
 const CONSUS_WO_PRIMARY_ENTRY_TYPES = [
-    'Negatieve correctie',
     'Negative Adjmt.',
 ];
 const CONSUS_WO_DOCUMENT_PREFIX = 'WO';
 const CONSUS_WO_ALSO_ENTRY_TYPES = [
-    'Assemblageverbruik',
     'Assembly Consumption',
 ];
 
