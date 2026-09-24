@@ -872,6 +872,26 @@ try {
     test_assert(($peeledRows[0] ?? '') === 'PERK', 'leverancier blijft na het weghalen van het veld');
     test_assert($peeled['missing_optional'] === ['Description'], 'het geweigerde veld staat bij de ontbrekende velden');
 
+    $silentStock = consus_each_entity_rows(
+        'Koninklijke van Twist',
+        CONSUS_STOCK_ENTITY,
+        ['Item_No', 'Inventory', 'Safety_Stock_Quantity'],
+        ['Location_Code'],
+        '',
+        static function (array $row): void {
+            unset($row);
+        },
+        static function (string $url, array $auth, callable $onRow): int {
+            unset($url, $auth);
+            $onRow(['Item_No' => 'A1', 'Company_Name' => 'Koninklijke van Twist']);
+
+            return 1;
+        }
+    );
+    test_assert(in_array('Inventory', $silentStock['missing_optional'], true), 'een antwoord zonder Inventory blijft zichtbaar');
+    test_assert(in_array('Safety_Stock_Quantity', $silentStock['missing_optional'], true), 'een antwoord zonder veiligheidsvoorraad blijft zichtbaar');
+    test_assert(in_array('Location_Code', $silentStock['missing_optional'], true), 'ontbrekend locatieveld blijft in de lijst');
+
     $networkCalls = 0;
     try {
         consus_each_entity_rows(
@@ -1008,6 +1028,51 @@ test_assert(str_contains($index, '(geen afdeling)'), 'lege afdeling blijft kiesb
 test_assert(str_contains($index, 'Geen leverancier'), 'lege leverancier blijft kiesbaar');
 test_assert(str_contains($index, "\$number === '' ? '__none__' : \$number"), 'lege leverancier gebruikt dezelfde sentinel als afdeling');
 test_assert(!str_contains($index, "if (\$number === '') { continue; }"), 'lege leverancier wordt niet uit de dropdown gelaten');
+test_assert(str_contains($index, 'consus_warning_lines'), 'index.php toont snapshot.warnings');
+test_assert(str_contains($index, 'De nachtrun is afgerond, met opmerkingen.'), 'opmerkingen zijn zichtbaar en niet als fout gemarkeerd');
+test_assert(str_contains($index, "snapshot['errors']"), 'een rood blok blijft voor errors');
+$warningLines = consus_warning_lines([
+    ['company' => 'Koninklijke van Twist', 'warning' => 'Voorraad gaf geen regels. Voorraad, veiligheidsvoorraad en bestelpunt blijven 0; verkoop en verbruik kunnen wel gevuld zijn.'],
+    'Artikelkaart gaf geen regels.',
+    ['company' => 'KVT', 'warning' => ''],
+    12,
+]);
+test_assert($warningLines === [
+    'Koninklijke van Twist: Voorraad gaf geen regels. Voorraad, veiligheidsvoorraad en bestelpunt blijven 0; verkoop en verbruik kunnen wel gevuld zijn.',
+    'Artikelkaart gaf geen regels.',
+], 'lege warnings komen niet op de pagina');
+test_assert(consus_warning_lines([]) === [], 'geen warnings betekent geen notice');
+$replacedWarnings = consus_replace_company_warnings(
+    [
+        ['company' => 'Koninklijke van Twist', 'warning' => 'oude voorraad'],
+        ['company' => 'Hunter van Twist', 'warning' => 'hvt blijft'],
+    ],
+    'Koninklijke van Twist',
+    'kvt',
+    ['Voorraad gaf 4 regels, maar voorraad, veiligheidsvoorraad en bestelpunt zijn overal 0.']
+);
+test_assert(array_column($replacedWarnings, 'company') === ['Hunter van Twist', 'Koninklijke van Twist'], 'een verse run vervangt alleen de opmerkingen van dat bedrijf');
+test_assert(str_contains((string) $replacedWarnings[1]['warning'], 'overal 0'), 'de nieuwe voorraadopmerking blijft');
+$zeroStockWarnings = consus_stock_followup_warnings(4, 2, 0, []);
+test_assert(count($zeroStockWarnings) === 1 && str_contains($zeroStockWarnings[0], 'overal 0'), 'voorraadregels met alleen nullen worden een opmerking');
+test_assert(consus_stock_followup_warnings(0, 0, 0, ['Location_Code'])[0] !== '' && str_contains(consus_stock_followup_warnings(0, 0, 0, ['Location_Code'])[0], 'geen regels'), 'lege voorraad noemt geen locatieveld');
+test_assert(consus_stock_followup_warnings(3, 3, 1, []) === [], 'een niet-nul voorraad geeft geen opmerking');
+$missingInventory = consus_stock_followup_warnings(2, 2, 0, ['Inventory', 'Safety_Stock_Quantity']);
+test_assert(str_contains($missingInventory[0], 'Inventory'), 'ontbrekend voorraadveld wordt genoemd');
+test_assert(consus_vendor_followup_warnings(0, 0, 0, ['Description'])[0] !== '' && str_contains(implode(' ', consus_vendor_followup_warnings(0, 0, 0, ['Description'])), 'geen regels'), 'lege artikelkaart noemt geen optioneel veld');
+test_assert(str_contains(implode(' ', consus_vendor_followup_warnings(5, 0, 0, [])), 'geen artikel kreeg een leverancier'), 'artikelkaart zonder koppeling blijft zichtbaar');
+test_assert(consus_vendor_followup_warnings(5, 0, 2, []) === [], 'gekoppelde leverancier geeft geen extra opmerking');
+test_assert(consus_dimension_followup_warnings(0, 0) !== [] && str_contains(consus_dimension_followup_warnings(0, 0)[0], 'dimensie 15'), 'lege kostenplaats blijft een opmerking');
+test_assert(consus_dimension_followup_warnings(0, 2) === [], 'een gevulde afdeling verbergt een lege dimensiequery');
+$noFieldStock = [];
+consus_apply_stock_row($noFieldStock, [
+    'No' => 'U9',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Inventory' => 6,
+    'Safety_Stock_Quantity' => 1,
+    'Reorder_Point' => 1,
+], 'Koninklijke van Twist');
+test_assert((float) ($noFieldStock['kvt|U9']['inventory'] ?? 0) === 6.0, 'voorraad leest ook No als artikelnummer');
 test_assert(str_contains((string) file_get_contents(__DIR__ . '/../web/nightly.php'), 'consus_run_nightly'), 'nightly.php is de refresh');
 
 $lockProbeDir = sys_get_temp_dir() . '/consus-lock-probe-' . getmypid();

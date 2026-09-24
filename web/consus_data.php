@@ -1452,7 +1452,7 @@ function consus_stock_company_key(array $row, string $sourceCompany): string
 
 function consus_apply_stock_row(array &$items, array $row, string $sourceCompany): void
 {
-    $itemNo = consus_scalar_string($row['Item_No'] ?? '');
+    $itemNo = consus_scalar_string($row['Item_No'] ?? $row['No'] ?? '');
     if ($itemNo === '') {
         return;
     }
@@ -1552,7 +1552,7 @@ function consus_apply_dimension_row(array &$items, array $row, string $companyKe
         return;
     }
 
-    $itemNo = consus_scalar_string($row['No'] ?? '');
+    $itemNo = consus_scalar_string($row['No'] ?? $row['Item_No'] ?? '');
     $value = consus_scalar_string($row['Dimension_Value_Code'] ?? '');
     if ($itemNo === '' || $value === '') {
         return;
@@ -2347,6 +2347,201 @@ function consus_read_snapshot(): array
     return array_merge(consus_empty_snapshot(), $snapshot);
 }
 
+/**
+ * Tekstregels voor de pagina. Lege en onleesbare warnings verdwijnen.
+ * Een string telt ook: de nachtrun bewaart meestal company + warning.
+ *
+ * @param array<int, mixed> $warnings
+ * @return array<int, string>
+ */
+function consus_warning_lines(array $warnings): array
+{
+    $lines = [];
+    foreach ($warnings as $warning) {
+        if (is_string($warning)) {
+            $text = trim($warning);
+            if ($text !== '') {
+                $lines[] = $text;
+            }
+            continue;
+        }
+        if (!is_array($warning)) {
+            continue;
+        }
+        $company = trim((string) ($warning['company'] ?? ''));
+        $text = trim((string) ($warning['warning'] ?? $warning['message'] ?? ''));
+        if ($text === '') {
+            continue;
+        }
+        $lines[] = $company !== '' ? $company . ': ' . $text : $text;
+    }
+
+    return $lines;
+}
+
+/**
+ * @param array<int, mixed> $warnings
+ * @param array<int, string> $fresh
+ * @return array<int, array<string, mixed>>
+ */
+function consus_replace_company_warnings(array $warnings, string $company, string $companyKey, array $fresh): array
+{
+    $drop = [];
+    foreach ([$company, $companyKey] as $name) {
+        $name = trim($name);
+        if ($name !== '') {
+            $drop[$name] = true;
+        }
+    }
+    $kept = [];
+    foreach ($warnings as $warning) {
+        if (!is_array($warning)) {
+            continue;
+        }
+        $owner = trim((string) ($warning['company'] ?? ''));
+        if ($owner !== '' && isset($drop[$owner])) {
+            continue;
+        }
+        if (trim((string) ($warning['warning'] ?? $warning['message'] ?? '')) === '') {
+            continue;
+        }
+        $kept[] = $warning;
+    }
+    foreach ($fresh as $text) {
+        $text = trim((string) $text);
+        if ($text === '') {
+            continue;
+        }
+        $kept[] = [
+            'company' => $company,
+            'warning' => $text,
+        ];
+    }
+
+    return $kept;
+}
+
+/**
+ * @param array<string, array<string, mixed>> $items
+ * @return array{items:int,nonzero:int,with_vendor:int,with_cost:int}
+ */
+function consus_company_fact_signal(array $items, string $companyKey): array
+{
+    $signal = [
+        'items' => 0,
+        'nonzero' => 0,
+        'with_vendor' => 0,
+        'with_cost' => 0,
+    ];
+    foreach ($items as $item) {
+        if (!is_array($item) || (string) ($item['company_key'] ?? '') !== $companyKey) {
+            continue;
+        }
+        $signal['items']++;
+        $inventory = abs((float) ($item['inventory'] ?? 0));
+        $safety = abs((float) ($item['safety_stock'] ?? 0));
+        $reorder = abs((float) ($item['reorder_point'] ?? 0));
+        if ($inventory >= 0.0000001 || $safety >= 0.0000001 || $reorder >= 0.0000001) {
+            $signal['nonzero']++;
+        }
+        if (trim((string) ($item['vendor_no'] ?? '')) !== '') {
+            $signal['with_vendor']++;
+        }
+        if (trim((string) ($item['cost_center'] ?? '')) !== '') {
+            $signal['with_cost']++;
+        }
+    }
+
+    return $signal;
+}
+
+/**
+ * Voorraad kan slagen met nullen of regels die niet aan een artikel hangen.
+ * Dat is geen error: verkoop blijft staan en de pagina zag geen notice.
+ *
+ * @param array<int, string> $missingFields
+ * @return array<int, string>
+ */
+function consus_stock_followup_warnings(int $rowCount, int $appliedItems, int $nonzeroItems, array $missingFields): array
+{
+    $warnings = [];
+    $quantityFields = ['Item_No', 'No', 'Company_Name', 'Inventory', 'Safety_Stock_Quantity', 'Reorder_Point'];
+    $missingQuantity = [];
+    $missingLocation = [];
+    foreach ($missingFields as $field) {
+        $field = (string) $field;
+        if ($field === '') {
+            continue;
+        }
+        if (in_array($field, CONSUS_STOCK_OPTIONAL_FIELDS, true)) {
+            $missingLocation[] = $field;
+            continue;
+        }
+        if (in_array($field, $quantityFields, true)) {
+            $missingQuantity[] = $field;
+        }
+    }
+    if ($rowCount > 0 && $missingQuantity !== []) {
+        $warnings[] = CONSUS_STOCK_ENTITY . ': velden ontbreken in het antwoord (' . implode(', ', $missingQuantity) . '). Ontbrekende aantallen blijven 0.';
+    }
+    if ($rowCount > 0 && $missingLocation !== []) {
+        $warnings[] = CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $missingLocation) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.';
+    }
+    if ($rowCount === 0) {
+        $warnings[] = 'Voorraad gaf geen regels. Voorraad, veiligheidsvoorraad en bestelpunt blijven 0; verkoop en verbruik kunnen wel gevuld zijn.';
+    } elseif ($appliedItems === 0) {
+        $warnings[] = 'Voorraad gaf ' . $rowCount . ' regels, maar geen artikelnummer hoorde bij dit bedrijf. De aantallen blijven 0.';
+    } elseif ($nonzeroItems === 0) {
+        $warnings[] = 'Voorraad gaf ' . $rowCount . ' regels, maar voorraad, veiligheidsvoorraad en bestelpunt zijn overal 0.';
+    }
+
+    return $warnings;
+}
+
+/**
+ * @param array<int, string> $missingFields
+ * @return array<int, string>
+ */
+function consus_vendor_followup_warnings(int $rowCount, int $withVendorBefore, int $withVendorAfter, array $missingFields): array
+{
+    $warnings = [];
+    $named = [];
+    foreach ($missingFields as $field) {
+        $field = (string) $field;
+        if ($field !== '' && !in_array($field, $named, true)) {
+            $named[] = $field;
+        }
+    }
+    if ($rowCount > 0 && $named !== []) {
+        $warnings[] = CONSUS_ITEM_ENTITY . ': velden niet beschikbaar (' . implode(', ', $named) . '). Nummer en leverancier blijven staan als die query wel lukte.';
+    }
+    if ($rowCount === 0) {
+        $warnings[] = 'Artikelkaart gaf geen regels. Leverancier en afdeling van de kaart blijven leeg.';
+
+        return $warnings;
+    }
+    if ($withVendorAfter === $withVendorBefore) {
+        $warnings[] = 'Artikelkaart gaf ' . $rowCount . ' regels, maar geen artikel kreeg een leverancier. Vendor_No is leeg, of het artikel kwam niet uit voorraad of het grootboek.';
+    }
+
+    return $warnings;
+}
+
+/**
+ * @return array<int, string>
+ */
+function consus_dimension_followup_warnings(int $rowCount, int $withCostAfter): array
+{
+    if ($withCostAfter > 0) {
+        return [];
+    }
+    if ($rowCount === 0) {
+        return ['Geen kostenplaatsregels (dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . '). Afdeling blijft leeg als de artikelkaart ook geen COST_CENTER heeft.'];
+    }
+
+    return ['Kostenplaats gaf ' . $rowCount . ' regels, maar geen afdeling kon worden gekoppeld (No, Dimension_Value_Code, dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ').'];
+}
+
 function consus_with_snapshot_lock(callable $callback): mixed
 {
     $path = consus_snapshot_file();
@@ -2666,6 +2861,13 @@ function consus_each_entity_rows(
                     foreach ($optionalLeft as $field) {
                         if (!is_array($sample) || !array_key_exists($field, $sample)) {
                             $missing[] = $field;
+                        }
+                    }
+                    if (is_array($sample)) {
+                        foreach ($requiredLeft as $field) {
+                            if (!array_key_exists($field, $sample)) {
+                                $missing[] = $field;
+                            }
                         }
                     }
 
@@ -3724,6 +3926,7 @@ function consus_collect_company(
             $saveCheckpoint,
             $persist
         );
+        $stockResult = is_array($stockOutcome['result'] ?? null) ? $stockOutcome['result'] : [];
         if (!empty($stockOutcome['replayed'])) {
             $note([
                 'step' => 'voorraad',
@@ -3735,13 +3938,19 @@ function consus_collect_company(
             if (!empty($stockOutcome['missing'])) {
                 $addWarning('Opgeslagen voorraad ontbreekt en wordt opnieuw opgehaald.');
             }
-            $stockResult = is_array($stockOutcome['result'] ?? null) ? $stockOutcome['result'] : [];
-            if (($stockResult['missing_optional'] ?? []) !== []) {
-                $addWarning(CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $stockResult['missing_optional']) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.');
-            }
             if (!empty($stockResult['page_size_fallback'])) {
                 $addWarning(consus_page_size_warning(CONSUS_STOCK_ENTITY));
             }
+        }
+        $stockSignal = consus_company_fact_signal($items, $companyKey);
+        $stockCount = !empty($stockOutcome['replayed'])
+            ? (int) $stockOutcome['rows']
+            : (int) ($stockResult['count'] ?? 0);
+        $stockMissing = !empty($stockOutcome['replayed']) || !is_array($stockResult['missing_optional'] ?? null)
+            ? []
+            : $stockResult['missing_optional'];
+        foreach (consus_stock_followup_warnings($stockCount, $stockSignal['items'], $stockSignal['nonzero'], $stockMissing) as $stockWarning) {
+            $addWarning($stockWarning);
         }
 
         foreach (consus_ledger_steps() as $step) {
@@ -3784,6 +3993,7 @@ function consus_collect_company(
         }
 
         try {
+            $vendorBefore = consus_company_fact_signal($items, $companyKey);
             $vendorOutcome = consus_collect_entity_with_checkpoint(
                 $checkpoint['companies'][$companyKey]['steps'],
                 $companyKey,
@@ -3816,6 +4026,7 @@ function consus_collect_company(
                 $saveCheckpoint,
                 $persist
             );
+            $vendorResult = is_array($vendorOutcome['result'] ?? null) ? $vendorOutcome['result'] : [];
             if (!empty($vendorOutcome['replayed'])) {
                 $note([
                     'step' => 'artikelen',
@@ -3827,20 +4038,19 @@ function consus_collect_company(
                 if (!empty($vendorOutcome['missing'])) {
                     $addWarning('Opgeslagen artikelen ontbreken en worden opnieuw opgehaald.');
                 }
-                $vendorResult = is_array($vendorOutcome['result'] ?? null) ? $vendorOutcome['result'] : [];
-                $missingVendorFields = [];
-                foreach ($vendorResult['missing_optional'] ?? [] as $field) {
-                    $field = (string) $field;
-                    if ($field !== '' && !in_array($field, $missingVendorFields, true)) {
-                        $missingVendorFields[] = $field;
-                    }
-                }
-                if ($missingVendorFields !== []) {
-                    $addWarning(CONSUS_ITEM_ENTITY . ': velden niet beschikbaar (' . implode(', ', $missingVendorFields) . '). Nummer en leverancier blijven staan als die query wel lukte.');
-                }
                 if (!empty($vendorResult['page_size_fallback'])) {
                     $addWarning(consus_page_size_warning(CONSUS_ITEM_ENTITY));
                 }
+            }
+            $vendorAfter = consus_company_fact_signal($items, $companyKey);
+            $vendorCount = !empty($vendorOutcome['replayed'])
+                ? (int) $vendorOutcome['rows']
+                : (int) ($vendorResult['count'] ?? 0);
+            $vendorMissing = !empty($vendorOutcome['replayed']) || !is_array($vendorResult['missing_optional'] ?? null)
+                ? []
+                : $vendorResult['missing_optional'];
+            foreach (consus_vendor_followup_warnings($vendorCount, $vendorBefore['with_vendor'], $vendorAfter['with_vendor'], $vendorMissing) as $vendorWarning) {
+                $addWarning($vendorWarning);
             }
         } catch (Throwable $error) {
             $addWarning('Artikelen (leverancier) niet geladen: ' . $error->getMessage());
@@ -3880,6 +4090,7 @@ function consus_collect_company(
                 $saveCheckpoint,
                 $persist
             );
+            $dimensionResult = is_array($dimensionOutcome['result'] ?? null) ? $dimensionOutcome['result'] : [];
             if (!empty($dimensionOutcome['replayed'])) {
                 $note([
                     'step' => 'kostenplaats',
@@ -3891,10 +4102,16 @@ function consus_collect_company(
                 if (!empty($dimensionOutcome['missing'])) {
                     $addWarning('Opgeslagen kostenplaats ontbreekt en wordt opnieuw opgehaald.');
                 }
-                $dimensionResult = is_array($dimensionOutcome['result'] ?? null) ? $dimensionOutcome['result'] : [];
                 if (!empty($dimensionResult['page_size_fallback'])) {
                     $addWarning(consus_page_size_warning(CONSUS_DIMENSION_ENTITY));
                 }
+            }
+            $dimensionAfter = consus_company_fact_signal($items, $companyKey);
+            $dimensionCount = !empty($dimensionOutcome['replayed'])
+                ? (int) $dimensionOutcome['rows']
+                : (int) ($dimensionResult['count'] ?? 0);
+            foreach (consus_dimension_followup_warnings($dimensionCount, $dimensionAfter['with_cost']) as $dimensionWarning) {
+                $addWarning($dimensionWarning);
             }
         } catch (Throwable $error) {
             $addWarning('Kostenplaats (dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ') niet geladen: ' . $error->getMessage());
@@ -4281,6 +4498,16 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         $previousArticles[(string) $key] = consus_previous_articles_for_company($previous, (string) $key);
     }
     $previousStats = is_array($previous['companies'] ?? null) ? $previous['companies'] : [];
+    $warnings = [];
+    foreach (is_array($previous['warnings'] ?? null) ? $previous['warnings'] : [] as $carriedWarning) {
+        if (!is_array($carriedWarning)) {
+            continue;
+        }
+        if (trim((string) ($carriedWarning['warning'] ?? $carriedWarning['message'] ?? '')) === '') {
+            continue;
+        }
+        $warnings[] = $carriedWarning;
+    }
     $resumeSnapshot = [
         'version' => $previous['version'] ?? 0,
         'as_of' => $previous['as_of'] ?? '',
@@ -4294,7 +4521,6 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
     $foreignSpills = [];
     $companyStats = [];
     $errors = [];
-    $warnings = [];
     $missingCompanies = consus_missing_company_records(
         $companies,
         is_array($discovered['errors'] ?? null) ? $discovered['errors'] : []
@@ -4468,9 +4694,12 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
                 }
             }
             gc_collect_cycles();
-            foreach ($result['warnings'] as $warning) {
-                $warnings[] = ['company' => $company, 'warning' => $warning];
-            }
+            $warnings = consus_replace_company_warnings(
+                $warnings,
+                $company,
+                $companyKey,
+                is_array($result['warnings'] ?? null) ? $result['warnings'] : []
+            );
             $companyStats[] = consus_completed_company_stat(
                 $company,
                 $companyKey,

@@ -80,6 +80,10 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   `(geen afdeling)` en `Geen leverancier`. Alleen een lege `rows`-lijst laat
   beide dropdowns op Alle staan. De catalogus `cost_centers` laat lege
   waarden weg; de keuzes komen uit `rows`.
+- Een gelukte nachtrun kan `warnings` hebben zonder `errors`. De pagina toont
+  die opmerkingen (voorraad overal 0, geen artikelkaart, geen kostenplaats).
+  Een bedrijf dat dezelfde dag wordt overgeslagen houdt de opmerkingen van
+  die run.
   Onder de totalen staat een artikeltabel op artikelnummer, met
   veiligheidsvoorraad, voorraad van de gekozen locaties en WO-verbruik
   (maand, kwartaal, jaar).
