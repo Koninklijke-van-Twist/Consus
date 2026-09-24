@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 2;
+const CONSUS_SNAPSHOT_VERSION = 3;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
@@ -34,41 +34,31 @@ const CONSUS_COMPANIES = [
 const CONSUS_DEFAULT_VENDOR_MATCH = 'Perkins';
 
 /**
- * Eigen-magazijnlocaties. Alleen een suggestie in de UI (KVT Dordrecht / HVT).
- * Nightly laadt élke Location_Code; de gebruiker filtert zelf.
- * EGT en dropship zijn geen locaties.
- */
-const CONSUS_EIGEN_LOCATION_HINTS = ['KVT', 'HVT'];
-
-/**
- * Splitsing verkoop en omloopsnelheid, Joost (Asclepius #1032).
- * Dit zijn labels voor de kolommen, geen OData-filters en geen scope.
+ * Location_Code → kolom voor verkoop en omloopsnelheid (Ariadne, beste gok).
+ * Nightly laadt élke locatie; dit is geen OData-filter en geen scope.
  *
- * - leeg inkooppad = levering magazijn (eigen)
- * - dropship = inkoopcode DROP_SHIP en/of leverancier 90052 (HVT IC → klant)
- * - EGT = leverancier 90101 (Perkins UK)
+ * - eigen: KVT (KVT-verkopen), HVT (HVT-verkopen)
+ * - dropship: BYKLANT (“Bij klant opgeslagen”), dichtstbijzijnde AppLocations-code
+ * - egt: leeg tot Joost de echte codes aanlevert. Geen verzonnen EGT-code.
+ *   De EGT-kolom blijft daardoor leeg; de PR is compleet zonder die split.
  *
- * Veldnamen op ItemLedgerEntries (OData). Tabel 32 heeft standaard géén
- * inkoopcode en géén leveranciersnr.; die staan op verkoopregels als
- * Purchasing_Code. Buy_from_Vendor_No is de naam op inkoopregels.
- * Nightly vraagt de namen hieronder mee en laat ze weg als BC ze weigert.
- * Pas de constante aan als de KVT-pagina een andere naam publiceert
- * (bijvoorbeeld een LVS_-veld). AppItemCard.Vendor_No blijft de
- * artikelleverancier voor het leveranciersfilter, niet deze split.
+ * Elke andere code, inclusief M-locaties, valt in overig. Dat is geen EGT.
  */
-const CONSUS_ILE_PURCHASING_CODE_FIELD = 'Purchasing_Code';
-const CONSUS_ILE_VENDOR_NO_FIELD = 'Vendor_No';
-const CONSUS_DROPSHIP_PURCHASING_CODE = 'DROP_SHIP';
-const CONSUS_DROPSHIP_VENDOR_NO = '90052';
-const CONSUS_EGT_VENDOR_NO = '90101';
+const CONSUS_LOCATIONS_EIGEN = ['KVT', 'HVT'];
+const CONSUS_LOCATIONS_DROPSHIP = ['BYKLANT'];
+const CONSUS_LOCATIONS_EGT = [];
 
 const CONSUS_BUCKETS = [
     'eigen' => 'Eigen',
     'egt' => 'EGT',
     'dropship' => 'Dropship',
+    'overig' => 'Overig',
 ];
 
-/** Omloopsnelheid eigen versus EGT. Dropship heeft geen eigen voorraad. */
+/**
+ * Omloopsnelheid eigen versus EGT. EGT blijft leeg zolang CONSUS_LOCATIONS_EGT leeg is.
+ * Dropship en overig hebben geen eigen omloopsnelheid.
+ */
 const CONSUS_TURNOVER_BUCKETS = ['eigen', 'egt'];
 
 /**
@@ -125,11 +115,6 @@ const CONSUS_LEDGER_FIELDS = [
     'Posting_Date',
     'Location_Code',
     'Document_No',
-];
-/** Inkooppad op de artikelpost. Geen van beide beperkt de opgehaalde set. */
-const CONSUS_LEDGER_OPTIONAL_FIELDS = [
-    CONSUS_ILE_PURCHASING_CODE_FIELD,
-    CONSUS_ILE_VENDOR_NO_FIELD,
 ];
 
 /**

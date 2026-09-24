@@ -10,15 +10,17 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
 
 - `nightly.php` haalt voor KVT en HVT alle artikelen, locaties, leveranciers,
   voorraad, verkopen en werkorderverbruik op en schrijft
-  `web/data/consus_snapshot.json`. Niets wordt vastgezet op Perkins, 90052 of 90101.
+  `web/data/consus_snapshot.json`. Niets wordt vastgezet op Perkins of één locatie.
 - Omloopsnelheid (maand, kwartaal, jaar) = verkoophoeveelheid ÷ voorraad van
-  de gekozen locaties. Eigen en EGT delen die noemer. Dropship telt niet mee.
+  de gekozen locaties. Eigen en EGT delen die noemer. EGT blijft leeg tot
+  `CONSUS_LOCATIONS_EGT` gevuld is. Dropship telt niet mee.
 - De pagina filtert eerst op afdeling, daarna op leverancier en locatie uit
   die cache. Perkins kan de eerste leverancierskeuze zijn en is te wissen.
-- Eigen, EGT en dropship zijn inkooppaden, geen locatiecodes: leeg is magazijn,
-  `DROP_SHIP` of leverancier `90052` is dropship, leverancier `90101` is EGT.
-  KVT en HVT zijn alleen een hint voor eigen magazijn. Werkorderverbruik is
-  `Negative Adjmt.` met documentnummer `WO…`, plus `Assembly Consumption`.
+- Locatiekolommen (Ariadne): eigen is `KVT` en `HVT`, dropship is `BYKLANT`
+  (“Bij klant opgeslagen”). EGT-codes zijn een lege TODO; die worden niet
+  verzonnen. Andere locaties vallen in overig. Werkorderverbruik is
+  `Negative Adjmt.` met documentnummer `WO…` (bijvoorbeeld WO2601478), plus
+  `Assembly Consumption`. Verkoop komt uit artikelposten met Entry_Type Sale.
 
 Lokaal, zodra `web/auth.php` op de machine staat:
 

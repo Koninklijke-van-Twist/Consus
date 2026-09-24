@@ -202,36 +202,30 @@ function consus_location_code(array $row): string
 }
 
 /**
- * Eigen / EGT / dropship volgens inkooppad. Locatie speelt hier niet mee.
- * Dropship wint als zowel DROP_SHIP als leverancier 90101 op één regel staan.
+ * Kolom voor een Location_Code. EGT blijft leeg tot CONSUS_LOCATIONS_EGT gevuld is.
+ * Onbekende codes worden niet als EGT gerekend.
  */
-function consus_procurement_bucket(string $purchasingCode, string $vendorNo): string
+function consus_bucket_for_location(string $locationCode): string
 {
-    $code = strtoupper(trim($purchasingCode));
-    $vendor = strtoupper(trim($vendorNo));
-    $dropCode = strtoupper(trim(CONSUS_DROPSHIP_PURCHASING_CODE));
-    $dropVendor = strtoupper(trim(CONSUS_DROPSHIP_VENDOR_NO));
-    $egtVendor = strtoupper(trim(CONSUS_EGT_VENDOR_NO));
-
-    if (($dropCode !== '' && $code === $dropCode) || ($dropVendor !== '' && $vendor === $dropVendor)) {
-        return 'dropship';
-    }
-    if ($egtVendor !== '' && $vendor === $egtVendor) {
-        return 'egt';
+    $code = strtoupper(trim($locationCode));
+    if ($code === '') {
+        return 'overig';
     }
 
-    return 'eigen';
-}
+    $lists = [
+        'eigen' => CONSUS_LOCATIONS_EIGEN,
+        'dropship' => CONSUS_LOCATIONS_DROPSHIP,
+        'egt' => CONSUS_LOCATIONS_EGT,
+    ];
+    foreach ($lists as $bucket => $codes) {
+        foreach ($codes as $candidate) {
+            if (strtoupper(trim((string) $candidate)) === $code) {
+                return $bucket;
+            }
+        }
+    }
 
-function consus_procurement_bucket_from_row(array $row): string
-{
-    $purchasingField = CONSUS_ILE_PURCHASING_CODE_FIELD;
-    $vendorField = CONSUS_ILE_VENDOR_NO_FIELD;
-
-    return consus_procurement_bucket(
-        consus_scalar_string($purchasingField !== '' ? ($row[$purchasingField] ?? '') : ''),
-        consus_scalar_string($vendorField !== '' ? ($row[$vendorField] ?? '') : '')
-    );
+    return 'overig';
 }
 
 /**
@@ -650,9 +644,9 @@ function consus_apply_ledger_row(array &$items, array $row, string $companyKey, 
     }
 
     $location = consus_location_code($row);
-    $bucket = consus_procurement_bucket_from_row($row);
+    $bucket = consus_bucket_for_location($location);
     if (!isset(CONSUS_BUCKETS[$bucket])) {
-        $bucket = 'eigen';
+        $bucket = 'overig';
     }
 
     $key = $companyKey . '|' . $itemNo;
@@ -1230,26 +1224,23 @@ function consus_collect_company(string $company, string $companyKey, array &$ite
     }
 
     $salesQuery = consus_ledger_query(CONSUS_SALES_ENTRY_TYPES, $windows['history_start']);
-    $salesResult = consus_each_entity_rows(
+    consus_each_entity_rows(
         $company,
         CONSUS_LEDGER_ENTITY,
         CONSUS_LEDGER_FIELDS,
-        CONSUS_LEDGER_OPTIONAL_FIELDS,
+        [],
         (string) ($salesQuery['$filter'] ?? ''),
         static function (array $row) use (&$items, $companyKey, $windows): void {
             consus_apply_ledger_row($items, $row, $companyKey, 'sales', $windows);
         }
     );
-    if (($salesResult['missing_optional'] ?? []) !== []) {
-        $warnings[] = 'Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $salesResult['missing_optional']) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.';
-    }
 
     $consumptionQuery = consus_wo_ledger_query($windows['history_start']);
     consus_each_entity_rows(
         $company,
         CONSUS_LEDGER_ENTITY,
         CONSUS_LEDGER_FIELDS,
-        CONSUS_LEDGER_OPTIONAL_FIELDS,
+        [],
         (string) ($consumptionQuery['$filter'] ?? ''),
         static function (array $row) use (&$items, $companyKey, $windows): void {
             consus_apply_ledger_row($items, $row, $companyKey, 'consumption', $windows);
