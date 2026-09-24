@@ -131,6 +131,7 @@ $sales = is_array($summary['sales'] ?? null) ? $summary['sales'] : [];
 $consumption = is_array($summary['consumption'] ?? null) ? $summary['consumption'] : [];
 $turnover = is_array($summary['turnover'] ?? null) ? $summary['turnover'] : [];
 
+$warningLines = consus_warning_lines(is_array($snapshot['warnings'] ?? null) ? $snapshot['warnings'] : []);
 $selectedVendorName = 'Alle leveranciers';
 if ($vendorFilter === '__none__') {
     $selectedVendorName = 'Geen leverancier';
@@ -197,6 +198,8 @@ if ($vendorFilter === '__none__') {
             background: #0099cc; color: #fff; cursor: pointer;
         }
         .notice { margin-bottom: 16px; padding: 13px 16px; border-radius: 12px; background: #fff8e7; border: 1px solid #f3d691; color: #704d00; }
+        .notice p { margin: 0 0 8px; }
+        .notice div + div { margin-top: 6px; }
         .notice.error { background: #fff0f0; border-color: #efb3b3; color: #8b2020; }
         .table-wrap { overflow: auto; }
         table { width: 100%; border-collapse: collapse; font-size: .89rem; }
@@ -246,11 +249,11 @@ if ($vendorFilter === '__none__') {
     <?php if (($snapshot['errors'] ?? []) !== []): ?>
         <div class="notice error">De laatste nachtelijke controle was niet voor ieder bedrijf succesvol. Eerdere cijfers zijn waar mogelijk behouden.</div>
     <?php endif; ?>
-    <?php if (is_array($snapshot['warnings'] ?? null) && $snapshot['warnings'] !== []): ?>
+    <?php if ($warningLines !== []): ?>
         <div class="notice">
-            <?php foreach ($snapshot['warnings'] as $warning): ?>
-                <?php if (!is_array($warning)) { continue; } ?>
-                <div><?= consus_h(trim((string) ($warning['company'] ?? ''))) ?><?= trim((string) ($warning['company'] ?? '')) !== '' ? ': ' : '' ?><?= consus_h((string) ($warning['warning'] ?? '')) ?></div>
+            <p><strong>De nachtrun is afgerond, met opmerkingen.</strong> De cijfers zijn bijgewerkt. Hieronder staat wat Business Central niet meegaf.</p>
+            <?php foreach ($warningLines as $warningLine): ?>
+                <div><?= consus_h($warningLine) ?></div>
             <?php endforeach; ?>
         </div>
     <?php endif; ?>

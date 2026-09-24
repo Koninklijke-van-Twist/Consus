@@ -201,9 +201,17 @@ function consus_missing_company_records(array $companies, array $discoveryErrors
     ];
 }
 
+/**
+ * @return array<int, string>
+ */
+function consus_location_field_names(): array
+{
+    return ['Location_Code', 'LocationCode', 'Locatiecode', 'Locatie', 'Location_No'];
+}
+
 function consus_location_code(array $row): string
 {
-    foreach (['Location_Code', 'Locatiecode', 'Locatie', 'Location_No'] as $name) {
+    foreach (consus_location_field_names() as $name) {
         if (!array_key_exists($name, $row)) {
             continue;
         }
@@ -520,6 +528,59 @@ function consus_dimension_query(): array
     $filter = 'Table_ID eq ' . (int) CONSUS_DIMENSION_TABLE_ID . " and Dimension_Code eq '" . $code . "'";
 
     return consus_entity_query(CONSUS_DIMENSION_FIELDS, $filter);
+}
+
+function consus_dimension_code_filter(): string
+{
+    $code = consus_escape_odata_string(CONSUS_COST_CENTER_DIMENSION_CODE);
+
+    return "Dimension_Code eq '" . $code . "'";
+}
+
+/**
+ * Eerst tabel 27 én dimensie 15. Weigert BC dat tabelfilter, dan alleen
+ * dimensie 15 — niet de hele DefaultDimensions-pagina.
+ *
+ * @param callable(array<string, mixed>):void $onRow
+ * @param callable(string, array<string, mixed>, callable(array<string, mixed>):void):int|null $fetchRows
+ * @return array{count:int,optional_fields:bool,missing_optional:array<int, string>,page_size_fallback:bool,filter_fallback:bool}
+ */
+function consus_each_dimension_rows(
+    string $company,
+    callable $onRow,
+    ?callable $fetchRows = null,
+    ?callable $onPage = null
+): array {
+    $filters = [
+        (string) (consus_dimension_query()['$filter'] ?? ''),
+        consus_dimension_code_filter(),
+    ];
+    $lastError = null;
+    foreach ($filters as $index => $filter) {
+        try {
+            $result = consus_each_entity_rows(
+                $company,
+                CONSUS_DIMENSION_ENTITY,
+                CONSUS_DIMENSION_FIELDS,
+                CONSUS_DIMENSION_OPTIONAL_FIELDS,
+                $filter,
+                $onRow,
+                $fetchRows,
+                $onPage
+            );
+            $result['filter_fallback'] = $index > 0;
+
+            return $result;
+        } catch (Throwable $error) {
+            $lastError = $error;
+            if ($index === 0 && consus_odata_error_allows_entry_type_fallback($error)) {
+                continue;
+            }
+            throw $error;
+        }
+    }
+
+    throw $lastError ?? new RuntimeException(CONSUS_DIMENSION_ENTITY . ' voor ' . $company . ' mislukt.');
 }
 
 /**
@@ -1539,7 +1600,7 @@ function consus_apply_stock_row(array &$items, array $row, string $sourceCompany
     // niet nog eens op.
     $incoming = [
         'inventory' => consus_scalar_float($row['Inventory'] ?? 0),
-        'safety_stock' => consus_scalar_float($row['Safety_Stock_Quantity'] ?? 0),
+        'safety_stock' => consus_first_nonzero_float($row, ['Safety_Stock_Quantity', 'Veiligheidsvoorraad', 'SafetyStockQuantity']),
         'reorder_point' => consus_first_nonzero_float($row, ['Reorder_Point', 'Bestelpunt', 'ReorderPoint']),
     ];
     foreach ($incoming as $field => $value) {
@@ -1598,6 +1659,158 @@ function consus_apply_vendor_row(array &$items, array $row, string $companyKey):
     if ($description !== '') {
         $items[$key]['description'] = $description;
     }
+
+    consus_apply_item_planning($items[$key], $row);
+}
+
+/**
+ * Veiligheidsvoorraad en bestelpunt staan in BC op het artikel, niet per
+ * voorraadregel. VoorraadPerBedrijf kan Inventory vullen en die twee op 0
+ * laten. Eén keer toevoegen, op de locatie die al voorraad heeft, zodat een
+ * artikel met meerdere locaties niet dubbel telt.
+ *
+ * @param array<string, mixed> $item
+ */
+function consus_apply_item_planning(array &$item, array $row): void
+{
+    $safety = consus_first_nonzero_float($row, ['Safety_Stock_Quantity', 'Veiligheidsvoorraad', 'SafetyStockQuantity']);
+    $reorder = consus_first_nonzero_float($row, ['Reorder_Point', 'Bestelpunt', 'ReorderPoint']);
+    if (abs($safety) < 0.0000001 && abs($reorder) < 0.0000001) {
+        return;
+    }
+
+    $target = null;
+    $locations = is_array($item['by_location'] ?? null) ? $item['by_location'] : [];
+    foreach ($locations as $code => $metrics) {
+        if (!is_array($metrics)) {
+            continue;
+        }
+        if ($target === null) {
+            $target = (string) $code;
+        }
+        if (abs((float) ($metrics['inventory'] ?? 0)) >= 0.0000001) {
+            $target = (string) $code;
+            break;
+        }
+    }
+    if ($target === null) {
+        $target = '';
+    }
+    consus_location_metrics($item, $target);
+    if (!isset($item['_stock_seen'][$target]) || !is_array($item['_stock_seen'][$target])) {
+        $item['_stock_seen'][$target] = [];
+    }
+
+    if (abs($safety) >= 0.0000001 && abs((float) ($item['safety_stock'] ?? 0)) < 0.0000001) {
+        $item['by_location'][$target]['safety_stock'] = (float) ($item['by_location'][$target]['safety_stock'] ?? 0) + $safety;
+        $item['safety_stock'] = (float) ($item['safety_stock'] ?? 0) + $safety;
+        $item['_stock_seen'][$target]['safety_stock'] = true;
+    }
+    if (abs($reorder) >= 0.0000001 && abs((float) ($item['reorder_point'] ?? 0)) < 0.0000001) {
+        $item['by_location'][$target]['reorder_point'] = (float) ($item['by_location'][$target]['reorder_point'] ?? 0) + $reorder;
+        $item['reorder_point'] = (float) ($item['reorder_point'] ?? 0) + $reorder;
+        $item['_stock_seen'][$target]['reorder_point'] = true;
+    }
+}
+
+/**
+ * @param array<string, array<string, mixed>> $items
+ * @return array<int, string>
+ */
+function consus_planning_gap_warnings(array $items, string $companyKey): array
+{
+    $withInventory = 0;
+    $safety = 0.0;
+    $reorder = 0.0;
+    $withCost = 0;
+    $locatedInventory = 0;
+    foreach ($items as $item) {
+        if (!is_array($item) || (string) ($item['company_key'] ?? '') !== $companyKey) {
+            continue;
+        }
+        if (abs((float) ($item['inventory'] ?? 0)) < 0.0000001) {
+            continue;
+        }
+        $withInventory++;
+        $safety += abs((float) ($item['safety_stock'] ?? 0));
+        $reorder += abs((float) ($item['reorder_point'] ?? 0));
+        if (trim((string) ($item['cost_center'] ?? '')) !== '') {
+            $withCost++;
+        }
+        $locations = is_array($item['by_location'] ?? null) ? $item['by_location'] : [];
+        foreach ($locations as $code => $metrics) {
+            if (!is_array($metrics) || trim((string) $code) === '') {
+                continue;
+            }
+            if (abs((float) ($metrics['inventory'] ?? 0)) >= 0.0000001) {
+                $locatedInventory++;
+            }
+        }
+    }
+    if ($withInventory === 0) {
+        return [];
+    }
+
+    $warnings = [];
+    if ($safety < 0.0000001) {
+        $warnings[] = 'Voorraad is gevuld, maar veiligheidsvoorraad blijft 0. VoorraadPerBedrijf en de artikelkaart gaven geen Safety_Stock_Quantity.';
+    }
+    if ($reorder < 0.0000001) {
+        $warnings[] = 'Bestelpunt blijft 0. Noch Reorder_Point noch Bestelpunt was gevuld op voorraad of de artikelkaart.';
+    }
+    if ($withCost === 0) {
+        $warnings[] = 'Geen afdeling op de artikelen. COST_CENTER, globale dimensie 1 en dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ' leverden niets.';
+    }
+    if ($locatedInventory === 0) {
+        $warnings[] = 'Voorraad staat zonder locatie. Location_Code ontbreekt op VoorraadPerBedrijf; de regels vallen onder (zonder locatie).';
+    }
+
+    return $warnings;
+}
+
+function consus_is_planning_gap_warning(string $warning): bool
+{
+    foreach ([
+        'Voorraad is gevuld, maar veiligheidsvoorraad blijft 0.',
+        'Bestelpunt blijft 0.',
+        'Geen afdeling op de artikelen.',
+        'Voorraad staat zonder locatie.',
+    ] as $prefix) {
+        if (str_starts_with($warning, $prefix)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @param array<int, mixed> $warnings
+ * @return array<int, string>
+ */
+function consus_warning_lines(array $warnings): array
+{
+    $lines = [];
+    foreach ($warnings as $warning) {
+        if (is_string($warning)) {
+            $text = trim($warning);
+            if ($text !== '') {
+                $lines[] = $text;
+            }
+            continue;
+        }
+        if (!is_array($warning)) {
+            continue;
+        }
+        $company = trim((string) ($warning['company'] ?? ''));
+        $text = trim((string) ($warning['warning'] ?? $warning['message'] ?? ''));
+        if ($text === '') {
+            continue;
+        }
+        $lines[] = $company !== '' ? $company . ': ' . $text : $text;
+    }
+
+    return $lines;
 }
 
 /**
@@ -3980,10 +4193,11 @@ function consus_collect_company(
                     $stockMissing[] = $field;
                 }
             }
-            $locationMissing = array_values(array_intersect($stockMissing, ['Location_Code', 'Locatiecode', 'Locatie', 'Location_No']));
-            $otherStockMissing = array_values(array_diff($stockMissing, $locationMissing));
+            $locationNames = consus_location_field_names();
+            $locationMissing = array_values(array_intersect($stockMissing, $locationNames));
+            $otherStockMissing = array_values(array_diff($stockMissing, $locationNames));
             $stockCount = (int) ($stockResult['count'] ?? 0);
-            if ($stockCount > 0 && $locationMissing !== [] && count($locationMissing) === count(['Location_Code', 'Locatiecode', 'Locatie', 'Location_No'])) {
+            if ($stockCount > 0 && $locationMissing !== [] && count($locationMissing) === count($locationNames)) {
                 $addWarning(CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $locationMissing) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.');
             }
             if ($stockCount > 0 && $otherStockMissing !== []) {
@@ -4097,7 +4311,6 @@ function consus_collect_company(
         }
 
         try {
-            $dimensionQuery = consus_dimension_query();
             $dimensionOutcome = consus_collect_entity_with_checkpoint(
                 $checkpoint['companies'][$companyKey]['steps'],
                 $companyKey,
@@ -4105,20 +4318,16 @@ function consus_collect_company(
                 static function (array $row) use (&$items, $companyKey): void {
                     consus_apply_dimension_row($items, $row, $companyKey);
                 },
-                static function (?array &$writer) use (&$items, $company, $companyKey, $onProgress, $dimensionQuery): array {
-                    return consus_each_entity_rows(
+                static function (?array &$writer) use (&$items, $company, $companyKey, $onProgress, $fetchRows): array {
+                    return consus_each_dimension_rows(
                         $company,
-                        CONSUS_DIMENSION_ENTITY,
-                        CONSUS_DIMENSION_FIELDS,
-                        [],
-                        (string) ($dimensionQuery['$filter'] ?? ''),
                         static function (array $row) use (&$items, &$writer, $companyKey): void {
                             consus_apply_dimension_row($items, $row, $companyKey);
                             if ($writer !== null) {
                                 consus_checkpoint_write_row($writer, $row);
                             }
                         },
-                        null,
+                        $fetchRows,
                         consus_page_progress($onProgress, [
                             'company' => $company,
                             'company_key' => $companyKey,
@@ -4142,12 +4351,36 @@ function consus_collect_company(
                     $addWarning('Opgeslagen kostenplaats ontbreekt en wordt opnieuw opgehaald.');
                 }
                 $dimensionResult = is_array($dimensionOutcome['result'] ?? null) ? $dimensionOutcome['result'] : [];
+                if (!empty($dimensionResult['filter_fallback'])) {
+                    $addWarning(CONSUS_DIMENSION_ENTITY . ': Table_ID werd geweigerd. Kostenplaats is alsnog opgehaald met alleen dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . '.');
+                }
+                $dimensionMissing = [];
+                foreach ($dimensionResult['missing_optional'] ?? [] as $field) {
+                    $field = (string) $field;
+                    if ($field !== '' && !in_array($field, $dimensionMissing, true)) {
+                        $dimensionMissing[] = $field;
+                    }
+                }
+                if ((int) ($dimensionResult['count'] ?? 0) > 0 && $dimensionMissing !== []) {
+                    $addWarning(CONSUS_DIMENSION_ENTITY . ': velden niet beschikbaar (' . implode(', ', $dimensionMissing) . ').');
+                }
                 if (!empty($dimensionResult['page_size_fallback'])) {
                     $addWarning(consus_page_size_warning(CONSUS_DIMENSION_ENTITY));
                 }
             }
         } catch (Throwable $error) {
             $addWarning('Kostenplaats (dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ') niet geladen: ' . $error->getMessage());
+        }
+
+        $warnings = array_values(array_filter(
+            $warnings,
+            static function (string $warning): bool {
+                return !consus_is_planning_gap_warning($warning);
+            }
+        ));
+        $checkpoint['companies'][$companyKey]['warnings'] = $warnings;
+        foreach (consus_planning_gap_warnings($items, $companyKey) as $planningWarning) {
+            $addWarning($planningWarning);
         }
 
         $checkpoint['companies'][$companyKey]['warnings'] = $warnings;
