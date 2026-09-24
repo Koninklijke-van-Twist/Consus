@@ -483,6 +483,58 @@ $blankVendorRows = [[
 ]];
 test_assert(consus_company_rows_need_full_ledger($blankVendorRows), 'rijen zonder leverancier vragen een koud grootboek');
 test_assert(!consus_company_rows_need_full_ledger([['vendor_no' => 'PERK']]), 'een bekende leverancier blijft warm');
+
+$unassigned = [];
+consus_apply_stock_row($unassigned, [
+    'Item_No' => 'U1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Location_Code' => 'KVT',
+    'Inventory' => 8,
+    'Safety_Stock_Quantity' => 2,
+    'Reorder_Point' => 1,
+], 'Koninklijke van Twist');
+consus_apply_ledger_row($unassigned, [
+    'Item_No' => 'U1',
+    'Quantity' => -5,
+    'Sales_Amount_Actual' => 50,
+    'Posting_Date' => '2026-09-10',
+    'Location_Code' => 'KVT',
+], 'kvt', 'sales', $windows);
+consus_apply_vendor_row($unassigned, [
+    'No' => 'NOG-NIET-IN-VOORRAAD',
+    'Vendor_No' => 'PERK',
+    'COST_CENTER' => 'MAG',
+], 'kvt');
+consus_apply_dimension_row($unassigned, [
+    'No' => 'NOG-NIET-IN-VOORRAAD',
+    'Dimension_Code' => '15',
+    'Dimension_Value_Code' => 'WERK',
+], 'kvt');
+$unassignedRollup = consus_rollup_items($unassigned, $windows);
+test_assert(count($unassignedRollup['rows']) === 1, 'voorraad zonder artikelkaart publiceert nog een rij');
+test_assert((string) $unassignedRollup['rows'][0]['vendor_no'] === '', 'mislukte artikelkaart laat vendor_no leeg');
+test_assert((string) $unassignedRollup['rows'][0]['cost_center'] === '', 'mislukte dimensie laat cost_center leeg');
+test_assert(abs((float) $unassignedRollup['rows'][0]['inventory'] - 8) < 0.0001, 'voorraad blijft staan zonder leverancier');
+test_assert(abs((float) $unassignedRollup['rows'][0]['safety_stock'] - 2) < 0.0001, 'veiligheidsvoorraad blijft staan zonder leverancier');
+test_assert(abs((float) $unassignedRollup['rows'][0]['reorder_point'] - 1) < 0.0001, 'bestelpunt blijft staan zonder leverancier');
+test_assert($unassignedRollup['cost_centers'] === [], 'catalogus laat een lege kostenplaats weg');
+test_assert($unassignedRollup['vendors'] === [['vendor_no' => '', 'vendor_name' => 'Geen leverancier']], 'catalogus houdt de lege leverancier');
+$blankDepartments = consus_department_options($unassignedRollup['rows'], 'kvt');
+test_assert($blankDepartments === [''], 'lege kostenplaats blijft een afdelingskeuze');
+$blankVendors = consus_vendor_options($unassignedRollup['rows'], 'kvt', '');
+test_assert(
+    count($blankVendors) === 1 && $blankVendors[0]['vendor_no'] === '' && $blankVendors[0]['vendor_name'] === 'Geen leverancier',
+    'lege leverancier blijft Geen leverancier'
+);
+$noneSummary = consus_summarize(['rows' => $unassignedRollup['rows']], 'kvt', '__none__', '__none__', 'KVT');
+test_assert(abs((float) $noneSummary['inventory'] - 8) < 0.0001, 'filter zonder leverancier en afdeling houdt de rij');
+$noneArticles = consus_list_articles([
+    'articles' => $unassignedRollup['articles'],
+], 'kvt', '__none__', '__none__', 'KVT');
+test_assert(count($noneArticles) === 1 && $noneArticles[0]['item_no'] === 'U1', 'artikeltabel volgt de lege leverancier');
+test_assert(consus_department_options([], '') === [], 'geen rijen betekent geen afdelingen');
+test_assert(consus_vendor_options([], '', '') === [], 'geen rijen betekent geen leveranciers');
+test_assert(consus_default_vendor_no($blankVendors) === '', 'alleen Geen leverancier wordt niet de standaard');
 test_assert(!consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION - 1], [['vendor_no' => 'PERK']]), 'oude snapshotversie is koud');
 test_assert(consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION], [['vendor_no' => 'PERK']]), 'huidige versie met leverancier mag warm');
 
@@ -952,6 +1004,10 @@ test_assert(!str_contains($index, 'odata_get'), 'index.php doet geen OData-call'
 test_assert(!str_contains($index, 'curl_'), 'index.php gebruikt geen cURL');
 test_assert(!str_contains($index, 'consus_run_nightly'), 'index.php start geen BC-refresh');
 test_assert(!str_contains($index, 'Perkins'), 'index.php zet Perkins niet vast');
+test_assert(str_contains($index, '(geen afdeling)'), 'lege afdeling blijft kiesbaar');
+test_assert(str_contains($index, 'Geen leverancier'), 'lege leverancier blijft kiesbaar');
+test_assert(str_contains($index, "\$number === '' ? '__none__' : \$number"), 'lege leverancier gebruikt dezelfde sentinel als afdeling');
+test_assert(!str_contains($index, "if (\$number === '') { continue; }"), 'lege leverancier wordt niet uit de dropdown gelaten');
 test_assert(str_contains((string) file_get_contents(__DIR__ . '/../web/nightly.php'), 'consus_run_nightly'), 'nightly.php is de refresh');
 
 $lockProbeDir = sys_get_temp_dir() . '/consus-lock-probe-' . getmypid();
@@ -1396,6 +1452,82 @@ try {
         true
     );
     test_assert($emptyReplay === ['S2'], 'na de nieuwe ophaalronde hervat de voorraad wel');
+
+    $articleItems = [];
+    consus_apply_stock_row($articleItems, [
+        'Item_No' => 'U1',
+        'Company_Name' => 'Koninklijke van Twist',
+        'Location_Code' => 'KVT',
+        'Inventory' => 8,
+        'Safety_Stock_Quantity' => 2,
+        'Reorder_Point' => 1,
+    ], 'Koninklijke van Twist');
+    $articleFile = consus_checkpoint_directory() . '/kvt-artikelen-gevuld.ndjson';
+    file_put_contents($articleFile, json_encode([
+        'No' => 'U1',
+        'Vendor_No' => 'PERK',
+        'LVS_Vendor_Name' => 'Perkins Engines',
+        'COST_CENTER' => 'MAG',
+    ], JSON_UNESCAPED_UNICODE) . "\n");
+    $articleSteps = [
+        'artikelen' => [
+            'done' => true,
+            'file' => 'kvt-artikelen-gevuld.ndjson',
+            'rows' => 1,
+        ],
+    ];
+    $articleFetches = 0;
+    $articleResume = consus_collect_entity_with_checkpoint(
+        $articleSteps,
+        'kvt',
+        'artikelen',
+        static function (array $row) use (&$articleItems): void {
+            consus_apply_vendor_row($articleItems, $row, 'kvt');
+        },
+        static function (?array &$writer) use (&$articleFetches): array {
+            $articleFetches++;
+            unset($writer);
+
+            return ['count' => 0];
+        },
+        static function (): void {
+        },
+        true
+    );
+    test_assert($articleResume['replayed'] === true && $articleFetches === 0, 'gevulde artikelstap wordt hervat, niet overgeslagen');
+    test_assert((string) $articleItems['kvt|U1']['vendor_no'] === 'PERK', 'hervatte artikelkaart vult vendor_no');
+    test_assert((string) $articleItems['kvt|U1']['cost_center'] === 'MAG', 'hervatte artikelkaart vult cost_center');
+
+    $emptyArticleSteps = [
+        'artikelen' => [
+            'done' => true,
+            'file' => 'kvt-artikelen-leeg.ndjson',
+            'rows' => 0,
+        ],
+    ];
+    file_put_contents(consus_checkpoint_directory() . '/kvt-artikelen-leeg.ndjson', '');
+    $emptyArticleFetches = 0;
+    $emptyArticle = consus_collect_entity_with_checkpoint(
+        $emptyArticleSteps,
+        'kvt',
+        'artikelen',
+        static function (array $row): void {
+            unset($row);
+        },
+        static function (?array &$writer) use (&$emptyArticleFetches): array {
+            $emptyArticleFetches++;
+            consus_checkpoint_write_row($writer, [
+                'No' => 'U1',
+                'Vendor_No' => 'PERK',
+            ]);
+
+            return ['count' => 1, 'optional_fields' => true, 'missing_optional' => [], 'page_size_fallback' => false];
+        },
+        static function (): void {
+        },
+        true
+    );
+    test_assert($emptyArticle['replayed'] === false && $emptyArticleFetches === 1, 'lege artikelstap wordt opnieuw opgehaald');
 
     $failSteps = [];
     $stockFailed = false;

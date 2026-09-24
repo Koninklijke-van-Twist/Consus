@@ -76,6 +76,10 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   de gekozen locaties. Eigen en EGT delen die noemer. Dropship telt niet mee.
 - De pagina filtert eerst op afdeling, daarna op leverancier en locatie uit
   die cache. Perkins kan de eerste leverancierskeuze zijn en is te wissen.
+  Een rij zonder kostenplaats of leverancier blijft kiesbaar als
+  `(geen afdeling)` en `Geen leverancier`. Alleen een lege `rows`-lijst laat
+  beide dropdowns op Alle staan. De catalogus `cost_centers` laat lege
+  waarden weg; de keuzes komen uit `rows`.
   Onder de totalen staat een artikeltabel op artikelnummer, met
   veiligheidsvoorraad, voorraad van de gekozen locaties en WO-verbruik
   (maand, kwartaal, jaar).
