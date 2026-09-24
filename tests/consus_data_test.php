@@ -237,6 +237,12 @@ test_assert(!isset($items['kvt|NIET-IN-VOORRAAD']), 'artikelkaart zonder voorraa
 test_assert((float) $items['kvt|A1']['inventory'] === 17.0, 'KVT-duplicaat telt niet op, M100 blijft wel');
 test_assert((string) $items['kvt|A1']['cost_center'] === 'MAG', 'COST_CENTER op de artikelkaart wint van de dimensie');
 test_assert((string) $items['kvt|A2']['cost_center'] === 'WERK', 'dimensiewaarde vult een lege kostenplaats');
+test_assert(isset($items['kvt|A1']['by_location']['KVT']['sales']['eigen']), 'verkoopbucket bestaat na een post');
+test_assert(!isset($items['kvt|A1']['by_location']['KVT']['sales']['dropship']), 'ongebruikte verkoopbucket blijft weg');
+test_assert(!isset($items['kvt|A1']['by_location']['KVT']['sales']['egt']), 'EGT-bucket blijft weg zonder EGT-post op die locatie');
+test_assert(!isset($items['kvt|A1']['by_location']['KVT']['consumption']), 'verbruiksmappen blijven weg zonder verbruik');
+test_assert(!isset($items['hvt|B1']['by_location']['']['sales']), 'voorraad zonder post maakt geen verkoopmap');
+test_assert(isset($items['hvt|B1']['by_location']['HVT']['sales']['eigen']), 'verkoop op HVT houdt alleen de gevulde bucket');
 
 $snapshot = test_snapshot($items, $windows);
 test_assert(consus_default_vendor_no($snapshot['vendors']) === 'PERK', 'standaardleverancier is Perkins als die er is');
@@ -334,6 +340,226 @@ test_assert($stored['generated_at'] === $snapshot['generated_at'], 'snapshot ron
 @unlink($temp);
 @unlink($temp . '.lock');
 putenv('CONSUS_SNAPSHOT_FILE');
+
+$byCompany = [];
+foreach ($items as $factKey => $fact) {
+    $companyKey = (string) $fact['company_key'];
+    $byCompany[$companyKey][$factKey] = $fact;
+}
+$freshByCompany = [];
+foreach ($byCompany as $companyKey => $subset) {
+    $freshByCompany[$companyKey] = consus_rollup_items($subset, $windows)['rows'];
+}
+$combinedRows = consus_combine_snapshot_rows($freshByCompany, [], []);
+$togetherRows = consus_rollup_items($items, $windows)['rows'];
+test_assert(
+    json_encode($combinedRows) === json_encode($togetherRows),
+    'per bedrijf oprollen geeft dezelfde snapshotrijen'
+);
+
+$staleHvt = $freshByCompany['hvt'];
+$staleHvt[0]['inventory'] = 12345;
+$replaced = consus_combine_snapshot_rows(
+    [
+        'kvt' => $freshByCompany['kvt'],
+        'hvt' => [[
+            'company_key' => 'hvt',
+            'vendor_name' => 'Niet gebruiken',
+            'vendor_no' => 'NEE',
+            'cost_center' => '',
+            'location' => 'HVT',
+            'inventory' => 1,
+        ]],
+    ],
+    ['hvt' => true],
+    ['hvt' => $staleHvt]
+);
+test_assert($replaced[0]['company_key'] === 'kvt', 'verse rijen blijven voorop');
+$staleKept = false;
+$sawFreshHvt = false;
+foreach ($replaced as $replacedRow) {
+    if ((string) ($replacedRow['company_key'] ?? '') !== 'hvt') {
+        continue;
+    }
+    $sawFreshHvt = true;
+    if ((float) ($replacedRow['inventory'] ?? 0) === 12345.0) {
+        $staleKept = true;
+    }
+}
+test_assert($sawFreshHvt, 'stale HVT-rijen blijven in de snapshot');
+test_assert($staleKept, 'stale bedrijf houdt de vorige rij');
+test_assert(
+    array_column($replaced, 'vendor_no') !== ['NEE'] && !in_array('NEE', array_column($replaced, 'vendor_no'), true),
+    'mislukte bedrijfsrollup vervangt de vorige rijen niet'
+);
+$catalog = consus_catalog_from_rows($replaced);
+test_assert(in_array('PERK', array_column($catalog['vendors'], 'vendor_no'), true), 'catalogus volgt de gecombineerde rijen');
+test_assert(in_array('HVT', $catalog['locations'], true), 'locaties volgen de gecombineerde rijen');
+
+$foreignSpills = [];
+consus_foreign_spill_write($foreignSpills, 'hvt', [
+    'Item_No' => 'B9',
+    'Company_Name' => 'Hunter van Twist',
+    'Location_Code' => 'HVT',
+    'Inventory' => 4,
+    'Safety_Stock_Quantity' => 1,
+    'Reorder_Point' => 2,
+]);
+consus_foreign_spill_write($foreignSpills, 'hvt', [
+    'Item_No' => 'B9',
+    'Company_Name' => 'Hunter van Twist',
+    'Location_Code' => 'HVT',
+    'Inventory' => 99,
+    'Safety_Stock_Quantity' => 99,
+    'Reorder_Point' => 99,
+]);
+consus_foreign_spill_write($foreignSpills, 'hvt', [
+    'Item_No' => 'B9',
+    'Company_Name' => 'Hunter van Twist',
+    'Location_Code' => 'M1',
+    'Inventory' => 3,
+    'Safety_Stock_Quantity' => 0,
+    'Reorder_Point' => 0,
+]);
+$foreignPaths = consus_foreign_spill_finish($foreignSpills, false);
+$foreignItems = [];
+consus_apply_stock_ndjson($foreignItems, $foreignPaths['hvt'], 'Hunter van Twist');
+consus_release_temp_file($foreignPaths['hvt']);
+test_assert((float) $foreignItems['hvt|B9']['inventory'] === 7.0, 'vreemde voorraad telt een locatie één keer en houdt een nieuwe locatie');
+test_assert((float) $foreignItems['hvt|B9']['by_location']['HVT']['safety_stock'] === 1.0, 'eerste vreemde voorraadlocatie wint');
+test_assert(!is_file($foreignPaths['hvt']), 'vreemd voorraadbestand is weg');
+$discardSpills = [];
+consus_foreign_spill_write($discardSpills, 'kvt', ['Item_No' => 'Z', 'Company_Name' => 'Koninklijke van Twist', 'Inventory' => 1]);
+$discardPath = (string) $discardSpills['kvt']['path'];
+consus_foreign_spill_finish($discardSpills, true);
+test_assert($discardSpills === [] && !is_file($discardPath), 'mislukte collect ruimt vreemde voorraad op');
+
+$bulkBefore = memory_get_usage(false);
+$bulk = [];
+for ($i = 0; $i < 4000; $i++) {
+    consus_apply_stock_row($bulk, [
+        'Item_No' => 'S' . $i,
+        'Company_Name' => 'Koninklijke van Twist',
+        'Location_Code' => 'KVT',
+        'Inventory' => 1,
+        'Safety_Stock_Quantity' => 1,
+        'Reorder_Point' => 1,
+    ], 'Koninklijke van Twist');
+}
+$bulkPerRow = (memory_get_usage(false) - $bulkBefore) / 4000;
+test_assert($bulkPerRow < 2800, 'voorraadregel blijft compact, kreeg ' . (int) $bulkPerRow . ' bytes');
+unset($bulk);
+
+$savedSnapshotEnv = getenv('CONSUS_SNAPSHOT_FILE');
+$spillApplied = 0;
+try {
+    consus_collect_rows_via_spill(
+        static function (callable $onSpill): int {
+            $onSpill(['Item_No' => 'X']);
+            $onSpill(['Item_No' => 'Y']);
+            throw new RuntimeException('HTTP 400 kapot');
+        },
+        static function () use (&$spillApplied): void {
+            $spillApplied++;
+        }
+    );
+    test_assert(false, 'afgebroken spill moet falen');
+} catch (RuntimeException $spillError) {
+    test_assert(str_contains($spillError->getMessage(), 'HTTP 400'), 'spill geeft de OData-fout door');
+}
+test_assert($spillApplied === 0, 'afgebroken OData-poging past geen regels toe');
+
+$spilled = [];
+$spilledResult = consus_collect_rows_via_spill(
+    static function (callable $onSpill): int {
+        $onSpill(['Item_No' => 'A', 'Quantity' => -1]);
+        $onSpill(['Item_No' => 'B', 'Quantity' => -2]);
+        return 2;
+    },
+    static function (array $row) use (&$spilled): void {
+        $spilled[] = (string) $row['Item_No'];
+    }
+);
+test_assert($spilled === ['A', 'B'], 'gelukte spill geeft elke regel één keer door');
+test_assert($spilledResult['count'] === 2, 'spill bewaart de telling');
+test_assert(($spilledResult['sample']['Item_No'] ?? '') === 'A', 'sample is de eerste regel');
+$spillLeft = glob(sys_get_temp_dir() . '/consus-odata-' . getmypid() . '-*.ndjson');
+test_assert($spillLeft === [] || $spillLeft === false, 'spillbestanden zijn verwijderd');
+
+$savedGlobals = [];
+foreach (['baseUrl', 'auth_list', 'environment', 'demeter_company_environment_map'] as $globalName) {
+    $savedGlobals[$globalName] = $GLOBALS[$globalName] ?? null;
+}
+try {
+    $GLOBALS['baseUrl'] = 'https://bc.example.test/BC';
+    $GLOBALS['auth_list'] = [
+        'Test' => ['mode' => 'basic', 'user' => 'svc', 'pass' => 'x'],
+    ];
+    $GLOBALS['environment'] = 'Test';
+    $GLOBALS['demeter_company_environment_map'] = [
+        'Koninklijke van Twist' => 'Test',
+    ];
+
+    $fetchCalls = 0;
+    $seenItems = [];
+    $fetched = consus_each_entity_rows(
+        'Koninklijke van Twist',
+        CONSUS_LEDGER_ENTITY,
+        CONSUS_LEDGER_FIELDS,
+        CONSUS_LEDGER_OPTIONAL_FIELDS,
+        "Entry_Type eq 'Sale' and Posting_Date ge 2025-10-01",
+        static function (array $row) use (&$seenItems): void {
+            $seenItems[] = (string) ($row['Item_No'] ?? '');
+        },
+        static function (string $url, array $auth, callable $onRow) use (&$fetchCalls): int {
+            $fetchCalls++;
+            test_assert(($auth['pass'] ?? '') === 'x', 'auth blijft bij het verzoek');
+            if (str_contains($url, 'Purchasing_Code')) {
+                $onRow(['Item_No' => 'SHOULD-NOT-APPLY', 'Purchasing_Code' => 'DROP_SHIP']);
+                throw new RuntimeException("HTTP 400 Unknown: 'bad' is not an option");
+            }
+            $onRow(['Item_No' => 'A1', 'Quantity' => -1]);
+            return 1;
+        }
+    );
+    test_assert($seenItems === ['A1'], 'mislukte veldpoging wordt niet toegepast');
+    test_assert($fetched['count'] === 1, 'telling hoort bij de geslaagde poging');
+    test_assert($fetchCalls === 2, 'lege of geweigerde optie probeert de verplichte velden');
+    test_assert($fetched['optional_fields'] === false, 'terugval heeft de optionele velden niet');
+
+    $emptyThenRow = [];
+    $emptyCalls = 0;
+    consus_each_entity_rows(
+        'Koninklijke van Twist',
+        CONSUS_LEDGER_ENTITY,
+        CONSUS_LEDGER_FIELDS,
+        CONSUS_LEDGER_OPTIONAL_FIELDS,
+        "Entry_Type eq 'Sale' and Posting_Date ge 2025-10-01",
+        static function (array $row) use (&$emptyThenRow): void {
+            $emptyThenRow[] = (string) ($row['Item_No'] ?? '');
+        },
+        static function (string $url, array $auth, callable $onRow) use (&$emptyCalls): int {
+            unset($auth);
+            $emptyCalls++;
+            if (str_contains($url, 'Purchasing_Code')) {
+                return 0;
+            }
+            $onRow(['Item_No' => 'ALLEEN', 'Quantity' => -3, 'Posting_Date' => '2026-09-01']);
+            return 1;
+        }
+    );
+    test_assert($emptyThenRow === ['ALLEEN'], 'lege optionele poging probeert opnieuw zonder die regels');
+    test_assert($emptyCalls === 2, 'lege optionele poging telt als verzoek');
+} finally {
+    foreach ($savedGlobals as $globalName => $globalValue) {
+        $GLOBALS[$globalName] = $globalValue;
+    }
+    if ($savedSnapshotEnv === false) {
+        putenv('CONSUS_SNAPSHOT_FILE');
+    } else {
+        putenv('CONSUS_SNAPSHOT_FILE=' . $savedSnapshotEnv);
+    }
+}
 
 $index = (string) file_get_contents(__DIR__ . '/../web/index.php');
 test_assert(!str_contains($index, 'odata_get'), 'index.php doet geen OData-call');

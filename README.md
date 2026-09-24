@@ -11,6 +11,12 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
 - `nightly.php` haalt voor KVT en HVT alle artikelen, locaties, leveranciers,
   voorraad, verkopen en werkorderverbruik op en schrijft
   `web/data/consus_snapshot.json`. Niets wordt vastgezet op Perkins of één locatie.
+  OData-pagina's gaan per query naar een tijdelijk bestand en worden daarna
+  regel voor regel verwerkt. Per bedrijf wordt meteen opgerold; de artikel-
+  feiten gaan weg vóór het volgende bedrijf. Voorraad die een query voor een
+  ander bedrijf teruggeeft, blijft op schijf tot dat bedrijf zelf slaagt of
+  als stale terugvalt op die voorraad. Het live snapshotbestand wordt pas
+  aan het eind atomair vervangen.
 - Omloopsnelheid (maand, kwartaal, jaar) = verkoophoeveelheid ÷ voorraad van
   de gekozen locaties. Eigen en EGT delen die noemer. Dropship telt niet mee.
 - De pagina filtert eerst op afdeling, daarna op leverancier en locatie uit
