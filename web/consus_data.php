@@ -1221,11 +1221,13 @@ function consus_each_entity_rows(
 function consus_odata_error_allows_entry_type_fallback(Throwable $error): bool
 {
     $message = $error->getMessage();
-    if (preg_match('/HTTP (400|501) from OData/', $message) === 1) {
+    $lower = strtolower($message);
+    if (str_contains($lower, 'is not an option')) {
         return true;
     }
-
-    $lower = strtolower($message);
+    if (preg_match('/HTTP (400|501)\b/', $message) === 1) {
+        return true;
+    }
 
     return str_contains($message, 'MethodNotImplemented')
         || str_contains($lower, 'filterexpressie')
