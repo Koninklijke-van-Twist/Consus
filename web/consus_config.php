@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 7;
+const CONSUS_SNAPSHOT_VERSION = 8;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
@@ -104,9 +104,18 @@ const CONSUS_STOCK_FIELDS = [
     'Safety_Stock_Quantity',
     'Reorder_Point',
 ];
-/** Meenemen als de pagina het veld heeft; anders blijft voorraad zonder locatie. */
+/**
+ * Meenemen als de pagina het veld heeft. Location_Code ontbreekt op
+ * VoorraadPerBedrijf; een andere locatienaam vult die dan. Bestelpunt komt
+ * soms niet in Reorder_Point maar in een tweede kolom.
+ */
 const CONSUS_STOCK_OPTIONAL_FIELDS = [
     'Location_Code',
+    'Locatiecode',
+    'Locatie',
+    'Location_No',
+    'Bestelpunt',
+    'ReorderPoint',
 ];
 
 const CONSUS_ITEM_ENTITY = 'AppItemCard';
@@ -123,6 +132,11 @@ const CONSUS_ITEM_FIELDS = [
 const CONSUS_ITEM_OPTIONAL_FIELDS = [
     'LVS_Vendor_Name',
     'COST_CENTER',
+    'Cost_Center',
+    'Kostenplaats',
+    'Afdeling',
+    'Global_Dimension_1_Code',
+    'Shortcut_Dimension_1_Code',
     'Vendor_Name',
     'Description',
 ];
@@ -141,7 +155,9 @@ const CONSUS_LEDGER_FIELDS = [
 /** Inkooppad op de artikelpost. Beperkt de opgehaalde set niet. */
 const CONSUS_LEDGER_OPTIONAL_FIELDS = [
     CONSUS_ILE_PURCHASING_CODE_FIELD,
+    'PurchasingCode',
     CONSUS_ILE_VENDOR_NO_FIELD,
+    'Buy_from_Vendor_No',
 ];
 
 /**

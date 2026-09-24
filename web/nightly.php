@@ -384,6 +384,7 @@ try {
     $snapshot = consus_run_nightly($force, $fullLedger);
     $payload = [
         'ok' => ($snapshot['errors'] ?? []) === [],
+        'version' => (int) ($snapshot['version'] ?? CONSUS_SNAPSHOT_VERSION),
         'generated_at' => (string) ($snapshot['generated_at'] ?? gmdate('c')),
         'rows' => count($snapshot['rows'] ?? []),
         'companies' => $snapshot['companies'] ?? [],
@@ -395,8 +396,9 @@ try {
 
     if (PHP_SAPI === 'cli') {
         echo sprintf(
-            "%s generated_at=%s rows=%d duration=%dms\n",
+            "%s version=%d generated_at=%s rows=%d duration=%dms\n",
             $payload['ok'] ? 'OK' : 'PARTIAL',
+            (int) ($payload['version'] ?? 0),
             $payload['generated_at'],
             $payload['rows'],
             $payload['total_duration_ms']
