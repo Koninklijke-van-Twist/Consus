@@ -5,9 +5,6 @@ on:
     branches:
       - master
 
-permissions:
-  contents: read
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -15,8 +12,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
 
       - name: Install lftp
         run: |
@@ -35,8 +30,7 @@ jobs:
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
           FTP_REMOTE_DIR: ${{ secrets.FTP_REMOTE_DIR }}
 
-      # Deploy code; behoud runtime-data en de server-specifieke auth-configuratie.
-      # Zelfde mirror als Penates/Aequitas. Deze repo publiceert op master, zoals de andere KVT-apps.
+      # Stap 1: alles op de server opruimen behalve .htaccess, .htpasswd, *.json, auth.php
       - name: Deploy web/ to FTP (with delete & excludes)
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
@@ -48,10 +42,7 @@ jobs:
           set cmd:fail-exit true
           set net:max-retries 1
           set net:timeout 20
-          set ftp:ssl-allow true
-          set ftp:ssl-force true
-          set ftp:ssl-protect-data true
-          set ssl:verify-certificate yes
+          set ftp:ssl-allow false
           set ftp:passive-mode yes
 
           cd "$FTP_REMOTE_DIR"
@@ -59,14 +50,13 @@ jobs:
           mirror -R --delete \
             --exclude-glob .htaccess \
             --exclude-glob cache/** \
-            --exclude-glob data/** \
             --exclude-glob analytics/*.sqlite \
             --exclude-glob analytics/*.sqlite-* \
             --exclude-glob auth.php \
             ./web .
 
           set cmd:fail-exit false
-          chmod 770 analytics
+          chmod 777 analytics
 
           bye
           EOF
