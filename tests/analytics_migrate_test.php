@@ -85,7 +85,24 @@ analytics_test_assert(analytics_table_exists($pdo, 'visits'), 'hernoemde tabel w
 analytics_test_assert((string) $pdo->query('SELECT user_email FROM visits')->fetchColumn() === 'c@kvt.test', 'data uit de kopie blijft');
 
 $source = (string) file_get_contents(__DIR__ . '/../web/analytics/analytics.php');
-analytics_test_assert(!str_contains($source, '0666'), 'database niet wereldleesbaar');
-analytics_test_assert(!str_contains($source, '0777'), 'map niet wereldschrijfbaar');
+analytics_test_assert(!preg_match('/chmod\s*\([^)]*,\s*0666\s*\)/', $source), 'database niet wereldleesbaar');
+analytics_test_assert(!preg_match('/(?:chmod|mkdir)\s*\([^)]*,\s*0777\s*\)/', $source), 'map niet wereldschrijfbaar');
+
+$openFile = $dir . '/open.sqlite';
+touch($openFile);
+chmod($openFile, 0666);
+analytics_restrict_permissions($openFile, 0660);
+analytics_test_assert((fileperms($openFile) & 0777) === 0660, 'bestaande 0666-database wordt 0660');
+
+$tightFile = $dir . '/tight.sqlite';
+touch($tightFile);
+chmod($tightFile, 0600);
+analytics_restrict_permissions($tightFile, 0660);
+analytics_test_assert((fileperms($tightFile) & 0777) === 0600, 'al strakkere rechten blijven staan');
+
+$openDir = $dir . '/open-dir';
+mkdir($openDir, 0777);
+analytics_restrict_permissions($openDir, 0770);
+analytics_test_assert((fileperms($openDir) & 0777) === 0770, 'bestaande 0777-map wordt 0770');
 
 echo "OK\n";

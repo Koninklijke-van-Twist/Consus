@@ -34,15 +34,17 @@ test_assert($windows['quarter_start'] === '2026-07-01', 'kwartaalvenster');
 test_assert($windows['year_start'] === '2026-01-01', 'jaarvenster');
 test_assert($windows['history_start'] === '2025-10-01', 'twaalf maanden historie');
 
-test_assert(CONSUS_LOCATIONS_EIGEN === ['KVT', 'HVT'], 'eigen is KVT en HVT');
-test_assert(CONSUS_LOCATIONS_DROPSHIP === ['BYKLANT'], 'dropship is BYKLANT');
-test_assert(CONSUS_LOCATIONS_EGT === [], 'EGT-codes blijven leeg');
-test_assert(consus_bucket_for_location('KVT') === 'eigen', 'KVT-verkoop is eigen');
-test_assert(consus_bucket_for_location('hvt') === 'eigen', 'HVT-verkoop is eigen');
-test_assert(consus_bucket_for_location('BYKLANT') === 'dropship', 'BYKLANT is dropship');
-test_assert(consus_bucket_for_location('EGT') === 'overig', 'geen verzonnen EGT-code');
-test_assert(consus_bucket_for_location('M100') === 'overig', 'M-locatie is nog geen EGT');
-test_assert(consus_bucket_for_location('') === 'overig', 'lege locatie is overig');
+test_assert(CONSUS_EIGEN_LOCATION_HINTS === ['KVT', 'HVT'], 'eigen-magazijnhint is KVT en HVT');
+test_assert(CONSUS_DROPSHIP_PURCHASING_CODE === 'DROP_SHIP', 'dropship-inkoopcode');
+test_assert(CONSUS_DROPSHIP_VENDOR_NO === '90052', 'dropship-leverancier');
+test_assert(CONSUS_EGT_VENDOR_NO === '90101', 'EGT-leverancier');
+test_assert(consus_procurement_bucket('', '') === 'eigen', 'leeg inkooppad is eigen');
+test_assert(consus_procurement_bucket('DROP_SHIP', '') === 'dropship', 'DROP_SHIP is dropship');
+test_assert(consus_procurement_bucket('', '90052') === 'dropship', 'leverancier 90052 is dropship');
+test_assert(consus_procurement_bucket('', '90101') === 'egt', 'leverancier 90101 is EGT');
+test_assert(consus_procurement_bucket('DROP_SHIP', '90101') === 'dropship', 'dropship wint van EGT op dezelfde regel');
+test_assert(consus_procurement_bucket('', 'PERK') === 'eigen', 'artikelleverancier is geen EGT');
+test_assert(consus_procurement_bucket('', '') === 'eigen' && consus_procurement_bucket_from_row(['Location_Code' => 'BYKLANT']) === 'eigen', 'locatiecode maakt geen dropship');
 
 $salesQuery = consus_ledger_query(CONSUS_SALES_ENTRY_TYPES, '2025-10-01');
 test_assert(
@@ -207,9 +209,9 @@ test_assert(abs((float) $perkinsKvt['inventory'] - 17) < 0.0001, 'voorraad inclu
 test_assert(abs((float) $perkinsKvt['sales']['eigen']['m']['qty'] - 6) < 0.0001, 'maandverkoop eigen');
 test_assert(abs((float) $perkinsKvt['sales']['eigen']['q']['qty'] - 5) < 0.0001, 'kwartaalverkoop trekt retour af');
 test_assert(abs((float) $perkinsKvt['sales']['eigen']['m']['amount'] - 600) < 0.0001, 'maandomzet');
-test_assert(abs((float) $perkinsKvt['sales']['egt']['m']['qty']) < 0.0001, 'EGT blijft leeg zonder locatiecodes');
-test_assert(abs((float) $perkinsKvt['sales']['overig']['m']['qty'] - 2) < 0.0001, 'M100 valt in overig, niet in EGT');
-test_assert($perkinsKvt['turnover']['egt']['m'] === 0.0, 'omloopsnelheid EGT is nul zonder codes');
+test_assert(abs((float) $perkinsKvt['sales']['egt']['m']['qty'] - 2) < 0.0001, 'leverancier 90101 is EGT, ook op M100');
+test_assert(!isset($perkinsKvt['sales']['overig']), 'locatie maakt geen overig-bucket');
+test_assert(abs((float) $perkinsKvt['turnover']['egt']['m'] - (2 / 17)) < 0.0001, 'omloopsnelheid EGT deelt door de voorraad');
 test_assert(!isset($perkinsKvt['turnover']['dropship']), 'dropship heeft geen omloopsnelheid');
 
 $perkinsKvtWarehouse = consus_summarize($snapshot, 'kvt', 'PERK', '', 'KVT');
@@ -226,8 +228,8 @@ test_assert(abs((float) $bothCompanies['inventory'] - 107) < 0.0001, 'KVT en HVT
 test_assert(abs((float) $bothCompanies['sales']['eigen']['m']['qty'] - 15) < 0.0001, 'eigen verkoop van beide bedrijven');
 
 $department = consus_summarize($snapshot, 'kvt', '', 'WERK');
-test_assert(abs((float) $department['sales']['overig']['m']['qty'] - 4) < 0.0001, 'LOC-ZZ is overig, niet dropship');
-test_assert(abs((float) $department['consumption']['dropship']['m']['qty'] - 3) < 0.0001, 'BYKLANT-verbruik is dropship');
+test_assert(abs((float) $department['sales']['dropship']['m']['qty'] - 4) < 0.0001, 'leverancier 90052 is dropship, ook op LOC-ZZ');
+test_assert(abs((float) $department['consumption']['dropship']['m']['qty'] - 3) < 0.0001, 'DROP_SHIP-verbruik is dropship');
 test_assert((int) $department['item_count'] === 1, 'afdelingsfilter laat andere afdelingen weg');
 $departmentVendors = consus_vendor_options($snapshot['rows'], 'kvt', 'WERK');
 test_assert(array_column($departmentVendors, 'vendor_no') === ['ANDERS'], 'leveranciers volgen de gekozen afdeling');

@@ -72,6 +72,19 @@ function analytics_authorize(string $email, string $apiKey, string $oid): bool
     return function_exists('verify_rotating_api_key') && verify_rotating_api_key($oid, $apiKey);
 }
 
+function analytics_restrict_permissions(string $path, int $target): void
+{
+    $mode = @fileperms($path);
+    if ($mode === false) {
+        return;
+    }
+
+    if ((($mode & 0777) & ~$target) !== 0) {
+        @chmod($path, $target);
+        clearstatcache(true, $path);
+    }
+}
+
 function analytics_ensure_db_writable(): void
 {
     $dir = dirname(ANALYTICS_DB_PATH);
@@ -79,10 +92,7 @@ function analytics_ensure_db_writable(): void
         throw new RuntimeException('Analytics directory could not be created');
     }
 
-    if (!is_writable($dir)) {
-        @chmod($dir, 0770);
-    }
-
+    analytics_restrict_permissions($dir, 0770);
     if (!is_writable($dir)) {
         throw new RuntimeException('Analytics directory is not writable');
     }
@@ -92,9 +102,11 @@ function analytics_ensure_db_writable(): void
         if (!$created) {
             throw new RuntimeException('Analytics database could not be created');
         }
-        @chmod(ANALYTICS_DB_PATH, 0660);
-    } elseif (!is_writable(ANALYTICS_DB_PATH)) {
-        @chmod(ANALYTICS_DB_PATH, 0660);
+    }
+
+    analytics_restrict_permissions(ANALYTICS_DB_PATH, 0660);
+    if (!is_writable(ANALYTICS_DB_PATH)) {
+        throw new RuntimeException('Analytics database is not writable');
     }
 }
 

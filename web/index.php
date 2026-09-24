@@ -309,7 +309,7 @@ foreach ($vendors as $vendor) {
     <section class="panel">
         <div class="panel-head">
             <h2>Omloopsnelheid</h2>
-            <p>Verkoophoeveelheid in de periode gedeeld door de voorraad van de gekozen locaties. Eigen is locatie KVT of HVT. EGT blijft leeg tot de locatiecodes in consus_config.php staan. Dropship telt niet mee.</p>
+            <p>Verkoophoeveelheid in de periode gedeeld door de voorraad van de gekozen locaties. Eigen en EGT delen die noemer. Dropship heeft geen eigen voorraad. De split volgt het inkooppad, niet de locatiecode.</p>
         </div>
         <?php if (!$hasCache): ?>
             <div class="empty">Nog geen omloopsnelheid. De cache is leeg.</div>
@@ -342,7 +342,7 @@ foreach ($vendors as $vendor) {
     <section class="panel">
         <div class="panel-head">
             <h2>Verkopen per maand</h2>
-            <p>Verkoop-artikelposten, gesplitst op locatie. Eigen is <?= consus_h(implode(' en ', CONSUS_LOCATIONS_EIGEN)) ?>, dropship is <?= consus_h(implode(', ', CONSUS_LOCATIONS_DROPSHIP)) ?>. EGT-codes zijn nog leeg; andere locaties vallen in Overig.</p>
+            <p>Hoeveelheid en omzet. Eigen is magazijnlevering, EGT is leverancier <?= consus_h(CONSUS_EGT_VENDOR_NO) ?>, dropship is inkoopcode <?= consus_h(CONSUS_DROPSHIP_PURCHASING_CODE) ?> of leverancier <?= consus_h(CONSUS_DROPSHIP_VENDOR_NO) ?>.</p>
         </div>
         <?php if (!$hasCache): ?>
             <div class="empty">Nog geen verkopen. De cache is leeg.</div>
@@ -409,7 +409,7 @@ foreach ($vendors as $vendor) {
         <?php endif; ?>
     </section>
 
-    <p class="footnote">Cijfers komen uit de nachtelijke snapshot<?= $hasCache ? ' t/m ' . consus_h((string) ($windows['as_of'] ?? '')) : '' ?>. Kies eerst een afdeling; leverancier en locatie tonen daarna alleen wat bij die afdeling hoort. Elke locatie uit de cache is te kiezen. EGT-locaties vult Joost later in consus_config.php.</p>
+    <p class="footnote">Cijfers komen uit de nachtelijke snapshot<?= $hasCache ? ' t/m ' . consus_h((string) ($windows['as_of'] ?? '')) : '' ?>. Kies eerst een afdeling; leverancier en locatie tonen daarna alleen wat bij die afdeling hoort. Eigen magazijn is doorgaans <?= consus_h(implode(' of ', CONSUS_EIGEN_LOCATION_HINTS)) ?>, maar elke locatie uit de cache is te kiezen.</p>
 </main>
 </body>
 </html>

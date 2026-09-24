@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 3;
+const CONSUS_SNAPSHOT_VERSION = 4;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
@@ -34,31 +34,34 @@ const CONSUS_COMPANIES = [
 const CONSUS_DEFAULT_VENDOR_MATCH = 'Perkins';
 
 /**
- * Location_Code → kolom voor verkoop en omloopsnelheid (Ariadne, beste gok).
- * Nightly laadt élke locatie; dit is geen OData-filter en geen scope.
- *
- * - eigen: KVT (KVT-verkopen), HVT (HVT-verkopen)
- * - dropship: BYKLANT (“Bij klant opgeslagen”), dichtstbijzijnde AppLocations-code
- * - egt: leeg tot Joost de echte codes aanlevert. Geen verzonnen EGT-code.
- *   De EGT-kolom blijft daardoor leeg; de PR is compleet zonder die split.
- *
- * Elke andere code, inclusief M-locaties, valt in overig. Dat is geen EGT.
+ * Hint voor eigen magazijn in de UI. Geen cachefilter: nightly laadt elke locatie.
  */
-const CONSUS_LOCATIONS_EIGEN = ['KVT', 'HVT'];
-const CONSUS_LOCATIONS_DROPSHIP = ['BYKLANT'];
-const CONSUS_LOCATIONS_EGT = [];
+const CONSUS_EIGEN_LOCATION_HINTS = ['KVT', 'HVT'];
+
+/**
+ * Splitsing verkoop en omloopsnelheid (Joost). Labels, geen OData-filter en geen scope.
+ *
+ * - leeg inkooppad = levering magazijn (eigen)
+ * - dropship = inkoopcode DROP_SHIP en/of leverancier 90052
+ * - EGT = leverancier 90101
+ *
+ * Tabel 32 publiceert standaard geen inkoopcode en geen leveranciersnr.
+ * Nightly vraagt de namen hieronder mee en laat ze weg als BC ze weigert.
+ * AppItemCard.Vendor_No blijft de artikelleverancier voor het filter.
+ */
+const CONSUS_ILE_PURCHASING_CODE_FIELD = 'Purchasing_Code';
+const CONSUS_ILE_VENDOR_NO_FIELD = 'Vendor_No';
+const CONSUS_DROPSHIP_PURCHASING_CODE = 'DROP_SHIP';
+const CONSUS_DROPSHIP_VENDOR_NO = '90052';
+const CONSUS_EGT_VENDOR_NO = '90101';
 
 const CONSUS_BUCKETS = [
     'eigen' => 'Eigen',
     'egt' => 'EGT',
     'dropship' => 'Dropship',
-    'overig' => 'Overig',
 ];
 
-/**
- * Omloopsnelheid eigen versus EGT. EGT blijft leeg zolang CONSUS_LOCATIONS_EGT leeg is.
- * Dropship en overig hebben geen eigen omloopsnelheid.
- */
+/** Omloopsnelheid eigen versus EGT. Dropship heeft geen eigen voorraad. */
 const CONSUS_TURNOVER_BUCKETS = ['eigen', 'egt'];
 
 /**
@@ -115,6 +118,11 @@ const CONSUS_LEDGER_FIELDS = [
     'Posting_Date',
     'Location_Code',
     'Document_No',
+];
+/** Inkooppad op de artikelpost. Beperkt de opgehaalde set niet. */
+const CONSUS_LEDGER_OPTIONAL_FIELDS = [
+    CONSUS_ILE_PURCHASING_CODE_FIELD,
+    CONSUS_ILE_VENDOR_NO_FIELD,
 ];
 
 /**
