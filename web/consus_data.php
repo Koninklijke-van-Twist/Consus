@@ -1204,9 +1204,20 @@ function consus_with_snapshot_lock(callable $callback): mixed
         throw new RuntimeException('Snapshotmap kon niet worden aangemaakt.');
     }
 
-    $lock = @fopen(consus_snapshot_lock_file(), 'c+');
+    $lockPath = consus_snapshot_lock_file();
+    if (file_exists($lockPath) && !is_file($lockPath)) {
+        throw new RuntimeException(
+            'Snapshot-lock kon niet worden geopend: ' . $lockPath
+            . '. Het pad is geen gewoon bestand. De map web/data moet schrijfbaar zijn voor de webgebruiker.'
+        );
+    }
+
+    $lock = @fopen($lockPath, 'c+');
     if ($lock === false) {
-        throw new RuntimeException('Snapshot-lock kon niet worden geopend.');
+        throw new RuntimeException(
+            'Snapshot-lock kon niet worden geopend: ' . $lockPath
+            . '. De map web/data moet schrijfbaar zijn voor de webgebruiker.'
+        );
     }
 
     try {

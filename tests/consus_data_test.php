@@ -852,4 +852,25 @@ test_assert(!str_contains($index, 'consus_run_nightly'), 'index.php start geen B
 test_assert(!str_contains($index, 'Perkins'), 'index.php zet Perkins niet vast');
 test_assert(str_contains((string) file_get_contents(__DIR__ . '/../web/nightly.php'), 'consus_run_nightly'), 'nightly.php is de refresh');
 
+$lockProbeDir = sys_get_temp_dir() . '/consus-lock-probe-' . getmypid();
+mkdir($lockProbeDir, 0775, true);
+$snapshotProbe = $lockProbeDir . '/consus_snapshot.json';
+putenv('CONSUS_SNAPSHOT_FILE=' . $snapshotProbe);
+$badLock = $snapshotProbe . '.lock';
+mkdir($badLock, 0775);
+$sawBadLock = false;
+try {
+    consus_with_snapshot_lock(static function (): void {
+    });
+} catch (RuntimeException $lockError) {
+    $sawBadLock = true;
+    test_assert(str_contains($lockError->getMessage(), $badLock), 'lockfout noemt het pad');
+    test_assert(str_contains($lockError->getMessage(), 'geen gewoon bestand'), 'lockfout meldt geen gewoon bestand');
+    test_assert(str_contains($lockError->getMessage(), 'web/data moet schrijfbaar zijn voor de webgebruiker'), 'lockfout noemt web/data');
+}
+test_assert($sawBadLock, 'directory-lock gooit een fout');
+rmdir($badLock);
+putenv('CONSUS_SNAPSHOT_FILE');
+rmdir($lockProbeDir);
+
 echo "OK\n";
