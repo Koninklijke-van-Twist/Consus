@@ -96,12 +96,25 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   met alleen nullen wordt opnieuw opgehaald. Levert de eigen query geen
   aantallen, dan gebruikt nightly die regels als ze in de query van het
   andere bedrijf stonden. Blijft de hoeveelheid daarna toch op het andere
-  bedrijf staan, terwijl dit bedrijf hetzelfde artikelnummer verbruikt of als
-  veiligheidsvoorraad of bestelpunt heeft en de andere kant geen verbruik
-  heeft, dan verplaatst nightly alleen die hoeveelheid. Het totaal over alle
-  bedrijven blijft gelijk; veiligheidsvoorraad en bestelpunt worden niet
-  meegenomen. Komen de artikelnummers niet overeen, of heeft de andere kant
-  zelf verbruik, dan blijft de voorraad liggen en zet nightly een opmerking.
+  bedrijf staan, dan verplaatst nightly die hoeveelheid per artikelnummer,
+  en alleen als alle drie gelden: dit bedrijf heeft van dat nummer geen
+  voorraad maar wel werkorderverbruik, veiligheidsvoorraad of bestelpunt;
+  het andere bedrijf heeft de hoeveelheid; het andere bedrijf heeft van dat
+  nummer geen werkorderverbruik. Verkoop alleen telt niet mee, omdat
+  dropship geen eigen voorraad is. Veiligheidsvoorraad en bestelpunt
+  verhuizen niet mee. Het totaal over alle bedrijven blijft gelijk: de
+  hoeveelheid gaat van de ene regel af en op de andere.
+  De rest blijft liggen. Dat is voorraad van een nummer dat alleen op het
+  andere bedrijf voorkomt, dat daar ook verbruik heeft, of dat hier alleen
+  verkocht wordt. Een klein totaal op KVT naast een groot totaal op Alle is
+  die rest, niet een afgekapte verplaatsing. De opmerking noemt het
+  verplaatste aantal. Ze zegt niet dat de rest ook in aanmerking kwam; de
+  opmerking dat er niets verplaatst kon worden verschijnt alleen als het
+  totaal van dit bedrijf op 0 blijft.
+  Een locatiecode bepaalt het bedrijf niet. `KVT`, `HVT`, `M001` en `M7xx`
+  zijn magazijnlocaties en kunnen in beide bedrijven voorkomen. Nightly laadt
+  elke locatie. `KVT` en `HVT` in de voetnoot zijn alleen een hint voor eigen
+  magazijn, geen sleutel om voorraad van bedrijf te wisselen.
   Voorraad leest `Inventory`. Ontbreekt dat veld, dan `Voorraad` of
   `Quantity_on_Hand`. Een aanwezige 0 blijft 0.
   Leverancier en afdeling van die voorraad komen op de bestaande regel als
