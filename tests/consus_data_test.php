@@ -239,13 +239,74 @@ if ($savedPublishEnv === false) {
     putenv('CONSUS_SNAPSHOT_FILE=' . $savedPublishEnv);
 }
 
-$dimensionQuery = consus_dimension_query();
+$dimensionQuery = consus_dimension_query('SALES_DEPARTMENT');
 test_assert(
-    $dimensionQuery['$filter'] === "Table_ID eq 27 and Dimension_Code eq '15'",
-    'kostenplaats haalt dimensie 15 op zonder waardfilter'
+    $dimensionQuery['$filter'] === "Table_ID eq 27 and Dimension_Code eq 'SALES_DEPARTMENT'",
+    'kostenplaats volgt de code uit GeneralLedgerSetup'
 );
-test_assert(consus_dimension_code_filter() === "Dimension_Code eq '15'", 'terugvalfilter houdt alleen dimensie 15');
+test_assert(consus_dimension_code_filter('SALES_DEPARTMENT') === "Dimension_Code eq 'SALES_DEPARTMENT'", 'terugvalfilter houdt die dimensiecode');
 test_assert(!str_contains($dimensionQuery['$filter'], 'Dimension_Value_Code'), 'afdelingswaarde wordt niet vastgezet');
+test_assert(!str_contains($dimensionQuery['$filter'], "eq '15'"), 'dimensie 15 is niet de vaste kostenplaats');
+$setupQuery = consus_gl_setup_query();
+test_assert(($setupQuery['$select'] ?? '') === 'Global_Dimension_1_Code', 'setup leest alleen Global Dimension 1');
+test_assert(($setupQuery['$top'] ?? '') === '1', 'setup haalt één regel op');
+test_assert(
+    consus_dimension_value_filter('SALES_DEPARTMENT', true) === "Dimension_Code eq 'SALES_DEPARTMENT' and Blocked eq false",
+    'afdelingscatalogus filtert op de setupcode en ongeblokkeerd'
+);
+$departmentCatalog = consus_department_catalog_from_rows([
+    ['Dimension_Code' => 'SALES_DEPARTMENT', 'Code' => '20', 'Name' => 'Inkoop', 'Blocked' => false],
+    ['Dimension_Code' => 'SALES_DEPARTMENT', 'Code' => '05', 'Name' => 'Werkplaats', 'Blocked' => false],
+    ['Dimension_Code' => 'SALES_DEPARTMENT', 'Code' => '05', 'Name' => 'Dubbel', 'Blocked' => false],
+    ['Dimension_Code' => 'SALES_DEPARTMENT', 'Code' => '100', 'Name' => 'Te hoog', 'Blocked' => false],
+    ['Dimension_Code' => 'SALES_DEPARTMENT', 'Code' => 'AB', 'Name' => 'Letters', 'Blocked' => false],
+    ['Dimension_Code' => 'SALES_DEPARTMENT', 'Code' => '12', 'Name' => '12', 'Blocked' => false],
+    ['Dimension_Code' => 'SALES_DEPARTMENT', 'Code' => '7', 'Name' => 'Geblokkeerd', 'Blocked' => true],
+    ['Dimension_Code' => 'ANDERS', 'Code' => '3', 'Name' => 'Andere dimensie', 'Blocked' => false],
+], 'SALES_DEPARTMENT');
+test_assert(array_column($departmentCatalog, 'code') === ['05', '20'], 'catalogus houdt numerieke codes onder 100, zonder dubbelen');
+test_assert($departmentCatalog[0]['label'] === '05 - Werkplaats', 'label is code - naam');
+test_assert(consus_cost_centers_match('05', '5'), '05 en 5 zijn dezelfde afdeling');
+test_assert(consus_cost_centers_match('05 - Werkplaats', '5'), 'label en code wijzen naar dezelfde afdeling');
+test_assert(!consus_cost_centers_match('05', '20'), 'andere code blijft een andere afdeling');
+$normalizedCard = [];
+consus_apply_stock_row($normalizedCard, [
+    'Item_No' => 'D1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Inventory' => 1,
+], 'Koninklijke van Twist');
+consus_apply_vendor_row($normalizedCard, [
+    'No' => 'D1',
+    'Vendor_No' => 'PERK',
+    'LVS_Global_Dimension_1_Code' => '05',
+    'COST_CENTER' => 'MAG',
+], 'kvt');
+test_assert((string) $normalizedCard['kvt|D1']['cost_center'] === '5', 'Global Dimension 1 wint van COST_CENTER en verliest voorloopnullen');
+$departmentChoices = consus_department_choices(
+    [
+        ['company_key' => 'kvt', 'cost_center' => '5', 'vendor_no' => 'PERK', 'location' => ''],
+        ['company_key' => 'kvt', 'cost_center' => '', 'vendor_no' => '', 'location' => ''],
+    ],
+    [
+        ['company_key' => 'kvt', 'code' => '05', 'name' => 'Werkplaats', 'label' => '05 - Werkplaats'],
+        ['company_key' => 'kvt', 'code' => '20', 'name' => 'Inkoop', 'label' => '20 - Inkoop'],
+        ['company_key' => 'hvt', 'code' => '30', 'name' => 'Alleen HVT', 'label' => '30 - Alleen HVT'],
+    ],
+    'kvt'
+);
+test_assert($departmentChoices[0]['value'] === '__none__' && $departmentChoices[0]['label'] === '(geen afdeling)', 'lege afdeling blijft __none__');
+test_assert($departmentChoices[1]['value'] === '5' && $departmentChoices[1]['label'] === '05 - Werkplaats', 'dropdown toont code - naam');
+test_assert($departmentChoices[2]['label'] === '20 - Inkoop', 'catalogusafdeling zonder regel blijft kiesbaar');
+test_assert(count($departmentChoices) === 3, 'HVT-afdeling zit niet in het KVT-filter');
+$departmentSnapshot = [
+    'rows' => [
+        ['company_key' => 'kvt', 'cost_center' => '5', 'vendor_no' => '', 'location' => '', 'inventory' => 4, 'safety_stock' => 1, 'reorder_point' => 0, 'item_nos' => ['D1' => true], 'item_count' => 1],
+        ['company_key' => 'kvt', 'cost_center' => '', 'vendor_no' => '', 'location' => '', 'inventory' => 9, 'safety_stock' => 0, 'reorder_point' => 0, 'item_nos' => ['D2' => true], 'item_count' => 1],
+    ],
+];
+$departmentSummary = consus_summarize($departmentSnapshot, 'kvt', '', '05', '');
+test_assert(abs((float) $departmentSummary['inventory'] - 4) < 0.0001, 'filter 05 telt de genormaliseerde code 5');
+test_assert(abs((float) $departmentSummary['safety_stock'] - 1) < 0.0001, 'afdelingsfilter laat veiligheidsvoorraad van die regels staan');
 
 $stockQuery = consus_entity_query(CONSUS_STOCK_FIELDS);
 test_assert(!isset($stockQuery['$filter']), 'voorraadquery filtert niet op één bedrijf of leverancier');
@@ -1562,6 +1623,7 @@ try {
     $dimensionApplied = [];
     $dimensionResult = consus_each_dimension_rows(
         'Koninklijke van Twist',
+        'SALES_DEPARTMENT',
         static function (array $row) use (&$dimensionApplied): void {
             $dimensionApplied[] = (string) ($row['Dimension_Value_Code'] ?? '');
         },
@@ -1573,22 +1635,24 @@ try {
                 throw new RuntimeException('HTTP 400 from OData: De OData-filterexpressie wordt niet ondersteund.');
             }
             $dimensionCodeCalls++;
-            test_assert(str_contains($decoded, "Dimension_Code eq '15'"), 'terugval filtert op dimensie 15');
+            test_assert(str_contains($decoded, "Dimension_Code eq 'SALES_DEPARTMENT'"), 'terugval filtert op de setupcode');
             test_assert(!str_contains($decoded, 'Table_ID'), 'terugval laat Table_ID weg');
-            $onRow(['No' => 'P1', 'Dimension_Code' => '15', 'Dimension_Value_Code' => 'WERK']);
+            $onRow(['No' => 'P1', 'Dimension_Code' => 'SALES_DEPARTMENT', 'Dimension_Value_Code' => '05']);
 
             return 1;
         }
     );
     test_assert($dimensionTableCalls === 2, 'tabelfilter wordt op optionele en verplichte velden geprobeerd');
-    test_assert($dimensionCodeCalls === 1, 'zonder Table_ID lukt dimensie 15 in één keer');
+    test_assert($dimensionCodeCalls === 1, 'zonder Table_ID lukt de setupcode in één keer');
     test_assert($dimensionResult['filter_fallback'] === true, 'geweigerd tabelfilter valt terug');
-    test_assert($dimensionApplied === ['WERK'], 'terugval past de dimensieregel één keer toe');
+    test_assert($dimensionResult['dimension_code'] === 'SALES_DEPARTMENT', 'de gebruikte dimensie is de setupcode');
+    test_assert($dimensionApplied === ['05'], 'terugval past de dimensieregel één keer toe');
 
     $dimensionNetworkCalls = 0;
     try {
         consus_each_dimension_rows(
             'Koninklijke van Twist',
+            'SALES_DEPARTMENT',
             static function (): void {
             },
             static function (string $url, array $auth, callable $onRow) use (&$dimensionNetworkCalls): int {
@@ -1603,37 +1667,25 @@ try {
     }
     test_assert($dimensionNetworkCalls === 2, 'netwerkfout probeert het dimensiefilter niet opnieuw');
 
-    $alternateDimensionCalls = [];
-    $alternateApplied = [];
-    $alternateResult = consus_each_dimension_rows(
+    $fixedDimensionCalls = [];
+    $fixedDimensionResult = consus_each_dimension_rows(
         'Koninklijke van Twist',
-        static function (array $row) use (&$alternateApplied): void {
-            $alternateApplied[] = (string) ($row['Dimension_Value_Code'] ?? '');
+        'SALES_DEPARTMENT',
+        static function (): void {
         },
-        static function (string $url, array $auth, callable $onRow) use (&$alternateDimensionCalls): int {
-            unset($auth);
-            $decoded = rawurldecode($url);
-            $alternateDimensionCalls[] = $decoded;
-            if (str_contains($decoded, "Dimension_Code eq '15'")) {
-                return 0;
-            }
-            test_assert(str_contains($decoded, "Dimension_Code eq 'KOSTENPLAATS'"), 'lege dimensie 15 probeert KOSTENPLAATS');
-            test_assert(!str_contains($decoded, 'AFDELING') && !str_contains($decoded, "eq 'CC'"), 'een gevulde alias stopt de volgende codes');
-            $onRow(['No' => 'P1', 'Dimension_Code' => 'KOSTENPLAATS', 'Dimension_Value_Code' => 'LAS']);
+        static function (string $url, array $auth, callable $onRow) use (&$fixedDimensionCalls): int {
+            unset($auth, $onRow);
+            $fixedDimensionCalls[] = rawurldecode($url);
 
-            return 1;
+            return 0;
         }
     );
-    test_assert($alternateResult['dimension_code'] === 'KOSTENPLAATS', 'de gebruikte dimensiecode blijft zichtbaar');
-    test_assert($alternateResult['filter_fallback'] === false, 'KOSTENPLAATS lukt met het tabelfilter');
-    test_assert($alternateApplied === ['LAS'], 'alias-dimensie wordt één keer toegepast');
-    $sawFifteen = false;
-    foreach ($alternateDimensionCalls as $alternateUrl) {
-        if (str_contains($alternateUrl, "Dimension_Code eq '15'")) {
-            $sawFifteen = true;
-        }
+    test_assert((int) ($fixedDimensionResult['count'] ?? -1) === 0, 'lege setupcode blijft leeg');
+    test_assert($fixedDimensionCalls !== [], 'de setupcode wordt wel opgevraagd');
+    foreach ($fixedDimensionCalls as $fixedDimensionUrl) {
+        test_assert(str_contains($fixedDimensionUrl, "Dimension_Code eq 'SALES_DEPARTMENT'"), 'lege catalogus blijft op de setupcode');
+        test_assert(!str_contains($fixedDimensionUrl, "eq '15'") && !str_contains($fixedDimensionUrl, 'KOSTENPLAATS'), 'lege setupcode probeert geen vaste alias');
     }
-    test_assert($sawFifteen, 'dimensie 15 wordt eerst geprobeerd');
 
     $dimensionItems = [];
     consus_apply_stock_row($dimensionItems, [

@@ -554,48 +554,138 @@ function consus_document_no_has_prefix(array $row, string $prefix): bool
 }
 
 /**
- * Dimensie 15 eerst. Alleen als die geen regels oplevert volgen de aliassen.
- * Nooit een ongefilterde DefaultDimensions-pagina.
+ * Zelfde veldvolgorde als Demeter: eerst Global Dimension 1, daarna de
+ * maatwerknamen. Globale dimensie 2 hoort hier niet bij.
  *
  * @return array<int, string>
  */
-function consus_cost_center_dimension_codes(): array
+function consus_cost_center_field_names(): array
 {
-    $codes = [
-        CONSUS_COST_CENTER_DIMENSION_CODE,
-        'KOSTENPLAATS',
-        'AFDELING',
-        'CC',
+    return [
+        'Global_Dimension_1_Code',
+        'LVS_Global_Dimension_1_Code',
+        'Shortcut_Dimension_1_Code',
+        'COST_CENTER',
+        'Cost_Center',
+        'Kostenplaats',
+        'Afdeling',
     ];
-    $unique = [];
-    foreach ($codes as $code) {
-        $code = trim((string) $code);
-        if ($code === '') {
-            continue;
-        }
-        foreach ($unique as $existing) {
-            if (strcasecmp($existing, $code) === 0) {
-                continue 2;
-            }
-        }
-        $unique[] = $code;
-    }
-
-    return $unique;
 }
 
-function consus_is_cost_center_dimension_code(string $code): bool
+function consus_dimension_value_has_text_label(string $name): bool
 {
-    if (trim($code) === '') {
-        return true;
-    }
-    foreach (consus_cost_center_dimension_codes() as $allowed) {
-        if (strcasecmp($code, $allowed) === 0) {
-            return true;
-        }
+    $normalized = trim($name);
+    if ($normalized === '') {
+        return false;
     }
 
-    return false;
+    return preg_match('/\p{L}/u', $normalized) === 1;
+}
+
+function consus_dimension_value_is_blocked(array $row): bool
+{
+    if (!array_key_exists('Blocked', $row)) {
+        return false;
+    }
+    $value = $row['Blocked'];
+    if (is_bool($value)) {
+        return $value;
+    }
+    if (is_int($value) || is_float($value)) {
+        return (int) $value !== 0;
+    }
+    $text = strtolower(trim(consus_scalar_string($value)));
+
+    return in_array($text, ['1', 'true', 'yes', 'ja'], true);
+}
+
+/**
+ * "05" en "5" zijn dezelfde afdeling. Een niet-numerieke code blijft staan.
+ */
+function consus_normalize_cost_center_for_match(string $value): string
+{
+    $trimmed = trim($value);
+    if ($trimmed === '') {
+        return '';
+    }
+    if (ctype_digit($trimmed)) {
+        $withoutLeadingZeros = ltrim($trimmed, '0');
+
+        return $withoutLeadingZeros === '' ? '0' : $withoutLeadingZeros;
+    }
+
+    return $trimmed;
+}
+
+/**
+ * "50", "050" en "50 - Afdelingsnaam" worden dezelfde code.
+ */
+function consus_extract_cost_center_code(string $value): string
+{
+    $trimmed = trim($value);
+    if ($trimmed === '') {
+        return '';
+    }
+    if (preg_match('/^(\d+)/', $trimmed, $matches) === 1) {
+        return consus_normalize_cost_center_for_match($matches[1]);
+    }
+
+    return consus_normalize_cost_center_for_match($trimmed);
+}
+
+function consus_cost_centers_match(string $left, string $right): bool
+{
+    return consus_extract_cost_center_code($left) === consus_extract_cost_center_code($right);
+}
+
+function consus_cost_center_from_source_row(array $row): string
+{
+    return consus_extract_cost_center_code(consus_first_filled_string($row, consus_cost_center_field_names()));
+}
+
+/**
+ * Ongeblokkeerde Global Dimension 1-waarden met een numerieke code onder 100
+ * en een tekstnaam. Label is `{code} - {naam}`, gesorteerd op het getal.
+ *
+ * @param array<int, mixed> $rows
+ * @return array<int, array{code:string,name:string,label:string}>
+ */
+function consus_department_catalog_from_rows(array $rows, string $dimensionCode): array
+{
+    $dimensionCode = trim($dimensionCode);
+    $options = [];
+    $seenCodes = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $rowDimension = trim(consus_scalar_string($row['Dimension_Code'] ?? ''));
+        if ($dimensionCode !== '' && $rowDimension !== '' && strcasecmp($rowDimension, $dimensionCode) !== 0) {
+            continue;
+        }
+        if (consus_dimension_value_is_blocked($row)) {
+            continue;
+        }
+        $code = trim(consus_scalar_string($row['Code'] ?? ''));
+        if ($code === '' || !ctype_digit($code) || (int) $code >= 100) {
+            continue;
+        }
+        $name = trim(consus_scalar_string($row['Name'] ?? ''));
+        if (!consus_dimension_value_has_text_label($name) || isset($seenCodes[$code])) {
+            continue;
+        }
+        $seenCodes[$code] = true;
+        $options[] = [
+            'code' => $code,
+            'name' => $name,
+            'label' => $code . ' - ' . $name,
+        ];
+    }
+    usort($options, static function (array $left, array $right): int {
+        return ((int) $left['code']) <=> ((int) $right['code']);
+    });
+
+    return $options;
 }
 
 /**
@@ -614,24 +704,43 @@ function consus_dimension_filters_for_code(string $code): array
 /**
  * @return array<string, string>
  */
-function consus_dimension_query(): array
+function consus_dimension_query(string $dimensionCode): array
 {
-    $filters = consus_dimension_filters_for_code(CONSUS_COST_CENTER_DIMENSION_CODE);
+    $filters = consus_dimension_filters_for_code($dimensionCode);
 
     return consus_entity_query(CONSUS_DIMENSION_FIELDS, $filters[0]);
 }
 
-function consus_dimension_code_filter(): string
+function consus_dimension_code_filter(string $dimensionCode): string
 {
-    $filters = consus_dimension_filters_for_code(CONSUS_COST_CENTER_DIMENSION_CODE);
+    $filters = consus_dimension_filters_for_code($dimensionCode);
 
     return $filters[1];
 }
 
 /**
- * Eerst tabel 27 én dimensie 15. Weigert BC dat tabelfilter, dan alleen
- * dimensie 15. Levert die niets, dan dezelfde twee filters voor KOSTENPLAATS,
- * AFDELING en CC. Nooit de hele DefaultDimensions-pagina.
+ * @return array<string, string>
+ */
+function consus_gl_setup_query(): array
+{
+    return consus_entity_query(CONSUS_GL_SETUP_FIELDS, '', 1);
+}
+
+function consus_dimension_value_filter(string $dimensionCode, bool $includeBlocked): string
+{
+    $escaped = consus_escape_odata_string($dimensionCode);
+    $filter = "Dimension_Code eq '" . $escaped . "'";
+    if ($includeBlocked) {
+        return $filter . ' and Blocked eq false';
+    }
+
+    return $filter;
+}
+
+/**
+ * Eerst tabel 27 én de code uit GeneralLedgerSetup. Weigert BC dat
+ * tabelfilter, dan alleen die code. Geen vaste code 15 en geen ongefilterde
+ * DefaultDimensions-pagina.
  *
  * @param callable(array<string, mixed>):void $onRow
  * @param callable(string, array<string, mixed>, callable(array<string, mixed>):void):int|null $fetchRows
@@ -639,39 +748,42 @@ function consus_dimension_code_filter(): string
  */
 function consus_each_dimension_rows(
     string $company,
+    string $dimensionCode,
     callable $onRow,
     ?callable $fetchRows = null,
     ?callable $onPage = null
 ): array {
+    $dimensionCode = trim($dimensionCode);
+    if ($dimensionCode === '') {
+        throw new InvalidArgumentException('Kostenplaatsdimensie ontbreekt.');
+    }
+    $filters = consus_dimension_filters_for_code($dimensionCode);
     $lastError = null;
     $lastZero = null;
-    foreach (consus_cost_center_dimension_codes() as $code) {
-        $filters = consus_dimension_filters_for_code($code);
-        foreach ($filters as $index => $filter) {
-            try {
-                $result = consus_each_entity_rows(
-                    $company,
-                    CONSUS_DIMENSION_ENTITY,
-                    CONSUS_DIMENSION_FIELDS,
-                    CONSUS_DIMENSION_OPTIONAL_FIELDS,
-                    $filter,
-                    $onRow,
-                    $fetchRows,
-                    $onPage
-                );
-                $result['filter_fallback'] = $index > 0;
-                $result['dimension_code'] = $code;
-                if ((int) ($result['count'] ?? 0) > 0) {
-                    return $result;
-                }
-                $lastZero = $result;
-            } catch (Throwable $error) {
-                $lastError = $error;
-                if ($index === 0 && consus_odata_error_allows_entry_type_fallback($error)) {
-                    continue;
-                }
-                throw $error;
+    foreach ($filters as $index => $filter) {
+        try {
+            $result = consus_each_entity_rows(
+                $company,
+                CONSUS_DIMENSION_ENTITY,
+                CONSUS_DIMENSION_FIELDS,
+                CONSUS_DIMENSION_OPTIONAL_FIELDS,
+                $filter,
+                $onRow,
+                $fetchRows,
+                $onPage
+            );
+            $result['filter_fallback'] = $index > 0;
+            $result['dimension_code'] = $dimensionCode;
+            if ((int) ($result['count'] ?? 0) > 0 || $index === count($filters) - 1) {
+                return $result;
             }
+            $lastZero = $result;
+        } catch (Throwable $error) {
+            $lastError = $error;
+            if ($index === 0 && consus_odata_error_allows_entry_type_fallback($error)) {
+                continue;
+            }
+            throw $error;
         }
     }
 
@@ -680,6 +792,57 @@ function consus_each_dimension_rows(
     }
 
     throw $lastError ?? new RuntimeException(CONSUS_DIMENSION_ENTITY . ' voor ' . $company . ' mislukt.');
+}
+
+/**
+ * DimensionValueList voor de code uit GeneralLedgerSetup. Weigert BC het
+ * Blocked-filter, dan blijft het filter op de dimensiecode staan.
+ *
+ * @param callable(array<string, mixed>):void $onRow
+ * @param callable(string, array<string, mixed>, callable(array<string, mixed>):void):int|null $fetchRows
+ * @return array{count:int,optional_fields:bool,missing_optional:array<int, string>,page_size_fallback:bool,filter_fallback:bool}
+ */
+function consus_each_dimension_value_rows(
+    string $company,
+    string $dimensionCode,
+    callable $onRow,
+    ?callable $fetchRows = null,
+    ?callable $onPage = null
+): array {
+    $dimensionCode = trim($dimensionCode);
+    if ($dimensionCode === '') {
+        throw new InvalidArgumentException('Kostenplaatsdimensie ontbreekt.');
+    }
+    $filters = [
+        consus_dimension_value_filter($dimensionCode, true),
+        consus_dimension_value_filter($dimensionCode, false),
+    ];
+    $lastError = null;
+    foreach ($filters as $index => $filter) {
+        try {
+            $result = consus_each_entity_rows(
+                $company,
+                CONSUS_DIMENSION_VALUE_ENTITY,
+                CONSUS_DIMENSION_VALUE_FIELDS,
+                [],
+                $filter,
+                $onRow,
+                $fetchRows,
+                $onPage
+            );
+            $result['filter_fallback'] = $index > 0;
+
+            return $result;
+        } catch (Throwable $error) {
+            $lastError = $error;
+            if ($index === 0 && consus_odata_error_allows_entry_type_fallback($error)) {
+                continue;
+            }
+            throw $error;
+        }
+    }
+
+    throw $lastError ?? new RuntimeException(CONSUS_DIMENSION_VALUE_ENTITY . ' voor ' . $company . ' mislukt.');
 }
 
 /**
@@ -1757,6 +1920,12 @@ function consus_apply_stock_row(array &$items, array $row, string $sourceCompany
         $seen[$field] = true;
     }
     $items[$key]['_stock_seen'][$location] = $seen;
+    if (trim((string) ($items[$key]['cost_center'] ?? '')) === '') {
+        $costCenter = consus_cost_center_from_source_row($row);
+        if ($costCenter !== '') {
+            $items[$key]['cost_center'] = $costCenter;
+        }
+    }
 }
 
 /**
@@ -1787,14 +1956,7 @@ function consus_apply_vendor_row(array &$items, array $row, string $companyKey):
         $items[$key]['vendor_name'] = $vendorName;
     }
 
-    $costCenter = consus_first_filled_string($row, [
-        'COST_CENTER',
-        'Cost_Center',
-        'Kostenplaats',
-        'Afdeling',
-        'Global_Dimension_1_Code',
-        'Shortcut_Dimension_1_Code',
-    ]);
+    $costCenter = consus_cost_center_from_source_row($row);
     if ($costCenter !== '') {
         $items[$key]['cost_center'] = $costCenter;
     }
@@ -1905,9 +2067,7 @@ function consus_planning_gap_warnings(array $items, string $companyKey): array
         $warnings[] = 'Bestelpunt blijft 0. Noch Reorder_Point noch Bestelpunt was gevuld op voorraad of de artikelkaart.';
     }
     if ($withCost === 0) {
-        $warnings[] = 'Geen afdeling op de artikelen. COST_CENTER en Global_Dimension_1_Code op de artikelkaart zijn leeg of ontbreken, en DefaultDimensions (dimensie '
-            . implode(', ', consus_cost_center_dimension_codes())
-            . ') leverde geen waarde.';
+        $warnings[] = 'Geen afdeling op de artikelen. Global_Dimension_1_Code op de artikelkaart is leeg of ontbreekt, en DefaultDimensions voor de code uit GeneralLedgerSetup leverde geen waarde.';
     }
     if ($withInventory > 0 && $locatedInventory === 0) {
         $warnings[] = 'Voorraad staat zonder locatie. Location_Code ontbreekt op VoorraadPerBedrijf; de regels vallen onder (zonder locatie).';
@@ -1964,19 +2124,19 @@ function consus_warning_lines(array $warnings): array
 /**
  * @param array<string, array<string, mixed>> $items
  */
-function consus_apply_dimension_row(array &$items, array $row, string $companyKey): void
+function consus_apply_dimension_row(array &$items, array $row, string $companyKey, string $expectedDimension = ''): void
 {
     if ($companyKey === '') {
         return;
     }
 
     $dimensionCode = consus_scalar_string($row['Dimension_Code'] ?? '');
-    if (!consus_is_cost_center_dimension_code($dimensionCode)) {
+    if ($expectedDimension !== '' && $dimensionCode !== '' && strcasecmp($dimensionCode, $expectedDimension) !== 0) {
         return;
     }
 
     $itemNo = consus_scalar_string($row['No'] ?? $row['Item_No'] ?? '');
-    $value = consus_first_filled_string($row, ['Dimension_Value_Code', 'Dimension_Value', 'Value_Code']);
+    $value = consus_extract_cost_center_code(consus_first_filled_string($row, ['Dimension_Value_Code', 'Dimension_Value', 'Value_Code']));
     if ($itemNo === '' || $value === '') {
         return;
     }
@@ -2016,6 +2176,12 @@ function consus_apply_ledger_row(array &$items, array $row, string $companyKey, 
     $key = $companyKey . '|' . $itemNo;
     if (!isset($items[$key])) {
         $items[$key] = consus_new_item_fact($companyKey, $itemNo);
+    }
+    if (trim((string) ($items[$key]['cost_center'] ?? '')) === '') {
+        $costCenter = consus_cost_center_from_source_row($row);
+        if ($costCenter !== '') {
+            $items[$key]['cost_center'] = $costCenter;
+        }
     }
 
     consus_prepare_movement($items[$key], $location, $kind, $bucket);
@@ -2457,7 +2623,7 @@ function consus_matching_rows(array $rows, string $companyKey, string $costCente
         if ($companyKey !== '' && (string) ($row['company_key'] ?? '') !== $companyKey) {
             continue;
         }
-        if (!consus_filter_value_matches((string) ($row['cost_center'] ?? ''), $costCenter)) {
+        if (!consus_cost_center_filter_matches((string) ($row['cost_center'] ?? ''), $costCenter)) {
             continue;
         }
         if (!consus_filter_value_matches((string) ($row['vendor_no'] ?? ''), $vendorNo)) {
@@ -2476,6 +2642,18 @@ function consus_matching_rows(array $rows, string $companyKey, string $costCente
  * @param array<int, array<string, mixed>> $rows
  * @return array<int, string>
  */
+function consus_cost_center_filter_matches(string $actual, string $filter): bool
+{
+    if ($filter === '') {
+        return true;
+    }
+    if ($filter === '__none__') {
+        return trim($actual) === '';
+    }
+
+    return consus_cost_centers_match($actual, $filter);
+}
+
 function consus_department_options(array $rows, string $companyKey): array
 {
     $options = [];
@@ -2486,6 +2664,84 @@ function consus_department_options(array $rows, string $companyKey): array
     natcasesort($list);
 
     return array_values($list);
+}
+
+/**
+ * Dropdown: catalogusnamen als `code - naam`, plus (geen afdeling) als een
+ * regel leeg is. De waarde is de genormaliseerde code (`05` en `5` zijn gelijk).
+ *
+ * @param array<int, array<string, mixed>> $rows
+ * @param array<int, array<string, mixed>> $catalog
+ * @return array<int, array{value:string,label:string}>
+ */
+function consus_department_choices(array $rows, array $catalog, string $companyKey): array
+{
+    $byKey = [];
+    foreach ($catalog as $entry) {
+        if (!is_array($entry)) {
+            continue;
+        }
+        $entryCompany = (string) ($entry['company_key'] ?? '');
+        if ($companyKey !== '' && $entryCompany !== '' && $entryCompany !== $companyKey) {
+            continue;
+        }
+        $code = trim((string) ($entry['code'] ?? ''));
+        $norm = consus_normalize_cost_center_for_match($code);
+        if ($norm === '' || isset($byKey[$norm])) {
+            continue;
+        }
+        $label = trim((string) ($entry['label'] ?? ''));
+        if ($label === '') {
+            $name = trim((string) ($entry['name'] ?? ''));
+            $label = $name !== '' ? $code . ' - ' . $name : $code;
+        }
+        $byKey[$norm] = [
+            'value' => $norm,
+            'label' => $label,
+            'sort' => ctype_digit($norm) ? (int) $norm : 100000,
+        ];
+    }
+    $blank = false;
+    foreach (consus_matching_rows($rows, $companyKey) as $row) {
+        $raw = trim((string) ($row['cost_center'] ?? ''));
+        if ($raw === '') {
+            $blank = true;
+            continue;
+        }
+        $norm = consus_extract_cost_center_code($raw);
+        if ($norm === '' || isset($byKey[$norm])) {
+            continue;
+        }
+        $byKey[$norm] = [
+            'value' => $norm,
+            'label' => $raw,
+            'sort' => ctype_digit($norm) ? (int) $norm : 100000,
+        ];
+    }
+    $choices = array_values($byKey);
+    usort($choices, static function (array $left, array $right): int {
+        $bySort = ((int) $left['sort']) <=> ((int) $right['sort']);
+        if ($bySort !== 0) {
+            return $bySort;
+        }
+
+        return strnatcasecmp((string) $left['label'], (string) $right['label']);
+    });
+    $list = [];
+    if ($blank) {
+        $list[] = [
+            'value' => '__none__',
+            'label' => '(geen afdeling)',
+        ];
+    }
+    foreach ($choices as $choice) {
+        $list[] = [
+            'value' => (string) $choice['value'],
+            'label' => (string) $choice['label'],
+        ];
+    }
+
+    return $list;
 }
 
 /**
@@ -2706,6 +2962,7 @@ function consus_empty_snapshot(): array
         'warnings' => [],
         'vendors' => [],
         'cost_centers' => [],
+        'departments' => [],
         'locations' => [],
         'rows' => [],
         'articles' => [],
@@ -4728,7 +4985,7 @@ function consus_collect_ledger(
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
  * @param array{mode?:string,from?:string,chunks?:array<int, array{from:string,to:string}>}|null $plan
  * @param array<string, mixed>|null $checkpoint
- * @return array{warnings:array<int, string>,foreign_spills:array<string, string>}
+ * @return array{warnings:array<int, string>,foreign_spills:array<string, string>,departments:array<int, array<string, mixed>>}
  */
 function consus_collect_company(
     string $company,
@@ -4980,75 +5237,169 @@ function consus_collect_company(
             $addWarning('Artikelen (leverancier) niet geladen: ' . $error->getMessage());
         }
 
+        $dimensionCode = '';
+        $departmentRows = [];
         try {
-            $dimensionOutcome = consus_collect_entity_with_checkpoint(
+            consus_collect_entity_with_checkpoint(
                 $checkpoint['companies'][$companyKey]['steps'],
                 $companyKey,
-                'kostenplaats',
-                static function (array $row) use (&$items, $companyKey): void {
-                    consus_apply_dimension_row($items, $row, $companyKey);
+                'dimensiecode',
+                static function (array $row) use (&$dimensionCode): void {
+                    $code = trim(consus_scalar_string($row['Global_Dimension_1_Code'] ?? ''));
+                    if ($code !== '') {
+                        $dimensionCode = $code;
+                    }
                 },
-                static function (?array &$writer) use (&$items, $company, $companyKey, $onProgress, $fetchRows): array {
-                    return consus_each_dimension_rows(
+                static function (?array &$writer) use (&$dimensionCode, $company, $companyKey, $onProgress): array {
+                    return consus_each_entity_rows(
                         $company,
-                        static function (array $row) use (&$items, &$writer, $companyKey): void {
-                            consus_apply_dimension_row($items, $row, $companyKey);
+                        CONSUS_GL_SETUP_ENTITY,
+                        CONSUS_GL_SETUP_FIELDS,
+                        [],
+                        '',
+                        static function (array $row) use (&$dimensionCode, &$writer): void {
+                            $code = trim(consus_scalar_string($row['Global_Dimension_1_Code'] ?? ''));
+                            if ($code !== '') {
+                                $dimensionCode = $code;
+                            }
                             if ($writer !== null) {
                                 consus_checkpoint_write_row($writer, $row);
                             }
                         },
-                        $fetchRows,
+                        null,
                         consus_page_progress($onProgress, [
                             'company' => $company,
                             'company_key' => $companyKey,
-                            'step' => 'kostenplaats',
-                            'entry_type' => CONSUS_DIMENSION_ENTITY,
+                            'step' => 'dimensiecode',
+                            'entry_type' => CONSUS_GL_SETUP_ENTITY,
                         ])
                     );
                 },
                 $saveCheckpoint,
                 $persist
             );
-            if (!empty($dimensionOutcome['replayed'])) {
-                $note([
-                    'step' => 'kostenplaats',
-                    'entry_type' => CONSUS_DIMENSION_ENTITY,
-                    'rows' => (int) $dimensionOutcome['rows'],
-                    'resumed' => true,
-                ]);
-            } else {
-                if (!empty($dimensionOutcome['missing'])) {
-                    $addWarning('Opgeslagen kostenplaats ontbreekt en wordt opnieuw opgehaald.');
-                }
-                $dimensionResult = is_array($dimensionOutcome['result'] ?? null) ? $dimensionOutcome['result'] : [];
-                if (!empty($dimensionResult['filter_fallback'])) {
-                    $usedDimension = (string) ($dimensionResult['dimension_code'] ?? CONSUS_COST_CENTER_DIMENSION_CODE);
-                    $addWarning(CONSUS_DIMENSION_ENTITY . ': Table_ID werd geweigerd. Kostenplaats is alsnog opgehaald met alleen dimensie ' . $usedDimension . '.');
-                }
-                $usedDimension = (string) ($dimensionResult['dimension_code'] ?? '');
-                if (
-                    $usedDimension !== ''
-                    && strcasecmp($usedDimension, CONSUS_COST_CENTER_DIMENSION_CODE) !== 0
-                    && (int) ($dimensionResult['count'] ?? 0) > 0
-                ) {
-                    $addWarning('Kostenplaats komt van dimensie ' . $usedDimension . '. Dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ' leverde geen regels.');
-                }
-                $dimensionMissing = [];
-                foreach ($dimensionResult['missing_optional'] ?? [] as $field) {
-                    $field = (string) $field;
-                    if ($field !== '' && !in_array($field, $dimensionMissing, true)) {
-                        $dimensionMissing[] = $field;
-                    }
-                }
-                if ((int) ($dimensionResult['count'] ?? 0) > 0 && $dimensionMissing !== []) {
-                    $addWarning(CONSUS_DIMENSION_ENTITY . ': velden niet beschikbaar (' . implode(', ', $dimensionMissing) . ').');
-                }
-                if (!empty($dimensionResult['page_size_fallback'])) {
-                    $addWarning(consus_page_size_warning(CONSUS_DIMENSION_ENTITY));
-                }
+            if ($dimensionCode === '') {
+                $addWarning(CONSUS_GL_SETUP_ENTITY . ' heeft geen Global_Dimension_1_Code. Afdelingen kunnen niet worden geladen.');
             }
         } catch (Throwable $error) {
-            $addWarning('Kostenplaats (dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ') niet geladen: ' . $error->getMessage());
+            $addWarning(CONSUS_GL_SETUP_ENTITY . ' niet geladen: ' . $error->getMessage());
+        }
+
+        if ($dimensionCode !== '') {
+            try {
+                $catalogOutcome = consus_collect_entity_with_checkpoint(
+                    $checkpoint['companies'][$companyKey]['steps'],
+                    $companyKey,
+                    'afdelingen',
+                    static function (array $row) use (&$departmentRows): void {
+                        $departmentRows[] = $row;
+                    },
+                    static function (?array &$writer) use (&$departmentRows, $company, $dimensionCode, $companyKey, $onProgress, $fetchRows): array {
+                        return consus_each_dimension_value_rows(
+                            $company,
+                            $dimensionCode,
+                            static function (array $row) use (&$departmentRows, &$writer): void {
+                                $departmentRows[] = $row;
+                                if ($writer !== null) {
+                                    consus_checkpoint_write_row($writer, $row);
+                                }
+                            },
+                            $fetchRows,
+                            consus_page_progress($onProgress, [
+                                'company' => $company,
+                                'company_key' => $companyKey,
+                                'step' => 'afdelingen',
+                                'entry_type' => CONSUS_DIMENSION_VALUE_ENTITY,
+                            ])
+                        );
+                    },
+                    $saveCheckpoint,
+                    $persist
+                );
+                if (empty($catalogOutcome['replayed'])) {
+                    $catalogResult = is_array($catalogOutcome['result'] ?? null) ? $catalogOutcome['result'] : [];
+                    if (!empty($catalogResult['filter_fallback'])) {
+                        $addWarning(CONSUS_DIMENSION_VALUE_ENTITY . ': Blocked-filter werd geweigerd. Afdelingen zijn alsnog opgehaald met alleen dimensie ' . $dimensionCode . '.');
+                    }
+                    if ((int) ($catalogResult['count'] ?? 0) === 0) {
+                        $addWarning(CONSUS_DIMENSION_VALUE_ENTITY . ' voor ' . $dimensionCode . ' leverde geen regels.');
+                    }
+                }
+            } catch (Throwable $error) {
+                $addWarning(CONSUS_DIMENSION_VALUE_ENTITY . ' niet geladen: ' . $error->getMessage());
+            }
+
+            try {
+                $dimensionOutcome = consus_collect_entity_with_checkpoint(
+                    $checkpoint['companies'][$companyKey]['steps'],
+                    $companyKey,
+                    'kostenplaats',
+                    static function (array $row) use (&$items, $companyKey, $dimensionCode): void {
+                        consus_apply_dimension_row($items, $row, $companyKey, $dimensionCode);
+                    },
+                    static function (?array &$writer) use (&$items, $company, $companyKey, $dimensionCode, $onProgress, $fetchRows): array {
+                        return consus_each_dimension_rows(
+                            $company,
+                            $dimensionCode,
+                            static function (array $row) use (&$items, &$writer, $companyKey, $dimensionCode): void {
+                                consus_apply_dimension_row($items, $row, $companyKey, $dimensionCode);
+                                if ($writer !== null) {
+                                    consus_checkpoint_write_row($writer, $row);
+                                }
+                            },
+                            $fetchRows,
+                            consus_page_progress($onProgress, [
+                                'company' => $company,
+                                'company_key' => $companyKey,
+                                'step' => 'kostenplaats',
+                                'entry_type' => CONSUS_DIMENSION_ENTITY,
+                            ])
+                        );
+                    },
+                    $saveCheckpoint,
+                    $persist
+                );
+                if (!empty($dimensionOutcome['replayed'])) {
+                    $note([
+                        'step' => 'kostenplaats',
+                        'entry_type' => CONSUS_DIMENSION_ENTITY,
+                        'rows' => (int) $dimensionOutcome['rows'],
+                        'resumed' => true,
+                    ]);
+                } else {
+                    if (!empty($dimensionOutcome['missing'])) {
+                        $addWarning('Opgeslagen kostenplaats ontbreekt en wordt opnieuw opgehaald.');
+                    }
+                    $dimensionResult = is_array($dimensionOutcome['result'] ?? null) ? $dimensionOutcome['result'] : [];
+                    if (!empty($dimensionResult['filter_fallback'])) {
+                        $addWarning(CONSUS_DIMENSION_ENTITY . ': Table_ID werd geweigerd. Kostenplaats is alsnog opgehaald met alleen dimensie ' . $dimensionCode . '.');
+                    }
+                    $dimensionMissing = [];
+                    foreach ($dimensionResult['missing_optional'] ?? [] as $field) {
+                        $field = (string) $field;
+                        if ($field !== '' && !in_array($field, $dimensionMissing, true)) {
+                            $dimensionMissing[] = $field;
+                        }
+                    }
+                    if ((int) ($dimensionResult['count'] ?? 0) > 0 && $dimensionMissing !== []) {
+                        $addWarning(CONSUS_DIMENSION_ENTITY . ': velden niet beschikbaar (' . implode(', ', $dimensionMissing) . ').');
+                    }
+                    if (!empty($dimensionResult['page_size_fallback'])) {
+                        $addWarning(consus_page_size_warning(CONSUS_DIMENSION_ENTITY));
+                    }
+                }
+            } catch (Throwable $error) {
+                $addWarning('Kostenplaats (dimensie ' . $dimensionCode . ') niet geladen: ' . $error->getMessage());
+            }
+        }
+
+        $departmentCatalog = [];
+        foreach (consus_department_catalog_from_rows($departmentRows, $dimensionCode) as $entry) {
+            $entry['company_key'] = $companyKey;
+            $departmentCatalog[] = $entry;
+        }
+        if ($dimensionCode !== '' && $departmentRows !== [] && $departmentCatalog === []) {
+            $addWarning(CONSUS_DIMENSION_VALUE_ENTITY . ' voor ' . $dimensionCode . ' heeft geen afdeling met een numerieke code onder 100 en een naam.');
         }
 
         $warnings = array_values(array_filter(
@@ -5067,6 +5418,7 @@ function consus_collect_company(
         return [
             'warnings' => array_values($warnings),
             'foreign_spills' => consus_foreign_spill_finish($foreignSpills, false),
+            'departments' => $departmentCatalog,
         ];
     } catch (Throwable $error) {
         consus_foreign_spill_finish($foreignSpills, true);
@@ -5385,6 +5737,8 @@ function consus_running_company_errors(array $companyStats, array $freshRows, ar
  * @param array<int, mixed> $previousStats
  * @param array<string, array<int, array<string, mixed>>> $freshArticles
  * @param array<string, array<int, array<string, mixed>>> $previousArticles
+ * @param array<string, array<int, array<string, mixed>>> $freshDepartments
+ * @param array<string, array<int, array<string, mixed>>> $previousDepartments
  */
 function consus_publish_nightly_snapshot(
     array $windows,
@@ -5396,7 +5750,9 @@ function consus_publish_nightly_snapshot(
     array $previousStats,
     bool $running = false,
     array $freshArticles = [],
-    array $previousArticles = []
+    array $previousArticles = [],
+    array $freshDepartments = [],
+    array $previousDepartments = []
 ): array {
     if ($running) {
         $errors = consus_running_company_errors($companyStats, $freshRows, $errors);
@@ -5404,6 +5760,27 @@ function consus_publish_nightly_snapshot(
     $rows = consus_rows_keeping_unfetched($freshRows, $previousRows);
     $articles = consus_rows_keeping_unfetched($freshArticles, $previousArticles);
     $catalog = consus_catalog_from_rows($rows);
+    $departments = [];
+    foreach ($freshDepartments as $departmentList) {
+        if (!is_array($departmentList)) {
+            continue;
+        }
+        foreach ($departmentList as $entry) {
+            if (is_array($entry)) {
+                $departments[] = $entry;
+            }
+        }
+    }
+    foreach ($previousDepartments as $departmentKey => $departmentList) {
+        if (array_key_exists((string) $departmentKey, $freshDepartments) || !is_array($departmentList)) {
+            continue;
+        }
+        foreach ($departmentList as $entry) {
+            if (is_array($entry)) {
+                $departments[] = $entry;
+            }
+        }
+    }
     $snapshot = [
         'version' => CONSUS_SNAPSHOT_VERSION,
         'generated_at' => gmdate('c'),
@@ -5414,6 +5791,7 @@ function consus_publish_nightly_snapshot(
         'warnings' => $warnings,
         'vendors' => $catalog['vendors'],
         'cost_centers' => $catalog['cost_centers'],
+        'departments' => $departments,
         'locations' => $catalog['locations'],
         'rows' => $rows,
         'articles' => $articles,
@@ -5438,9 +5816,21 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
     $previous = consus_read_snapshot();
     $previousRows = [];
     $previousArticles = [];
+    $previousDepartments = [];
     foreach (array_keys(CONSUS_COMPANIES) as $key) {
         $previousRows[(string) $key] = consus_previous_rows_for_company($previous, (string) $key);
         $previousArticles[(string) $key] = consus_previous_articles_for_company($previous, (string) $key);
+        $previousDepartments[(string) $key] = [];
+    }
+    foreach ($previous['departments'] ?? [] as $departmentEntry) {
+        if (!is_array($departmentEntry)) {
+            continue;
+        }
+        $departmentKey = (string) ($departmentEntry['company_key'] ?? '');
+        if ($departmentKey === '') {
+            continue;
+        }
+        $previousDepartments[$departmentKey][] = $departmentEntry;
     }
     $previousStats = is_array($previous['companies'] ?? null) ? $previous['companies'] : [];
     $resumeSnapshot = [
@@ -5453,6 +5843,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
 
     $freshRows = [];
     $freshArticles = [];
+    $freshDepartments = [];
     $foreignSpills = [];
     $companyStats = [];
     $errors = [];
@@ -5477,7 +5868,9 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         &$previousRows,
         &$previousStats,
         &$freshArticles,
-        &$previousArticles
+        &$previousArticles,
+        &$freshDepartments,
+        &$previousDepartments
     ): array {
         return consus_publish_nightly_snapshot(
             $windows,
@@ -5489,7 +5882,9 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
             $previousStats,
             $running,
             $freshArticles,
-            $previousArticles
+            $previousArticles,
+            $freshDepartments,
+            $previousDepartments
         );
     };
 
@@ -5519,6 +5914,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         if (!$force && consus_company_refresh_is_current($resumeSnapshot, $companyKey, $windows)) {
             $freshRows[$companyKey] = $previousRows[$companyKey] ?? [];
             $freshArticles[$companyKey] = $previousArticles[$companyKey] ?? [];
+            $freshDepartments[$companyKey] = $previousDepartments[$companyKey] ?? [];
             if (!consus_rows_lack_inventory($freshRows[$companyKey])) {
                 foreach ($foreignSpills[$companyKey] ?? [] as $path) {
                     if (is_string($path)) {
@@ -5599,6 +5995,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
             $localItems = [];
             $freshRows[$companyKey] = $rolled['rows'];
             $freshArticles[$companyKey] = is_array($rolled['articles'] ?? null) ? $rolled['articles'] : [];
+            $freshDepartments[$companyKey] = is_array($result['departments'] ?? null) ? $result['departments'] : [];
             unset($rolled);
             if ($plan['mode'] === 'warm') {
                 $freshRows[$companyKey] = consus_merge_warm_company_rows(
