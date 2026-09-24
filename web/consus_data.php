@@ -505,8 +505,12 @@ function consus_new_item_fact(string $companyKey, string $itemNo, string $compan
 }
 
 /**
+ * Voorraad per locatie, zonder verkoop- of verbruiksbuckets.
+ * Die buckets komen er pas bij als een artikelpost ze vult. Een lege
+ * bucketmap per locatie hield de nachtrun boven memory_limit.
+ *
  * @param array<string, mixed> $item
- * @return array{inventory:float,safety_stock:float,reorder_point:float,sales:array,consumption:array}
+ * @return array{inventory:float,safety_stock:float,reorder_point:float}
  */
 function consus_location_metrics(array &$item, string $location): array
 {
@@ -515,12 +519,26 @@ function consus_location_metrics(array &$item, string $location): array
             'inventory' => 0.0,
             'safety_stock' => 0.0,
             'reorder_point' => 0.0,
-            'sales' => consus_empty_bucket_map(),
-            'consumption' => consus_empty_bucket_map(),
         ];
     }
 
     return $item['by_location'][$location];
+}
+
+/**
+ * Eén bucket binnen sales of consumption. Andere buckets blijven weg tot er een post is.
+ *
+ * @param array<string, mixed> $item
+ */
+function consus_prepare_movement(array &$item, string $location, string $kind, string $bucket): void
+{
+    consus_location_metrics($item, $location);
+    if (!isset($item['by_location'][$location][$kind]) || !is_array($item['by_location'][$location][$kind])) {
+        $item['by_location'][$location][$kind] = [];
+    }
+    if (!isset($item['by_location'][$location][$kind][$bucket]) || !is_array($item['by_location'][$location][$kind][$bucket])) {
+        $item['by_location'][$location][$kind][$bucket] = consus_empty_period_stats();
+    }
 }
 
 function consus_vendor_name_from_item(array $row): string
@@ -678,17 +696,25 @@ function consus_apply_ledger_row(array &$items, array $row, string $companyKey, 
         $items[$key] = consus_new_item_fact($companyKey, $itemNo);
     }
 
-    consus_location_metrics($items[$key], $location);
+    consus_prepare_movement($items[$key], $location, $kind, $bucket);
     $qty = consus_outbound_quantity($row['Quantity'] ?? 0);
     $amount = $kind === 'sales' ? consus_scalar_float($row['Sales_Amount_Actual'] ?? 0) : 0.0;
     consus_add_to_period_stats($items[$key]['by_location'][$location][$kind][$bucket], $date, $qty, $amount, $windows);
+}
+
+function consus_compare_snapshot_rows(array $left, array $right): int
+{
+    return strnatcasecmp(
+        implode('|', [(string) ($left['company_key'] ?? ''), (string) ($left['vendor_name'] ?? ''), (string) ($left['cost_center'] ?? ''), (string) ($left['location'] ?? '')]),
+        implode('|', [(string) ($right['company_key'] ?? ''), (string) ($right['vendor_name'] ?? ''), (string) ($right['cost_center'] ?? ''), (string) ($right['location'] ?? '')])
+    );
 }
 
 /**
  * @param array<string, array<string, mixed>> $items
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
  * @param array<int, string> $unmappedLocations
- * @return array{rows:array<int, array<string, mixed>>,vendors:array<int, array{vendor_no:string,vendor_name:string}>,cost_centers:array<int, string>}
+ * @return array{rows:array<int, array<string, mixed>>,vendors:array<int, array{vendor_no:string,vendor_name:string}>,cost_centers:array<int, string>,locations:array<int, string>}
  */
 function consus_rollup_items(array $items, array $windows, array $unmappedLocations = []): array
 {
@@ -761,12 +787,7 @@ function consus_rollup_items(array $items, array $windows, array $unmappedLocati
     }
 
     $rows = array_values($grouped);
-    usort($rows, static function (array $left, array $right): int {
-        return strnatcasecmp(
-            implode('|', [(string) $left['company_key'], (string) $left['vendor_name'], (string) $left['cost_center'], (string) $left['location']]),
-            implode('|', [(string) $right['company_key'], (string) $right['vendor_name'], (string) $right['cost_center'], (string) $right['location']])
-        );
-    });
+    usort($rows, consus_compare_snapshot_rows(...));
 
     $vendors = [];
     $costCenters = [];
@@ -1154,9 +1175,122 @@ function consus_each_url_live(string $url, array $auth, callable $onRow): int
     return $count;
 }
 
+function consus_odata_spill_path(): string
+{
+    $directory = sys_get_temp_dir();
+
+    return $directory . '/consus-odata-' . getmypid() . '-' . bin2hex(random_bytes(4)) . '.ndjson';
+}
+
+function consus_track_temp_file(string $path): void
+{
+    if (!isset($GLOBALS['consus_temp_files']) || !is_array($GLOBALS['consus_temp_files'])) {
+        $GLOBALS['consus_temp_files'] = [];
+    }
+    $GLOBALS['consus_temp_files'][$path] = true;
+
+    static $registered = false;
+    if ($registered) {
+        return;
+    }
+    $registered = true;
+    register_shutdown_function(static function (): void {
+        $paths = $GLOBALS['consus_temp_files'] ?? [];
+        if (!is_array($paths)) {
+            return;
+        }
+        foreach (array_keys($paths) as $tracked) {
+            if (is_string($tracked) && is_file($tracked)) {
+                @unlink($tracked);
+            }
+        }
+    });
+}
+
+function consus_release_temp_file(string $path): void
+{
+    if (isset($GLOBALS['consus_temp_files']) && is_array($GLOBALS['consus_temp_files'])) {
+        unset($GLOBALS['consus_temp_files'][$path]);
+    }
+    if (is_file($path)) {
+        @unlink($path);
+    }
+}
+
+/**
+ * Haalt een OData-set pagina voor pagina op en schrijft die meteen weg.
+ * $onRow draait pas nadat de hele poging gelukt is, zodat een geweigerd
+ * filter of een afgebroken pagina niet half én daarna nog een keer telt.
+ *
+ * @param callable(callable(array<string, mixed>):void):int $fetchInto
+ * @return array{count:int,sample:array<string, mixed>|null}
+ */
+function consus_collect_rows_via_spill(callable $fetchInto, callable $onRow): array
+{
+    $path = consus_odata_spill_path();
+    consus_track_temp_file($path);
+    $handle = @fopen($path, 'w+b');
+    if ($handle === false) {
+        consus_release_temp_file($path);
+        throw new RuntimeException('Tijdelijk OData-bestand kon niet worden geopend.');
+    }
+    @chmod($path, 0600);
+
+    $sample = null;
+    try {
+        $count = $fetchInto(static function (array $row) use ($handle, &$sample): void {
+            if ($sample === null) {
+                $sample = $row;
+            }
+            $encoded = json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if (!is_string($encoded)) {
+                throw new RuntimeException('OData-regel kon niet als JSON worden weggeschreven.');
+            }
+            if (fwrite($handle, $encoded . "\n") === false) {
+                throw new RuntimeException('OData-regel kon niet worden weggeschreven.');
+            }
+        });
+        if (!is_int($count)) {
+            throw new RuntimeException('OData-telling ontbreekt.');
+        }
+
+        if ($count > 0) {
+            fflush($handle);
+            if (!rewind($handle)) {
+                throw new RuntimeException('Tijdelijk OData-bestand kon niet worden teruggelezen.');
+            }
+            $replayed = 0;
+            while (($line = fgets($handle)) !== false) {
+                $line = trim($line);
+                if ($line === '') {
+                    continue;
+                }
+                $row = json_decode($line, true);
+                if (!is_array($row)) {
+                    throw new RuntimeException('Tijdelijk OData-bestand bevat een onleesbare regel.');
+                }
+                $onRow($row);
+                $replayed++;
+            }
+            if ($replayed !== $count) {
+                throw new RuntimeException('Tijdelijk OData-bestand is onvolledig.');
+            }
+        }
+
+        return [
+            'count' => $count,
+            'sample' => is_array($sample) ? $sample : null,
+        ];
+    } finally {
+        fclose($handle);
+        consus_release_temp_file($path);
+    }
+}
+
 /**
  * @param array<int, string> $required
  * @param array<int, string> $optional
+ * @param callable(string, array<string, mixed>, callable(array<string, mixed>):void):int|null $fetchRows
  */
 function consus_each_entity_rows(
     string $company,
@@ -1164,12 +1298,16 @@ function consus_each_entity_rows(
     array $required,
     array $optional,
     string $filter,
-    callable $onRow
+    callable $onRow,
+    ?callable $fetchRows = null
 ): array {
     global $baseUrl;
 
     $environment = auth_get_environment_for_company($company);
     $auth = auth_get_auth_for_environment($environment);
+    $fetchRows ??= static function (string $url, array $auth, callable $onRow): int {
+        return consus_each_url_live($url, $auth, $onRow);
+    };
     $attempts = [];
     if ($optional !== []) {
         $attempts[] = array_values(array_unique(array_merge($required, $optional)));
@@ -1183,19 +1321,18 @@ function consus_each_entity_rows(
         $url = consus_company_entity_url((string) $baseUrl, $environment, $company, $entitySet, $query);
         $useOptionalAttempt = $index === 0 && $optional !== [];
         try {
-            $buffered = [];
-            $count = consus_each_url_live($url, $auth, static function (array $row) use (&$buffered): void {
-                $buffered[] = $row;
-            });
-            if ($useOptionalAttempt && $count === 0 && $index < $attemptCount - 1) {
+            $fetched = consus_collect_rows_via_spill(
+                static function (callable $onSpillRow) use ($fetchRows, $url, $auth): int {
+                    return $fetchRows($url, $auth, $onSpillRow);
+                },
+                $onRow
+            );
+            if ($useOptionalAttempt && $fetched['count'] === 0 && $index < $attemptCount - 1) {
                 continue;
-            }
-            foreach ($buffered as $row) {
-                $onRow($row);
             }
             $missing = [];
             if ($optional !== []) {
-                $sample = $buffered[0] ?? null;
+                $sample = $fetched['sample'];
                 foreach ($optional as $field) {
                     if (!is_array($sample) || !array_key_exists($field, $sample)) {
                         $missing[] = $field;
@@ -1204,11 +1341,18 @@ function consus_each_entity_rows(
             }
 
             return [
-                'count' => $count,
+                'count' => $fetched['count'],
                 'optional_fields' => $missing === [] && $optional !== [],
                 'missing_optional' => $missing,
             ];
         } catch (Throwable $error) {
+            $message = $error->getMessage();
+            if (
+                str_contains($message, 'Tijdelijk OData-bestand bevat een onleesbare regel.')
+                || str_contains($message, 'Tijdelijk OData-bestand is onvolledig.')
+            ) {
+                throw $error;
+            }
             $lastError = $error;
         }
     }
@@ -1281,218 +1425,230 @@ function consus_each_ledger_entry_type(
 }
 
 /**
+ * Voorraad van een ander bedrijf gaat per regel naar schijf. Die feiten blijven
+ * niet naast het bedrijf dat nu geladen wordt in het geheugen staan.
+ *
+ * @param array<string, array{path:string,handle:resource}> $spills
+ */
+function consus_foreign_spill_write(array &$spills, string $target, array $row): void
+{
+    if (!isset($spills[$target])) {
+        $path = sys_get_temp_dir() . '/consus-foreign-' . getmypid() . '-' . bin2hex(random_bytes(4)) . '.ndjson';
+        consus_track_temp_file($path);
+        $handle = @fopen($path, 'wb');
+        if ($handle === false) {
+            consus_release_temp_file($path);
+            throw new RuntimeException('Tijdelijke voorraad kon niet worden weggeschreven.');
+        }
+        @chmod($path, 0600);
+        $spills[$target] = [
+            'path' => $path,
+            'handle' => $handle,
+        ];
+    }
+
+    $encoded = json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!is_string($encoded) || fwrite($spills[$target]['handle'], $encoded . "\n") === false) {
+        throw new RuntimeException('Tijdelijke voorraad kon niet worden weggeschreven.');
+    }
+}
+
+/**
+ * @param array<string, array{path:string,handle:resource}> $spills
+ * @return array<string, string>
+ */
+function consus_foreign_spill_finish(array &$spills, bool $discard): array
+{
+    $paths = [];
+    foreach ($spills as $target => $spill) {
+        $handle = $spill['handle'] ?? null;
+        if (is_resource($handle)) {
+            fclose($handle);
+        }
+        $path = (string) ($spill['path'] ?? '');
+        if ($path === '') {
+            continue;
+        }
+        if ($discard) {
+            consus_release_temp_file($path);
+            continue;
+        }
+        $paths[(string) $target] = $path;
+    }
+    $spills = [];
+
+    return $paths;
+}
+
+function consus_apply_stock_ndjson(array &$items, string $path, string $sourceCompany): void
+{
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        throw new RuntimeException('Tijdelijke voorraad kon niet worden gelezen.');
+    }
+
+    try {
+        while (($line = fgets($handle)) !== false) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            $row = json_decode($line, true);
+            if (is_array($row)) {
+                consus_apply_stock_row($items, $row, $sourceCompany);
+            }
+        }
+    } finally {
+        fclose($handle);
+    }
+}
+
+/**
  * @param array<string, array<string, mixed>> $items
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
- * @return array{warnings:array<int, string>,foreign:array<string, array<int, array<string, mixed>>>}
+ * @return array{warnings:array<int, string>,foreign_spills:array<string, string>}
  */
 function consus_collect_company(string $company, string $companyKey, array &$items, array $windows): array
 {
     $warnings = [];
-    $foreign = [];
+    $foreignSpills = [];
 
-    $stockResult = consus_each_entity_rows(
-        $company,
-        CONSUS_STOCK_ENTITY,
-        CONSUS_STOCK_FIELDS,
-        CONSUS_STOCK_OPTIONAL_FIELDS,
-        '',
-        static function (array $row) use (&$items, &$foreign, $company, $companyKey): void {
-            $target = consus_stock_company_key($row, $company);
-            if ($target === '' || $target === $companyKey) {
-                consus_apply_stock_row($items, $row, $company);
-                return;
-            }
-            $foreign[$target][] = $row;
-        }
-    );
-    if (($stockResult['missing_optional'] ?? []) !== []) {
-        $warnings[] = CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $stockResult['missing_optional']) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.';
-    }
-
-    $salesResult = consus_each_ledger_entry_type(
-        $company,
-        CONSUS_SALES_ENTRY_TYPES,
-        $windows['history_start'],
-        static function (array $row) use (&$items, $companyKey, $windows): void {
-            consus_apply_ledger_row($items, $row, $companyKey, 'sales', $windows);
-        }
-    );
-    if (($salesResult['missing_optional'] ?? []) !== []) {
-        $warnings[] = 'Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $salesResult['missing_optional']) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.';
-    }
-
-    foreach (consus_wo_ledger_parts() as $part) {
-        $prefix = (string) $part['document_prefix'];
-        consus_each_ledger_entry_type(
+    try {
+        $stockResult = consus_each_entity_rows(
             $company,
-            $part['entry_types'],
-            $windows['history_start'],
-            static function (array $row) use (&$items, $companyKey, $windows, $prefix): void {
-                if (!consus_document_no_has_prefix($row, $prefix)) {
+            CONSUS_STOCK_ENTITY,
+            CONSUS_STOCK_FIELDS,
+            CONSUS_STOCK_OPTIONAL_FIELDS,
+            '',
+            static function (array $row) use (&$items, &$foreignSpills, $company, $companyKey): void {
+                $target = consus_stock_company_key($row, $company);
+                if ($target === '' || $target === $companyKey) {
+                    consus_apply_stock_row($items, $row, $company);
                     return;
                 }
-                consus_apply_ledger_row($items, $row, $companyKey, 'consumption', $windows);
+                consus_foreign_spill_write($foreignSpills, $target, $row);
             }
         );
-    }
-
-    try {
-        $vendorResult = consus_each_entity_rows(
-            $company,
-            CONSUS_ITEM_ENTITY,
-            CONSUS_ITEM_FIELDS,
-            CONSUS_ITEM_OPTIONAL_FIELDS,
-            '',
-            static function (array $row) use (&$items, $companyKey): void {
-                consus_apply_vendor_row($items, $row, $companyKey);
-            }
-        );
-        if ($vendorResult['optional_fields'] === false && CONSUS_ITEM_OPTIONAL_FIELDS !== []) {
-            $warnings[] = CONSUS_ITEM_ENTITY . ': optionele velden (' . implode(', ', CONSUS_ITEM_OPTIONAL_FIELDS) . ') niet beschikbaar.';
+        if (($stockResult['missing_optional'] ?? []) !== []) {
+            $warnings[] = CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $stockResult['missing_optional']) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.';
         }
-    } catch (Throwable $error) {
-        $warnings[] = 'Artikelen (leverancier) niet geladen: ' . $error->getMessage();
-    }
 
-    try {
-        $dimensionQuery = consus_dimension_query();
-        consus_each_entity_rows(
+        $salesResult = consus_each_ledger_entry_type(
             $company,
-            CONSUS_DIMENSION_ENTITY,
-            CONSUS_DIMENSION_FIELDS,
-            [],
-            (string) ($dimensionQuery['$filter'] ?? ''),
-            static function (array $row) use (&$items, $companyKey): void {
-                consus_apply_dimension_row($items, $row, $companyKey);
+            CONSUS_SALES_ENTRY_TYPES,
+            $windows['history_start'],
+            static function (array $row) use (&$items, $companyKey, $windows): void {
+                consus_apply_ledger_row($items, $row, $companyKey, 'sales', $windows);
             }
         );
-    } catch (Throwable $error) {
-        $warnings[] = 'Kostenplaats (dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ') niet geladen: ' . $error->getMessage();
-    }
+        if (($salesResult['missing_optional'] ?? []) !== []) {
+            $warnings[] = 'Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $salesResult['missing_optional']) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.';
+        }
 
-    return [
-        'warnings' => $warnings,
-        'foreign' => $foreign,
-    ];
+        foreach (consus_wo_ledger_parts() as $part) {
+            $prefix = (string) $part['document_prefix'];
+            consus_each_ledger_entry_type(
+                $company,
+                $part['entry_types'],
+                $windows['history_start'],
+                static function (array $row) use (&$items, $companyKey, $windows, $prefix): void {
+                    if (!consus_document_no_has_prefix($row, $prefix)) {
+                        return;
+                    }
+                    consus_apply_ledger_row($items, $row, $companyKey, 'consumption', $windows);
+                }
+            );
+        }
+
+        try {
+            $vendorResult = consus_each_entity_rows(
+                $company,
+                CONSUS_ITEM_ENTITY,
+                CONSUS_ITEM_FIELDS,
+                CONSUS_ITEM_OPTIONAL_FIELDS,
+                '',
+                static function (array $row) use (&$items, $companyKey): void {
+                    consus_apply_vendor_row($items, $row, $companyKey);
+                }
+            );
+            if ($vendorResult['optional_fields'] === false && CONSUS_ITEM_OPTIONAL_FIELDS !== []) {
+                $warnings[] = CONSUS_ITEM_ENTITY . ': optionele velden (' . implode(', ', CONSUS_ITEM_OPTIONAL_FIELDS) . ') niet beschikbaar.';
+            }
+        } catch (Throwable $error) {
+            $warnings[] = 'Artikelen (leverancier) niet geladen: ' . $error->getMessage();
+        }
+
+        try {
+            $dimensionQuery = consus_dimension_query();
+            consus_each_entity_rows(
+                $company,
+                CONSUS_DIMENSION_ENTITY,
+                CONSUS_DIMENSION_FIELDS,
+                [],
+                (string) ($dimensionQuery['$filter'] ?? ''),
+                static function (array $row) use (&$items, $companyKey): void {
+                    consus_apply_dimension_row($items, $row, $companyKey);
+                }
+            );
+        } catch (Throwable $error) {
+            $warnings[] = 'Kostenplaats (dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ') niet geladen: ' . $error->getMessage();
+        }
+
+        return [
+            'warnings' => $warnings,
+            'foreign_spills' => consus_foreign_spill_finish($foreignSpills, false),
+        ];
+    } catch (Throwable $error) {
+        consus_foreign_spill_finish($foreignSpills, true);
+        throw $error;
+    }
 }
 
-function consus_previous_rows_for_company(array $snapshot, string $companyKey): array
+/**
+ * Verse rollup-rijen, daarna de oude rijen van bedrijven die stale bleven.
+ * Stale rijen blijven achteraan, in de volgorde van de vorige snapshot.
+ *
+ * @param array<string, array<int, array<string, mixed>>> $freshRows
+ * @param array<string, bool> $staleKeys
+ * @param array<string, array<int, array<string, mixed>>> $previousRows
+ * @return array<int, array<string, mixed>>
+ */
+function consus_combine_snapshot_rows(array $freshRows, array $staleKeys, array $previousRows): array
 {
     $rows = [];
-    foreach ($snapshot['rows'] ?? [] as $row) {
-        if (is_array($row) && (string) ($row['company_key'] ?? '') === $companyKey) {
-            $rows[] = $row;
+    foreach ($freshRows as $key => $companyRows) {
+        if (isset($staleKeys[(string) $key]) || !is_array($companyRows)) {
+            continue;
+        }
+        foreach ($companyRows as $row) {
+            if (is_array($row)) {
+                $rows[] = $row;
+            }
+        }
+    }
+    usort($rows, consus_compare_snapshot_rows(...));
+
+    foreach (array_keys($staleKeys) as $key) {
+        $oldRows = $previousRows[(string) $key] ?? [];
+        if (!is_array($oldRows)) {
+            continue;
+        }
+        foreach ($oldRows as $oldRow) {
+            if (is_array($oldRow)) {
+                $rows[] = $oldRow;
+            }
         }
     }
 
     return $rows;
 }
 
-function consus_run_nightly(): array
+/**
+ * @param array<int, array<string, mixed>> $rows
+ * @return array{vendors:array<int, array{vendor_no:string,vendor_name:string}>,cost_centers:array<int, string>,locations:array<int, string>}
+ */
+function consus_catalog_from_rows(array $rows): array
 {
-    $discovered = auth_discover_companies_across_active_environments();
-    $names = is_array($discovered['companies'] ?? null) ? $discovered['companies'] : [];
-    $companies = consus_companies_in_scope($names);
-    if ($companies === []) {
-        throw new RuntimeException('Geen KVT- of HVT-bedrijf gevonden. Controleer CONSUS_COMPANIES en auth.php.');
-    }
-
-    $windows = consus_period_windows();
-    $items = [];
-    $foreignStock = [];
-    $companyStats = [];
-    $errors = [];
-    $warnings = [];
-    $previous = consus_read_snapshot();
-    $missingCompanies = consus_missing_company_records(
-        $companies,
-        is_array($discovered['errors'] ?? null) ? $discovered['errors'] : []
-    );
-    foreach ($missingCompanies['errors'] as $error) {
-        $errors[] = $error;
-    }
-    foreach ($missingCompanies['company_stats'] as $stat) {
-        $companyStats[] = $stat;
-    }
-
-    foreach ($companies as $companyInfo) {
-        $startedAt = hrtime(true);
-        $company = (string) $companyInfo['company'];
-        $companyKey = (string) $companyInfo['company_key'];
-        $localItems = [];
-        try {
-            $result = consus_collect_company($company, $companyKey, $localItems, $windows);
-            foreach ($localItems as $factKey => $fact) {
-                $items[$factKey] = $fact;
-            }
-            foreach ($result['foreign'] as $otherKey => $stockRows) {
-                foreach ($stockRows as $stockRow) {
-                    $foreignStock[(string) $otherKey][] = $stockRow;
-                }
-            }
-            foreach ($result['warnings'] as $warning) {
-                $warnings[] = ['company' => $company, 'warning' => $warning];
-            }
-            $companyStats[] = [
-                'company' => $company,
-                'company_key' => $companyKey,
-                'stale' => false,
-                'duration_ms' => (int) round((hrtime(true) - $startedAt) / 1_000_000),
-            ];
-        } catch (Throwable $error) {
-            $errors[] = ['company' => $company, 'error' => $error->getMessage()];
-            $companyStats[] = [
-                'company' => $company,
-                'company_key' => $companyKey,
-                'stale' => true,
-                'duration_ms' => (int) round((hrtime(true) - $startedAt) / 1_000_000),
-            ];
-        }
-    }
-
-    $staleKeys = [];
-    foreach ($companyStats as $stat) {
-        if (!empty($stat['stale'])) {
-            $staleKeys[(string) ($stat['company_key'] ?? '')] = true;
-        }
-    }
-
-    foreach (array_keys($staleKeys) as $key) {
-        if (consus_previous_rows_for_company($previous, $key) !== [] || !isset($foreignStock[$key])) {
-            continue;
-        }
-
-        // Geen eigen nachtrun en geen vorige cache: gebruik voorraad die een
-        // ander bedrijf via VoorraadPerBedrijf al meegaf. Verkoop ontbreekt dan.
-        foreach ($foreignStock[$key] as $stockRow) {
-            consus_apply_stock_row($items, $stockRow, consus_company_display_name($key));
-        }
-        $warnings[] = [
-            'company' => $key,
-            'warning' => 'Alleen voorraad uit een andere bedrijfsquery. Verkoop en verbruik ontbreken tot dit bedrijf zelf geladen kan worden.',
-        ];
-        unset($staleKeys[$key]);
-    }
-
-    $rolled = consus_rollup_items($items, $windows);
-    $rows = [];
-    foreach ($rolled['rows'] as $row) {
-        if (!is_array($row)) {
-            continue;
-        }
-        $key = (string) ($row['company_key'] ?? '');
-        if (isset($staleKeys[$key])) {
-            continue;
-        }
-        $rows[] = $row;
-    }
-
-    foreach (array_keys($staleKeys) as $key) {
-        foreach (consus_previous_rows_for_company($previous, $key) as $oldRow) {
-            $rows[] = $oldRow;
-        }
-    }
-
     $vendors = [];
     $costCenters = [];
     $locations = [];
@@ -1525,6 +1681,169 @@ function consus_run_nightly(): array
     $locationList = array_values($locations);
     natcasesort($locationList);
 
+    return [
+        'vendors' => $vendorList,
+        'cost_centers' => array_values($costCenterList),
+        'locations' => array_values($locationList),
+    ];
+}
+
+function consus_previous_rows_for_company(array $snapshot, string $companyKey): array
+{
+    $rows = [];
+    foreach ($snapshot['rows'] ?? [] as $row) {
+        if (is_array($row) && (string) ($row['company_key'] ?? '') === $companyKey) {
+            $rows[] = $row;
+        }
+    }
+
+    return $rows;
+}
+
+function consus_run_nightly(): array
+{
+    $discovered = auth_discover_companies_across_active_environments();
+    $names = is_array($discovered['companies'] ?? null) ? $discovered['companies'] : [];
+    $companies = consus_companies_in_scope($names);
+    if ($companies === []) {
+        throw new RuntimeException('Geen KVT- of HVT-bedrijf gevonden. Controleer CONSUS_COMPANIES en auth.php.');
+    }
+
+    $windows = consus_period_windows();
+    $freshRows = [];
+    $foreignSpills = [];
+    $companyStats = [];
+    $errors = [];
+    $warnings = [];
+    $missingCompanies = consus_missing_company_records(
+        $companies,
+        is_array($discovered['errors'] ?? null) ? $discovered['errors'] : []
+    );
+    foreach ($missingCompanies['errors'] as $error) {
+        $errors[] = $error;
+    }
+    foreach ($missingCompanies['company_stats'] as $stat) {
+        $companyStats[] = $stat;
+    }
+
+    foreach ($companies as $companyInfo) {
+        $startedAt = hrtime(true);
+        $company = (string) $companyInfo['company'];
+        $companyKey = (string) $companyInfo['company_key'];
+        $localItems = [];
+        try {
+            $result = consus_collect_company($company, $companyKey, $localItems, $windows);
+            $rolled = consus_rollup_items($localItems, $windows);
+            $localItems = [];
+            $freshRows[$companyKey] = $rolled['rows'];
+            unset($rolled);
+            foreach ($foreignSpills[$companyKey] ?? [] as $path) {
+                if (is_string($path)) {
+                    consus_release_temp_file($path);
+                }
+            }
+            unset($foreignSpills[$companyKey]);
+            $addedSpills = $result['foreign_spills'] ?? [];
+            if (is_array($addedSpills)) {
+                foreach ($addedSpills as $target => $path) {
+                    if (!is_string($path) || $path === '') {
+                        continue;
+                    }
+                    $foreignSpills[(string) $target][] = $path;
+                }
+            }
+            gc_collect_cycles();
+            foreach ($result['warnings'] as $warning) {
+                $warnings[] = ['company' => $company, 'warning' => $warning];
+            }
+            $companyStats[] = [
+                'company' => $company,
+                'company_key' => $companyKey,
+                'stale' => false,
+                'duration_ms' => (int) round((hrtime(true) - $startedAt) / 1_000_000),
+            ];
+        } catch (Throwable $error) {
+            $localItems = [];
+            gc_collect_cycles();
+            $errors[] = ['company' => $company, 'error' => $error->getMessage()];
+            $companyStats[] = [
+                'company' => $company,
+                'company_key' => $companyKey,
+                'stale' => true,
+                'duration_ms' => (int) round((hrtime(true) - $startedAt) / 1_000_000),
+            ];
+        }
+    }
+
+    $staleKeys = [];
+    foreach ($companyStats as $stat) {
+        if (!empty($stat['stale'])) {
+            $staleKeys[(string) ($stat['company_key'] ?? '')] = true;
+        }
+    }
+
+    $previousRows = [];
+    if ($staleKeys !== []) {
+        $previous = consus_read_snapshot();
+        foreach (array_keys($staleKeys) as $key) {
+            $previousRows[(string) $key] = consus_previous_rows_for_company($previous, (string) $key);
+        }
+        unset($previous);
+    }
+
+    foreach (array_keys($staleKeys) as $key) {
+        $key = (string) $key;
+        $paths = $foreignSpills[$key] ?? [];
+        if (!is_array($paths)) {
+            $paths = [];
+        }
+        if (($previousRows[$key] ?? []) !== [] || $paths === []) {
+            foreach ($paths as $path) {
+                if (is_string($path)) {
+                    consus_release_temp_file($path);
+                }
+            }
+            unset($foreignSpills[$key]);
+            continue;
+        }
+
+        // Geen eigen nachtrun en geen vorige cache: gebruik voorraad die een
+        // ander bedrijf via VoorraadPerBedrijf al meegaf. Verkoop ontbreekt dan.
+        $foreignOnly = [];
+        foreach ($paths as $path) {
+            if (!is_string($path)) {
+                continue;
+            }
+            consus_apply_stock_ndjson($foreignOnly, $path, consus_company_display_name($key));
+            consus_release_temp_file($path);
+        }
+        unset($foreignSpills[$key]);
+        $rolled = consus_rollup_items($foreignOnly, $windows);
+        unset($foreignOnly);
+        $freshRows[$key] = $rolled['rows'];
+        unset($rolled);
+        $warnings[] = [
+            'company' => $key,
+            'warning' => 'Alleen voorraad uit een andere bedrijfsquery. Verkoop en verbruik ontbreken tot dit bedrijf zelf geladen kan worden.',
+        ];
+        unset($staleKeys[$key]);
+    }
+    foreach ($foreignSpills as $paths) {
+        if (!is_array($paths)) {
+            continue;
+        }
+        foreach ($paths as $path) {
+            if (is_string($path)) {
+                consus_release_temp_file($path);
+            }
+        }
+    }
+    unset($foreignSpills);
+
+    $rows = consus_combine_snapshot_rows($freshRows, $staleKeys, $previousRows);
+    unset($freshRows, $previousRows);
+    $catalog = consus_catalog_from_rows($rows);
+
     $snapshot = [
         'version' => CONSUS_SNAPSHOT_VERSION,
         'generated_at' => gmdate('c'),
@@ -1533,9 +1852,9 @@ function consus_run_nightly(): array
         'companies' => $companyStats,
         'errors' => $errors,
         'warnings' => $warnings,
-        'vendors' => $vendorList,
-        'cost_centers' => array_values($costCenterList),
-        'locations' => array_values($locationList),
+        'vendors' => $catalog['vendors'],
+        'cost_centers' => $catalog['cost_centers'],
+        'locations' => $catalog['locations'],
         'rows' => $rows,
     ];
 
