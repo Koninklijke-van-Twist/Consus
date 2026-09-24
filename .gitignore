@@ -1,0 +1,10 @@
+web/auth.php
+
+web/cache/
+
+web/analytics/*.sqlite
+web/analytics/*.sqlite-*
+
+web/data/*.json
+web/data/*.json.tmp.*
+web/data/*.lock

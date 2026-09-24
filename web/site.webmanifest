@@ -1,0 +1,7 @@
+{
+    "name": "Consus",
+    "short_name": "Consus",
+    "theme_color": "#0099cc",
+    "background_color": "#ffffff",
+    "display": "standalone"
+}
