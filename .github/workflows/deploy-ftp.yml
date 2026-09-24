@@ -53,10 +53,44 @@ jobs:
             --exclude-glob analytics/*.sqlite \
             --exclude-glob analytics/*.sqlite-* \
             --exclude-glob auth.php \
+            --exclude-glob data/*.json \
+            --exclude-glob data/*.json.tmp.* \
+            --exclude-glob data/*.lock \
+            --exclude-glob data/*.checkpoint \
+            --exclude-glob data/*.checkpoint/** \
             ./web .
 
+          bye
+          EOF
+
+      # Chmod is best-effort and runs only after mirror/bye succeeded.
+      # cache returns FTP 550 (SITE CHMOD command failed) on this host;
+      # analytics and data usually succeed. `set cmd:fail-exit false` in the
+      # same lftp session as the mirror is not enough: lftp still exits 1 and
+      # the Actions job (bash -e) goes red after a successful upload.
+      # This separate session uses fail-exit false so one 550 does not skip
+      # the other chmods, and `|| true` so any chmod failure cannot fail the job.
+      # NL: chmod is best-effort, pas na een geslaagde mirror. Een 550 op cache
+      # (of een andere chmod) mag de deploy niet rood maken.
+      - name: chmod analytics, data, cache (best-effort)
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_REMOTE_DIR: ${{ secrets.FTP_REMOTE_DIR }}
+        run: |
+          lftp -u "$FTP_USERNAME","$FTP_PASSWORD" "$FTP_HOST" << EOF || true
           set cmd:fail-exit false
+          set net:max-retries 1
+          set net:timeout 20
+          set ftp:ssl-allow false
+          set ftp:passive-mode yes
+
+          cd "$FTP_REMOTE_DIR"
+
           chmod 777 analytics
+          chmod 777 data
+          chmod 777 cache
 
           bye
           EOF
