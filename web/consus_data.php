@@ -71,25 +71,59 @@ function consus_parse_date(mixed $value): string
     return '';
 }
 
+function consus_strip_legal_suffix(string $normalized): string
+{
+    $stripped = preg_replace('/(?:\s+(?:b v|bv|n v|nv|bvba|ltd|inc|gmbh))+$/', '', $normalized);
+
+    return trim(is_string($stripped) ? $stripped : $normalized);
+}
+
+/**
+ * @return array<int, string>
+ */
+function consus_company_name_candidates(string $normalized): array
+{
+    $candidates = [$normalized];
+    $stripped = consus_strip_legal_suffix($normalized);
+    if ($stripped !== '' && $stripped !== $normalized) {
+        $candidates[] = $stripped;
+    }
+    foreach ($candidates as $candidate) {
+        $collapsed = str_replace(' ', '', $candidate);
+        if ($collapsed !== '' && $collapsed !== $candidate && !in_array($collapsed, $candidates, true)) {
+            $candidates[] = $collapsed;
+        }
+    }
+
+    return $candidates;
+}
+
 function consus_company_key_for_name(string $name): string
 {
     $normalized = consus_normalize_name($name);
     if ($normalized === '') {
         return '';
     }
+    $candidates = consus_company_name_candidates($normalized);
 
     foreach (CONSUS_COMPANIES as $key => $company) {
         $label = consus_normalize_name((string) ($company['label'] ?? ''));
-        if ($label !== '' && $normalized === $label) {
-            return (string) $key;
+        if ($label !== '') {
+            foreach ($candidates as $candidate) {
+                if ($candidate === $label) {
+                    return (string) $key;
+                }
+            }
         }
-        foreach ($company['names'] as $candidate) {
-            $needle = consus_normalize_name((string) $candidate);
+        foreach ($company['names'] as $configured) {
+            $needle = consus_normalize_name((string) $configured);
             if ($needle === '') {
                 continue;
             }
-            if ($normalized === $needle || str_contains($normalized, $needle)) {
-                return (string) $key;
+            foreach ($candidates as $candidate) {
+                if ($candidate === $needle || str_contains($candidate, $needle)) {
+                    return (string) $key;
+                }
             }
         }
     }
@@ -3244,6 +3278,59 @@ function consus_apply_stock_ndjson(array &$items, string $path, string $sourceCo
     }
 }
 
+/**
+ * @param array<string, array<string, mixed>> $items
+ */
+function consus_items_lack_stock(array $items, string $companyKey): bool
+{
+    foreach ($items as $item) {
+        if (!is_array($item) || (string) ($item['company_key'] ?? '') !== $companyKey) {
+            continue;
+        }
+        if (
+            abs((float) ($item['inventory'] ?? 0)) >= 0.0000001
+            || abs((float) ($item['safety_stock'] ?? 0)) >= 0.0000001
+            || abs((float) ($item['reorder_point'] ?? 0)) >= 0.0000001
+        ) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Eigen regel toepassen, vreemde regel bewaren. De checkpoint krijgt elke
+ * regel, ook die van het andere bedrijf, zodat een hervatting ze nog kan
+ * doorzetten. Een onbekende Company_Name wordt niet aan de query-bron gehangen.
+ *
+ * @param array<string, array<string, mixed>> $items
+ * @param array<string, array{path:string,handle:resource}> $spills
+ * @param array{tmp?:string,final?:string,handle?:resource|null,rows?:int}|null $writer
+ */
+function consus_route_stock_row(
+    array &$items,
+    array &$spills,
+    array $row,
+    string $sourceCompany,
+    string $companyKey,
+    ?array &$writer = null
+): void {
+    if ($writer !== null) {
+        consus_checkpoint_write_row($writer, $row);
+    }
+    $target = consus_stock_company_key($row, $sourceCompany);
+    if ($target === '') {
+        return;
+    }
+    if ($target !== $companyKey) {
+        consus_foreign_spill_write($spills, $target, $row);
+
+        return;
+    }
+    consus_apply_stock_row($items, $row, $sourceCompany);
+}
+
 function consus_rows_lack_stock(array $rows): bool
 {
     foreach ($rows as $row) {
@@ -3262,10 +3349,47 @@ function consus_rows_lack_stock(array $rows): bool
     return true;
 }
 
+function consus_rows_lack_inventory(array $rows): bool
+{
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        if (abs((float) ($row['inventory'] ?? 0)) >= 0.0000001) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * @param array<int, array<string, mixed>> $records
+ */
+function consus_published_item_has_qty(array $records, string $companyKey, string $itemNo, string $field): bool
+{
+    foreach ($records as $record) {
+        if (!is_array($record) || (string) ($record['company_key'] ?? '') !== $companyKey) {
+            continue;
+        }
+        $matches = (string) ($record['item_no'] ?? '') === $itemNo;
+        $nos = $record['item_nos'] ?? null;
+        if (!$matches && is_array($nos) && (isset($nos[$itemNo]) || in_array($itemNo, $nos, true))) {
+            $matches = true;
+        }
+        if ($matches && abs((float) ($record[$field] ?? 0)) >= 0.0000001) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /**
  * Voorraad die een ander bedrijf meegaf, op de al gepubliceerde regels van
  * dit bedrijf. Zonder locatie komt het aantal op één bestaande regel, zodat
- * het totaal niet per locatie verdubbelt.
+ * het totaal niet per locatie verdubbelt. Veiligheidsvoorraad en bestelpunt
+ * die de artikelkaart al zette, worden niet nog eens opgeteld.
  *
  * @param array<int, array<string, mixed>> $rows
  * @param array<int, array<string, mixed>> $articles
@@ -3293,6 +3417,12 @@ function consus_overlay_spilled_stock(array &$rows, array &$articles, array $ite
                 continue;
             }
             $locationCode = strtoupper(trim((string) $location));
+            if (consus_published_item_has_qty($articles, $companyKey, $itemNo, 'safety_stock')) {
+                $safety = 0.0;
+            }
+            if (consus_published_item_has_qty($articles, $companyKey, $itemNo, 'reorder_point')) {
+                $reorder = 0.0;
+            }
             consus_overlay_stock_on_rows($rows, $companyKey, $itemNo, $locationCode, $inventory, $safety, $reorder, $item);
             consus_overlay_stock_on_articles($articles, $companyKey, $itemNo, $locationCode, $inventory, $safety, $reorder, $item);
         }
@@ -3355,6 +3485,13 @@ function consus_overlay_stock_on_rows(
     $rows[$index]['inventory'] = (float) ($rows[$index]['inventory'] ?? 0) + $inventory;
     $rows[$index]['safety_stock'] = (float) ($rows[$index]['safety_stock'] ?? 0) + $safety;
     $rows[$index]['reorder_point'] = (float) ($rows[$index]['reorder_point'] ?? 0) + $reorder;
+    if (trim((string) ($rows[$index]['vendor_no'] ?? '')) === '' && trim((string) ($item['vendor_no'] ?? '')) !== '') {
+        $rows[$index]['vendor_no'] = trim((string) $item['vendor_no']);
+        $rows[$index]['vendor_name'] = trim((string) ($item['vendor_name'] ?? ''));
+    }
+    if (trim((string) ($rows[$index]['cost_center'] ?? '')) === '' && trim((string) ($item['cost_center'] ?? '')) !== '') {
+        $rows[$index]['cost_center'] = trim((string) $item['cost_center']);
+    }
 }
 
 /**
@@ -3410,6 +3547,13 @@ function consus_overlay_stock_on_articles(
     $articles[$index]['inventory'] = (float) ($articles[$index]['inventory'] ?? 0) + $inventory;
     $articles[$index]['safety_stock'] = (float) ($articles[$index]['safety_stock'] ?? 0) + $safety;
     $articles[$index]['reorder_point'] = (float) ($articles[$index]['reorder_point'] ?? 0) + $reorder;
+    if (trim((string) ($articles[$index]['vendor_no'] ?? '')) === '' && trim((string) ($item['vendor_no'] ?? '')) !== '') {
+        $articles[$index]['vendor_no'] = trim((string) $item['vendor_no']);
+        $articles[$index]['vendor_name'] = trim((string) ($item['vendor_name'] ?? ''));
+    }
+    if (trim((string) ($articles[$index]['cost_center'] ?? '')) === '' && trim((string) ($item['cost_center'] ?? '')) !== '') {
+        $articles[$index]['cost_center'] = trim((string) $item['cost_center']);
+    }
 }
 
 /**
@@ -4130,50 +4274,48 @@ function consus_collect_company(
     };
 
     try {
-        $stockOutcome = consus_collect_entity_with_checkpoint(
-            $checkpoint['companies'][$companyKey]['steps'],
-            $companyKey,
-            'voorraad',
-            static function (array $row) use (&$items, $company, $companyKey): void {
-                $target = consus_stock_company_key($row, $company);
-                if ($target !== '' && $target !== $companyKey) {
-                    return;
-                }
-                consus_apply_stock_row($items, $row, $company);
-            },
-            static function (?array &$writer) use (&$items, &$foreignSpills, $company, $companyKey, $onProgress): array {
-                return consus_each_entity_rows(
-                    $company,
-                    CONSUS_STOCK_ENTITY,
-                    CONSUS_STOCK_FIELDS,
-                    CONSUS_STOCK_OPTIONAL_FIELDS,
-                    '',
-                    static function (array $row) use (&$items, &$foreignSpills, &$writer, $company, $companyKey): void {
-                        $target = consus_stock_company_key($row, $company);
-                        if ($target === '' || $target === $companyKey) {
-                            if ($target === '') {
-                                return;
-                            }
-                            consus_apply_stock_row($items, $row, $company);
-                            if ($writer !== null) {
-                                consus_checkpoint_write_row($writer, $row);
-                            }
-                            return;
-                        }
-                        consus_foreign_spill_write($foreignSpills, $target, $row);
-                    },
-                    null,
-                    consus_page_progress($onProgress, [
-                        'company' => $company,
-                        'company_key' => $companyKey,
-                        'step' => 'voorraad',
-                        'entry_type' => CONSUS_STOCK_ENTITY,
-                    ])
-                );
-            },
-            $saveCheckpoint,
-            $persist
-        );
+        $stockAttempts = 0;
+        do {
+            $refetchZeroStock = false;
+            $stockOutcome = consus_collect_entity_with_checkpoint(
+                $checkpoint['companies'][$companyKey]['steps'],
+                $companyKey,
+                'voorraad',
+                static function (array $row) use (&$items, &$foreignSpills, $company, $companyKey): void {
+                    $writer = null;
+                    consus_route_stock_row($items, $foreignSpills, $row, $company, $companyKey, $writer);
+                },
+                static function (?array &$writer) use (&$items, &$foreignSpills, $company, $companyKey, $onProgress): array {
+                    return consus_each_entity_rows(
+                        $company,
+                        CONSUS_STOCK_ENTITY,
+                        CONSUS_STOCK_FIELDS,
+                        CONSUS_STOCK_OPTIONAL_FIELDS,
+                        '',
+                        static function (array $row) use (&$items, &$foreignSpills, &$writer, $company, $companyKey): void {
+                            consus_route_stock_row($items, $foreignSpills, $row, $company, $companyKey, $writer);
+                        },
+                        null,
+                        consus_page_progress($onProgress, [
+                            'company' => $company,
+                            'company_key' => $companyKey,
+                            'step' => 'voorraad',
+                            'entry_type' => CONSUS_STOCK_ENTITY,
+                        ])
+                    );
+                },
+                $saveCheckpoint,
+                $persist
+            );
+            if (!empty($stockOutcome['replayed']) && consus_items_lack_stock($items, $companyKey)) {
+                consus_foreign_spill_finish($foreignSpills, true);
+                unset($checkpoint['companies'][$companyKey]['steps']['voorraad']);
+                $saveCheckpoint();
+                $addWarning('Opgeslagen voorraad had geen aantallen en wordt opnieuw opgehaald.');
+                $refetchZeroStock = true;
+            }
+            $stockAttempts++;
+        } while ($refetchZeroStock && $stockAttempts < 2);
         if (!empty($stockOutcome['replayed'])) {
             $note([
                 'step' => 'voorraad',
@@ -4840,7 +4982,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         if (!$force && consus_company_refresh_is_current($resumeSnapshot, $companyKey, $windows)) {
             $freshRows[$companyKey] = $previousRows[$companyKey] ?? [];
             $freshArticles[$companyKey] = $previousArticles[$companyKey] ?? [];
-            if (!consus_rows_lack_stock($freshRows[$companyKey])) {
+            if (!consus_rows_lack_inventory($freshRows[$companyKey])) {
                 foreach ($foreignSpills[$companyKey] ?? [] as $path) {
                     if (is_string($path)) {
                         consus_release_temp_file($path);
@@ -4937,7 +5079,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
                     $plan['overlap_through']
                 );
             }
-            if (!consus_rows_lack_stock($freshRows[$companyKey])) {
+            if (!consus_rows_lack_inventory($freshRows[$companyKey])) {
                 foreach ($foreignSpills[$companyKey] ?? [] as $path) {
                     if (is_string($path)) {
                         consus_release_temp_file($path);
@@ -5039,7 +5181,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
             continue;
         }
         $targetRows = $freshRows[$key] ?? null;
-        if (!is_array($targetRows) || !consus_rows_lack_stock($targetRows)) {
+        if (!is_array($targetRows) || !consus_rows_lack_inventory($targetRows)) {
             foreach ($paths as $path) {
                 if (is_string($path)) {
                     consus_release_temp_file($path);
