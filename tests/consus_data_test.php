@@ -483,6 +483,22 @@ $spilledResult = consus_collect_rows_via_spill(
 test_assert($spilled === ['A', 'B'], 'gelukte spill geeft elke regel één keer door');
 test_assert($spilledResult['count'] === 2, 'spill bewaart de telling');
 test_assert(($spilledResult['sample']['Item_No'] ?? '') === 'A', 'sample is de eerste regel');
+$incompleteApplied = 0;
+try {
+    consus_collect_rows_via_spill(
+        static function (callable $onSpill): int {
+            $onSpill(['Item_No' => 'A']);
+            return 2;
+        },
+        static function () use (&$incompleteApplied): void {
+            $incompleteApplied++;
+        }
+    );
+    test_assert(false, 'onvolledige spill moet falen');
+} catch (RuntimeException $incompleteError) {
+    test_assert(str_contains($incompleteError->getMessage(), 'onvolledig'), 'replay weigert een tekort aan regels');
+}
+test_assert($incompleteApplied === 1, 'de geschreven regel is wel doorgegeven voor de telling faalt');
 $spillLeft = glob(sys_get_temp_dir() . '/consus-odata-' . getmypid() . '-*.ndjson');
 test_assert($spillLeft === [] || $spillLeft === false, 'spillbestanden zijn verwijderd');
 

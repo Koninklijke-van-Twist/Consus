@@ -14,9 +14,11 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   OData-pagina's gaan per query naar een tijdelijk bestand en worden daarna
   regel voor regel verwerkt. Per bedrijf wordt meteen opgerold; de artikel-
   feiten gaan weg vóór het volgende bedrijf. Voorraad die een query voor een
-  ander bedrijf teruggeeft, blijft op schijf tot dat bedrijf zelf slaagt of
-  als stale terugvalt op die voorraad. Het live snapshotbestand wordt pas
-  aan het eind atomair vervangen.
+  ander bedrijf teruggeeft, blijft op schijf tot dat bedrijf zelf slaagt.
+  Alleen als het stale blijft én de vorige snapshot geen rijen voor dat
+  bedrijf heeft, gebruikt nightly die voorraad. Zijn er wel vorige rijen,
+  dan blijven die staan en worden de tijdelijke bestanden verwijderd. Het
+  live snapshotbestand wordt pas aan het eind atomair vervangen.
 - Omloopsnelheid (maand, kwartaal, jaar) = verkoophoeveelheid ÷ voorraad van
   de gekozen locaties. Eigen en EGT delen die noemer. Dropship telt niet mee.
 - De pagina filtert eerst op afdeling, daarna op leverancier en locatie uit

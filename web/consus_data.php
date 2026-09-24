@@ -1259,15 +1259,21 @@ function consus_collect_rows_via_spill(callable $fetchInto, callable $onRow): ar
             if (!rewind($handle)) {
                 throw new RuntimeException('Tijdelijk OData-bestand kon niet worden teruggelezen.');
             }
+            $replayed = 0;
             while (($line = fgets($handle)) !== false) {
                 $line = trim($line);
                 if ($line === '') {
                     continue;
                 }
                 $row = json_decode($line, true);
-                if (is_array($row)) {
-                    $onRow($row);
+                if (!is_array($row)) {
+                    throw new RuntimeException('Tijdelijk OData-bestand bevat een onleesbare regel.');
                 }
+                $onRow($row);
+                $replayed++;
+            }
+            if ($replayed !== $count) {
+                throw new RuntimeException('Tijdelijk OData-bestand is onvolledig.');
             }
         }
 
@@ -1340,6 +1346,13 @@ function consus_each_entity_rows(
                 'missing_optional' => $missing,
             ];
         } catch (Throwable $error) {
+            $message = $error->getMessage();
+            if (
+                str_contains($message, 'Tijdelijk OData-bestand bevat een onleesbare regel.')
+                || str_contains($message, 'Tijdelijk OData-bestand is onvolledig.')
+            ) {
+                throw $error;
+            }
             $lastError = $error;
         }
     }
