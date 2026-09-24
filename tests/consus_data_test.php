@@ -244,6 +244,7 @@ test_assert(
     $dimensionQuery['$filter'] === "Table_ID eq 27 and Dimension_Code eq '15'",
     'kostenplaats haalt dimensie 15 op zonder waardfilter'
 );
+test_assert(consus_dimension_code_filter() === "Dimension_Code eq '15'", 'terugvalfilter houdt alleen dimensie 15');
 test_assert(!str_contains($dimensionQuery['$filter'], 'Dimension_Value_Code'), 'afdelingswaarde wordt niet vastgezet');
 
 $stockQuery = consus_entity_query(CONSUS_STOCK_FIELDS);
@@ -359,6 +360,102 @@ consus_apply_vendor_row($cardItems, [
     'Global_Dimension_1_Code' => 'WERK',
 ], 'kvt');
 test_assert((string) $cardItems['kvt|A1']['cost_center'] === 'WERK', 'globale dimensie 1 vult een ontbrekende COST_CENTER');
+
+$planningItems = [];
+consus_apply_stock_row($planningItems, [
+    'Item_No' => 'P1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Location_Code' => 'A',
+    'Inventory' => 10,
+    'Safety_Stock_Quantity' => 0,
+    'Reorder_Point' => 0,
+], 'Koninklijke van Twist');
+consus_apply_stock_row($planningItems, [
+    'Item_No' => 'P1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Location_Code' => 'B',
+    'Inventory' => 3,
+    'Safety_Stock_Quantity' => 0,
+    'Reorder_Point' => 0,
+], 'Koninklijke van Twist');
+consus_apply_vendor_row($planningItems, [
+    'No' => 'P1',
+    'Vendor_No' => 'PERK',
+    'Safety_Stock_Quantity' => 4,
+    'Reorder_Point' => 2,
+], 'kvt');
+test_assert((float) $planningItems['kvt|P1']['safety_stock'] === 4.0, 'artikelkaart vult veiligheidsvoorraad één keer');
+test_assert((float) $planningItems['kvt|P1']['reorder_point'] === 2.0, 'artikelkaart vult bestelpunt één keer');
+$planningSafetyLocations = 0;
+foreach ($planningItems['kvt|P1']['by_location'] as $planningMetrics) {
+    if (abs((float) ($planningMetrics['safety_stock'] ?? 0)) >= 0.0001) {
+        $planningSafetyLocations++;
+    }
+}
+test_assert($planningSafetyLocations === 1, 'veiligheidsvoorraad van de artikelkaart komt op één locatie');
+$planningSnapshot = test_snapshot($planningItems, $windows);
+$planningListed = consus_list_articles($planningSnapshot, 'kvt', 'PERK', '', '');
+test_assert(count($planningListed) === 1, 'artikel met voorraad staat in de tabel');
+test_assert(abs((float) $planningListed[0]['safety_stock'] - 4) < 0.0001, 'artikeltabel toont veiligheidsvoorraad van de kaart');
+test_assert(abs((float) $planningListed[0]['inventory'] - 13) < 0.0001, 'artikeltabel telt beide locaties');
+
+$keptPlanning = [];
+consus_apply_stock_row($keptPlanning, [
+    'Item_No' => 'P2',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Inventory' => 8,
+    'Safety_Stock_Quantity' => 5,
+    'Reorder_Point' => 1,
+], 'Koninklijke van Twist');
+consus_apply_vendor_row($keptPlanning, [
+    'No' => 'P2',
+    'Vendor_No' => 'PERK',
+    'Safety_Stock_Quantity' => 0,
+    'Reorder_Point' => 9,
+], 'kvt');
+test_assert((float) $keptPlanning['kvt|P2']['safety_stock'] === 5.0, 'gevulde voorraad-veiligheidsvoorraad blijft');
+test_assert((float) $keptPlanning['kvt|P2']['reorder_point'] === 1.0, 'gevuld bestelpunt op voorraad wint van de artikelkaart');
+
+$blankLocation = [];
+consus_apply_stock_row($blankLocation, [
+    'Item_No' => 'S1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Inventory' => 19,
+    'Safety_Stock_Quantity' => 0,
+    'Reorder_Point' => 0,
+], 'Koninklijke van Twist');
+consus_apply_vendor_row($blankLocation, [
+    'No' => 'S1',
+    'Vendor_No' => 'PERK',
+    'Veiligheidsvoorraad' => 6,
+    'Bestelpunt' => 3,
+    'Global_Dimension_1_Code' => 'WERK',
+], 'kvt');
+test_assert((float) $blankLocation['kvt|S1']['safety_stock'] === 6.0, 'Nederlandse veiligheidsvoorraad op de kaart vult de voorraadregel');
+test_assert((float) $blankLocation['kvt|S1']['reorder_point'] === 3.0, 'Nederlands bestelpunt op de kaart vult de voorraadregel');
+test_assert((string) $blankLocation['kvt|S1']['cost_center'] === 'WERK', 'afdeling van de kaart blijft staan zonder COST_CENTER');
+test_assert(consus_location_code(['LocationCode' => 'mag']) === 'MAG', 'LocationCode vult de locatie');
+$gapWarnings = consus_planning_gap_warnings($blankLocation, 'kvt');
+test_assert(count($gapWarnings) === 1 && str_contains($gapWarnings[0], 'zonder locatie'), 'locatie-opmerking noemt (zonder locatie)');
+$openGaps = [];
+consus_apply_stock_row($openGaps, [
+    'Item_No' => 'G1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Inventory' => 10,
+    'Safety_Stock_Quantity' => 0,
+    'Reorder_Point' => 0,
+], 'Koninklijke van Twist');
+$openGapWarnings = consus_planning_gap_warnings($openGaps, 'kvt');
+test_assert(count($openGapWarnings) === 4, 'gevulde voorraad zonder planning, afdeling en locatie waarschuwt');
+test_assert(consus_is_planning_gap_warning($openGapWarnings[0]), 'uitkomstwaarschuwing is herkenbaar');
+$warningLines = consus_warning_lines([
+    ['company' => 'KVT', 'warning' => 'locatie ontbreekt'],
+    'losse regel',
+    ['warning' => ''],
+    '  ',
+    12,
+]);
+test_assert($warningLines === ['KVT: locatie ontbreekt', 'losse regel'], 'waarschuwingen worden regels');
 test_assert(consus_procurement_bucket_from_row(['Buy_from_Vendor_No' => '90101']) === 'egt', 'inkoop-leverancier op de artikelpost telt als EGT');
 test_assert(consus_procurement_bucket_from_row(['PurchasingCode' => 'DROP_SHIP']) === 'dropship', 'PurchasingCode telt als dropship');
 
@@ -1040,6 +1137,52 @@ try {
     test_assert($prefixResult['document_filter_rejected'] === true, 'geweigerd documentbereik valt terug');
     test_assert($prefixRows === ['W1'], 'terugval past de regel één keer toe');
 
+    $dimensionTableCalls = 0;
+    $dimensionCodeCalls = 0;
+    $dimensionApplied = [];
+    $dimensionResult = consus_each_dimension_rows(
+        'Koninklijke van Twist',
+        static function (array $row) use (&$dimensionApplied): void {
+            $dimensionApplied[] = (string) ($row['Dimension_Value_Code'] ?? '');
+        },
+        static function (string $url, array $auth, callable $onRow) use (&$dimensionTableCalls, &$dimensionCodeCalls): int {
+            unset($auth);
+            $decoded = rawurldecode($url);
+            if (str_contains($decoded, 'Table_ID')) {
+                $dimensionTableCalls++;
+                throw new RuntimeException('HTTP 400 from OData: De OData-filterexpressie wordt niet ondersteund.');
+            }
+            $dimensionCodeCalls++;
+            test_assert(str_contains($decoded, "Dimension_Code eq '15'"), 'terugval filtert op dimensie 15');
+            test_assert(!str_contains($decoded, 'Table_ID'), 'terugval laat Table_ID weg');
+            $onRow(['No' => 'P1', 'Dimension_Code' => '15', 'Dimension_Value_Code' => 'WERK']);
+
+            return 1;
+        }
+    );
+    test_assert($dimensionTableCalls === 2, 'tabelfilter wordt op optionele en verplichte velden geprobeerd');
+    test_assert($dimensionCodeCalls === 1, 'zonder Table_ID lukt dimensie 15 in één keer');
+    test_assert($dimensionResult['filter_fallback'] === true, 'geweigerd tabelfilter valt terug');
+    test_assert($dimensionApplied === ['WERK'], 'terugval past de dimensieregel één keer toe');
+
+    $dimensionNetworkCalls = 0;
+    try {
+        consus_each_dimension_rows(
+            'Koninklijke van Twist',
+            static function (): void {
+            },
+            static function (string $url, array $auth, callable $onRow) use (&$dimensionNetworkCalls): int {
+                unset($url, $auth, $onRow);
+                $dimensionNetworkCalls++;
+                throw new RuntimeException('cURL error: timeout');
+            }
+        );
+        test_assert(false, 'netwerkfout op dimensies moet falen');
+    } catch (RuntimeException $dimensionNetwork) {
+        test_assert(str_contains($dimensionNetwork->getMessage(), 'cURL error'), 'dimensie-netwerkfout wordt niet als filterfout behandeld');
+    }
+    test_assert($dimensionNetworkCalls === 2, 'netwerkfout probeert het dimensiefilter niet opnieuw');
+
     $fatalCalls = 0;
     try {
         consus_each_ledger_entry_type(
@@ -1115,6 +1258,8 @@ test_assert(!str_contains($index, 'odata_get'), 'index.php doet geen OData-call'
 test_assert(!str_contains($index, 'curl_'), 'index.php gebruikt geen cURL');
 test_assert(!str_contains($index, 'consus_run_nightly'), 'index.php start geen BC-refresh');
 test_assert(!str_contains($index, 'Perkins'), 'index.php zet Perkins niet vast');
+test_assert(str_contains($index, 'consus_warning_lines'), 'index toont snapshotwaarschuwingen');
+test_assert(str_contains($index, 'De nachtrun is afgerond, met opmerkingen.'), 'opmerkingen hebben een zichtbare kop');
 test_assert(str_contains($index, '(geen afdeling)'), 'lege afdeling blijft kiesbaar');
 test_assert(str_contains($index, 'Geen leverancier'), 'lege leverancier blijft kiesbaar');
 test_assert(str_contains($index, "\$number === '' ? '__none__' : \$number"), 'lege leverancier gebruikt dezelfde sentinel als afdeling');

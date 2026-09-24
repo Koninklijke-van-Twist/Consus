@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 8;
+const CONSUS_SNAPSHOT_VERSION = 9;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
@@ -111,11 +111,14 @@ const CONSUS_STOCK_FIELDS = [
  */
 const CONSUS_STOCK_OPTIONAL_FIELDS = [
     'Location_Code',
+    'LocationCode',
     'Locatiecode',
     'Locatie',
     'Location_No',
     'Bestelpunt',
     'ReorderPoint',
+    'Veiligheidsvoorraad',
+    'SafetyStockQuantity',
 ];
 
 const CONSUS_ITEM_ENTITY = 'AppItemCard';
@@ -137,6 +140,12 @@ const CONSUS_ITEM_OPTIONAL_FIELDS = [
     'Afdeling',
     'Global_Dimension_1_Code',
     'Shortcut_Dimension_1_Code',
+    'Safety_Stock_Quantity',
+    'Veiligheidsvoorraad',
+    'SafetyStockQuantity',
+    'Reorder_Point',
+    'Bestelpunt',
+    'ReorderPoint',
     'Vendor_Name',
     'Description',
 ];
@@ -171,6 +180,12 @@ const CONSUS_DIMENSION_FIELDS = [
     'No',
     'Dimension_Code',
     'Dimension_Value_Code',
+];
+/** Andere namen voor het artikelnummer en de dimensiewaarde. Een geweigerd veld valt uit $select. */
+const CONSUS_DIMENSION_OPTIONAL_FIELDS = [
+    'Item_No',
+    'Dimension_Value',
+    'Value_Code',
 ];
 const CONSUS_DIMENSION_TABLE_ID = 27;
 const CONSUS_COST_CENTER_DIMENSION_CODE = '15';
