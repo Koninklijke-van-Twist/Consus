@@ -13,12 +13,31 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   `web/data/consus_snapshot.json`. Niets wordt vastgezet op Perkins of één locatie.
   OData-pagina's gaan per query naar een tijdelijk bestand en worden daarna
   regel voor regel verwerkt. Per bedrijf wordt meteen opgerold; de artikel-
-  feiten gaan weg vóór het volgende bedrijf. Voorraad die een query voor een
+  feiten gaan weg vóór het volgende bedrijf. Na elk bedrijf (gelukt of mislukt)
+  wordt de snapshot atomair bijgewerkt, zodat de pagina al verse bedrijven
+  toont terwijl het andere bedrijf nog loopt. Zolang een bedrijf nog niet
+  aan de beurt is geweest, staat daarbij de melding dat de verversing nog
+  bezig is; de pagina houdt dan de vorige cijfers van dat bedrijf. Voorraad die een query voor een
   ander bedrijf teruggeeft, blijft op schijf tot dat bedrijf zelf slaagt.
   Alleen als het stale blijft én de vorige snapshot geen rijen voor dat
   bedrijf heeft, gebruikt nightly die voorraad. Zijn er wel vorige rijen,
-  dan blijven die staan en worden de tijdelijke bestanden verwijderd. Het
-  live snapshotbestand wordt pas aan het eind atomair vervangen.
+  dan blijven die staan en worden de tijdelijke bestanden verwijderd.
+- Artikelposten blijven het rolling venster van twaalf maanden (maand, kwartaal,
+  jaar en de maandreeks). Er is geen "alleen sinds de vorige snapshot": de cache
+  bewaart totalen per leverancier/locatie, geen artikelposten, dus een delta
+  zou de omloopsnelheid scheef trekken. Wel per kalendermaand een aparte query,
+  met `Posting_Date` tot en met de peildatum. `$select` laat `Entry_Type` weg
+  en haalt omzet alleen bij verkoop en `Document_No` alleen bij negatieve
+  correctie. Die correctie vraagt `Document_No` van `WO` tot vóór `WP`
+  (BC weigert `startswith`); PHP controleert het prefix daarna nog. Weigert BC
+  het bereik, dan komt de volle set binnen en filtert PHP als voorheen.
+  Elke query gebruikt `$top` 20000; een geweigerde paginagrootte valt terug
+  op de BC-standaard. Bedrijven blijven na elkaar, niet parallel.
+- Een bedrijf dat vandaag al vers in de snapshot staat (zelfde peildatum en
+  snapshotversie) wordt bij een volgende start overgeslagen. Opnieuw alles
+  ophalen: `nightly.php?force=1`, `php nightly.php --force`, of
+  `CONSUS_NIGHTLY_FORCE=1`. Voortgang tijdens de run staat in
+  `web/data/consus_snapshot.json.progress.json` (stap, maand, pagina's, regels).
 - Omloopsnelheid (maand, kwartaal, jaar) = verkoophoeveelheid ÷ voorraad van
   de gekozen locaties. Eigen en EGT delen die noemer. Dropship telt niet mee.
 - De pagina filtert eerst op afdeling, daarna op leverancier en locatie uit
@@ -28,7 +47,8 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   KVT en HVT zijn alleen een hint voor eigen magazijn. Werkorderverbruik is
   `Negative Adjmt.` met documentnummer `WO…`, plus `Assembly Consumption`.
   OData filtert per Engelse optienaam (`Sale`, `Negative Adjmt.`,
-  `Assembly Consumption`); het WO-prefix past Consus zelf toe.
+  `Assembly Consumption`) en bij negatieve correctie op documentnummers
+  vanaf `WO` tot vóór `WP`. Consus controleert dat prefix daarna nog eens.
 
 Lokaal gebruikt Consus `~/Repositories/auth.php` (naast de repo). Op de server
 blijft dat `web/auth.php`.

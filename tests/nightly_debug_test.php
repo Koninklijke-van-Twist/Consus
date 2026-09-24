@@ -25,6 +25,12 @@ nightly_debug_assert(consus_nightly_log_debug_enabled('no', 'fpm-fcgi') === fals
 nightly_debug_assert(consus_nightly_log_debug_enabled('on', 'fpm-fcgi') === false, 'on blijft uit');
 nightly_debug_assert(consus_nightly_log_debug_enabled(['1'], 'fpm-fcgi') === false, 'array blijft uit');
 nightly_debug_assert(consus_nightly_log_debug_enabled(1, 'fpm-fcgi') === true, 'integer 1 telt mee');
+nightly_debug_assert(consus_nightly_force_requested('1', null) === true, 'env force telt');
+nightly_debug_assert(consus_nightly_force_requested(null, 'yes') === true, 'query force telt');
+nightly_debug_assert(consus_nightly_force_requested(null, null, ['--force']) === true, 'cli --force telt');
+nightly_debug_assert(consus_nightly_force_requested(null, null, ['force=true']) === true, 'cli force= telt');
+nightly_debug_assert(consus_nightly_force_requested('0', 'false', []) === false, 'force blijft uit');
+nightly_debug_assert(consus_nightly_force_requested(null, null) === false, 'zonder force geen herlaad');
 
 $plain = new RuntimeException('password=hunter2 bij Authorization: Bearer super-secret-token');
 $withoutDebug = consus_nightly_throwable_payload($plain, 15, false);

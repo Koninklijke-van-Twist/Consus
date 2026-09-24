@@ -18,6 +18,33 @@
  * Tests laden alleen de helpers via define('CONSUS_NIGHTLY_LIBRARY', true).
  */
 
+function consus_nightly_force_requested(mixed $env, mixed $query, array $argv = []): bool
+{
+    foreach ($argv as $arg) {
+        if (!is_string($arg)) {
+            continue;
+        }
+        if ($arg === '--force') {
+            return true;
+        }
+        if (str_starts_with($arg, 'force=')) {
+            $env = substr($arg, 6);
+        }
+    }
+
+    foreach ([$env, $query] as $value) {
+        if (!is_string($value) && !is_int($value)) {
+            continue;
+        }
+        $normalized = strtolower(trim((string) $value));
+        if (in_array($normalized, ['1', 'true', 'yes'], true)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function consus_nightly_log_debug_enabled(mixed $value, string $sapi): bool
 {
     if ($sapi === 'cli') {
@@ -328,9 +355,15 @@ if (PHP_SAPI !== 'cli') {
 require_once __DIR__ . '/consus_data.php';
 
 $startedAt = hrtime(true);
+$GLOBALS['consus_progress_echo'] = PHP_SAPI === 'cli';
+$force = consus_nightly_force_requested(
+    getenv('CONSUS_NIGHTLY_FORCE'),
+    PHP_SAPI === 'cli' ? null : ($_GET['force'] ?? null),
+    PHP_SAPI === 'cli' && isset($argv) && is_array($argv) ? $argv : []
+);
 
 try {
-    $snapshot = consus_run_nightly();
+    $snapshot = consus_run_nightly($force);
     $payload = [
         'ok' => ($snapshot['errors'] ?? []) === [],
         'generated_at' => (string) ($snapshot['generated_at'] ?? gmdate('c')),
@@ -351,11 +384,17 @@ try {
             $payload['total_duration_ms']
         );
         foreach ($payload['companies'] as $company) {
+            $note = '';
+            if (!empty($company['stale'])) {
+                $note = ' (oude data behouden)';
+            } elseif (!empty($company['resumed'])) {
+                $note = ' (al ververst vandaag, overgeslagen)';
+            }
             echo sprintf(
                 "  %s: duration=%dms%s\n",
                 (string) ($company['company'] ?? ''),
                 (int) ($company['duration_ms'] ?? 0),
-                !empty($company['stale']) ? ' (oude data behouden)' : ''
+                $note
             );
         }
         foreach ($payload['warnings'] as $warning) {

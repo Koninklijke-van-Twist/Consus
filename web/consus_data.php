@@ -245,13 +245,75 @@ function consus_entry_type_filter(string $entryType): string
 }
 
 /**
- * Eén Entry_Type per query. BC weigert OR over verschillende velden (HTTP 501).
+ * Volgende ASCII-grens zodat Document_No ge prefix and lt upper exact dat prefix is.
+ * 'WO' wordt 'WP'. PHP controleert het prefix daarna nog eens.
+ *
+ * @return array{from:string,to:string}
+ */
+function consus_document_prefix_bounds(string $prefix): array
+{
+    $prefix = trim($prefix);
+    if ($prefix === '') {
+        return ['from' => '', 'to' => ''];
+    }
+
+    $upper = $prefix;
+    for ($index = strlen($upper) - 1; $index >= 0; $index--) {
+        $ord = ord($upper[$index]);
+        if ($ord < 255) {
+            $upper[$index] = chr($ord + 1);
+            $upper = substr($upper, 0, $index + 1);
+
+            return ['from' => $prefix, 'to' => $upper];
+        }
+    }
+
+    return ['from' => $prefix, 'to' => ''];
+}
+
+function consus_document_prefix_odata_filter(string $prefix): string
+{
+    $bounds = consus_document_prefix_bounds($prefix);
+    if ($bounds['from'] === '' || $bounds['to'] === '') {
+        return '';
+    }
+
+    return "Document_No ge '" . consus_escape_odata_string($bounds['from'])
+        . "' and Document_No lt '" . consus_escape_odata_string($bounds['to']) . "'";
+}
+
+/**
+ * @return array<int, string>
+ */
+function consus_ledger_required_fields(bool $includeAmount, bool $includeDocument): array
+{
+    $fields = CONSUS_LEDGER_FIELDS;
+    if ($includeAmount) {
+        $fields[] = 'Sales_Amount_Actual';
+    }
+    if ($includeDocument) {
+        $fields[] = 'Document_No';
+    }
+
+    return $fields;
+}
+
+/**
+ * Eén Entry_Type per query. BC weigert OR over verschillende velden (HTTP 501)
+ * en startswith. Een documentprefix wordt daarom een bereik (WO t/m vóór WP).
+ * $toDate is exclusief: Posting_Date lt die dag.
  *
  * @param array<int, string> $entryTypes
  * @return array<string, string>
  */
-function consus_ledger_query(array $entryTypes, string $fromDate): array
-{
+function consus_ledger_query(
+    array $entryTypes,
+    string $fromDate,
+    string $toDate = '',
+    string $documentPrefix = '',
+    bool $includeAmount = false,
+    bool $includeDocument = false
+): array {
     $chosen = [];
     foreach ($entryTypes as $entryType) {
         $entryType = trim((string) $entryType);
@@ -268,9 +330,28 @@ function consus_ledger_query(array $entryTypes, string $fromDate): array
         throw new InvalidArgumentException('Ongeldige vanaf-datum voor artikelposten.');
     }
 
+    $filter = consus_entry_type_filter($chosen[0]) . ' and Posting_Date ge ' . $fromDate;
+    if ($toDate !== '') {
+        $toDate = consus_parse_date($toDate);
+        if ($toDate === '' || $toDate <= $fromDate) {
+            throw new InvalidArgumentException('Ongeldige tot-datum voor artikelposten.');
+        }
+        $filter .= ' and Posting_Date lt ' . $toDate;
+    }
+
+    $documentPrefix = trim($documentPrefix);
+    if ($documentPrefix !== '') {
+        $includeDocument = true;
+        $prefixFilter = consus_document_prefix_odata_filter($documentPrefix);
+        if ($prefixFilter === '') {
+            throw new InvalidArgumentException('Documentprefix kan niet als OData-bereik worden gezet.');
+        }
+        $filter .= ' and ' . $prefixFilter;
+    }
+
     return consus_entity_query(
-        CONSUS_LEDGER_FIELDS,
-        consus_entry_type_filter($chosen[0]) . ' and Posting_Date ge ' . $fromDate
+        consus_ledger_required_fields($includeAmount, $includeDocument),
+        $filter
     );
 }
 
@@ -280,15 +361,28 @@ function consus_ledger_query(array $entryTypes, string $fromDate): array
  * @param array<int, string> $entryTypes
  * @return array<int, array<string, string>>
  */
-function consus_ledger_filters(array $entryTypes, string $fromDate): array
-{
+function consus_ledger_filters(
+    array $entryTypes,
+    string $fromDate,
+    string $toDate = '',
+    string $documentPrefix = '',
+    bool $includeAmount = false,
+    bool $includeDocument = false
+): array {
     $queries = [];
     foreach ($entryTypes as $entryType) {
         $entryType = trim((string) $entryType);
         if ($entryType === '') {
             continue;
         }
-        $queries[] = consus_ledger_query([$entryType], $fromDate);
+        $queries[] = consus_ledger_query(
+            [$entryType],
+            $fromDate,
+            $toDate,
+            $documentPrefix,
+            $includeAmount,
+            $includeDocument
+        );
     }
     if ($queries === []) {
         throw new InvalidArgumentException('Geen Entry_Type geconfigureerd.');
@@ -344,7 +438,7 @@ function consus_dimension_query(): array
  * @param array<int, string> $fields
  * @return array<string, string>
  */
-function consus_entity_query(array $fields, string $filter = ''): array
+function consus_entity_query(array $fields, string $filter = '', ?int $top = null): array
 {
     $query = [
         '$select' => implode(',', $fields),
@@ -352,8 +446,51 @@ function consus_entity_query(array $fields, string $filter = ''): array
     if ($filter !== '') {
         $query['$filter'] = $filter;
     }
+    $top ??= CONSUS_ODATA_PAGE_SIZE;
+    if ($top > 0) {
+        $query['$top'] = (string) $top;
+    }
 
     return $query;
+}
+
+/**
+ * Maandgrenzen van history_start t/m de dag na as_of. Elke chunk is
+ * Posting_Date ge from and lt to, zodat BC geen twaalf maanden in één
+ * skip-keten hoeft te lopen. De totalen blijven hetzelfde venster.
+ *
+ * @param array{as_of:string,history_start:string} $windows
+ * @return array<int, array{from:string,to:string}>
+ */
+function consus_ledger_date_chunks(array $windows): array
+{
+    $zone = new DateTimeZone('Europe/Amsterdam');
+    $from = consus_parse_date($windows['history_start'] ?? '');
+    $asOf = consus_parse_date($windows['as_of'] ?? '');
+    if ($from === '' || $asOf === '') {
+        throw new InvalidArgumentException('Ongeldig venster voor artikelposten.');
+    }
+
+    $cursor = new DateTimeImmutable($from . ' 00:00:00', $zone);
+    $endExclusive = (new DateTimeImmutable($asOf . ' 00:00:00', $zone))->modify('+1 day');
+    if ($cursor >= $endExclusive) {
+        throw new InvalidArgumentException('Ongeldig venster voor artikelposten.');
+    }
+
+    $chunks = [];
+    while ($cursor < $endExclusive) {
+        $next = $cursor->modify('first day of next month');
+        if ($next > $endExclusive) {
+            $next = $endExclusive;
+        }
+        $chunks[] = [
+            'from' => $cursor->format('Y-m-d'),
+            'to' => $next->format('Y-m-d'),
+        ];
+        $cursor = $next;
+    }
+
+    return $chunks;
 }
 
 /**
@@ -1143,33 +1280,44 @@ function consus_fetch_url_live(string $url, array $auth): array
     return $rows;
 }
 
-function consus_each_url_live(string $url, array $auth, callable $onRow): int
+function consus_each_url_live(string $url, array $auth, callable $onRow, ?callable $onPage = null): int
 {
     $count = 0;
+    $pages = 0;
     $next = $url;
     $guard = 0;
+    $handle = odata_init_curl($auth);
 
-    while ($next !== '') {
-        $guard++;
-        if ($guard > 100000) {
-            throw new RuntimeException('OData-paginering stopte niet.');
-        }
-
-        $response = odata_get_json($next, $auth);
-        $page = $response['value'] ?? null;
-        if (!is_array($page)) {
-            throw new RuntimeException('OData-response bevat geen value-array.');
-        }
-
-        foreach ($page as $row) {
-            if (is_array($row)) {
-                $onRow($row);
-                $count++;
+    try {
+        while ($next !== '') {
+            $guard++;
+            if ($guard > 100000) {
+                throw new RuntimeException('OData-paginering stopte niet.');
             }
-        }
 
-        $nextLink = $response['@odata.nextLink'] ?? '';
-        $next = is_string($nextLink) ? $nextLink : '';
+            $response = odata_curl_json($handle, $next);
+            $page = $response['value'] ?? null;
+            if (!is_array($page)) {
+                throw new RuntimeException('OData-response bevat geen value-array.');
+            }
+
+            foreach ($page as $row) {
+                if (is_array($row)) {
+                    $onRow($row);
+                    $count++;
+                }
+            }
+
+            $pages++;
+            if ($onPage !== null) {
+                $onPage($pages, $count);
+            }
+
+            $nextLink = $response['@odata.nextLink'] ?? '';
+            $next = is_string($nextLink) ? $nextLink : '';
+        }
+    } finally {
+        curl_close($handle);
     }
 
     return $count;
@@ -1291,6 +1439,7 @@ function consus_collect_rows_via_spill(callable $fetchInto, callable $onRow): ar
  * @param array<int, string> $required
  * @param array<int, string> $optional
  * @param callable(string, array<string, mixed>, callable(array<string, mixed>):void):int|null $fetchRows
+ * @return array{count:int,optional_fields:bool,missing_optional:array<int, string>,page_size_fallback:bool}
  */
 function consus_each_entity_rows(
     string $company,
@@ -1299,14 +1448,15 @@ function consus_each_entity_rows(
     array $optional,
     string $filter,
     callable $onRow,
-    ?callable $fetchRows = null
+    ?callable $fetchRows = null,
+    ?callable $onPage = null
 ): array {
     global $baseUrl;
 
     $environment = auth_get_environment_for_company($company);
     $auth = auth_get_auth_for_environment($environment);
-    $fetchRows ??= static function (string $url, array $auth, callable $onRow): int {
-        return consus_each_url_live($url, $auth, $onRow);
+    $fetchRows ??= static function (string $url, array $auth, callable $onRow) use ($onPage): int {
+        return consus_each_url_live($url, $auth, $onRow, $onPage);
     };
     $attempts = [];
     if ($optional !== []) {
@@ -1314,46 +1464,60 @@ function consus_each_entity_rows(
     }
     $attempts[] = $required;
 
+    $pageSizes = [];
+    if (CONSUS_ODATA_PAGE_SIZE > 0) {
+        $pageSizes[] = CONSUS_ODATA_PAGE_SIZE;
+    }
+    $pageSizes[] = 0;
+
     $lastError = null;
     $attemptCount = count($attempts);
     foreach ($attempts as $index => $fields) {
-        $query = consus_entity_query($fields, $filter);
-        $url = consus_company_entity_url((string) $baseUrl, $environment, $company, $entitySet, $query);
-        $useOptionalAttempt = $index === 0 && $optional !== [];
-        try {
-            $fetched = consus_collect_rows_via_spill(
-                static function (callable $onSpillRow) use ($fetchRows, $url, $auth): int {
-                    return $fetchRows($url, $auth, $onSpillRow);
-                },
-                $onRow
-            );
-            if ($useOptionalAttempt && $fetched['count'] === 0 && $index < $attemptCount - 1) {
-                continue;
-            }
-            $missing = [];
-            if ($optional !== []) {
-                $sample = $fetched['sample'];
-                foreach ($optional as $field) {
-                    if (!is_array($sample) || !array_key_exists($field, $sample)) {
-                        $missing[] = $field;
+        foreach ($pageSizes as $pageSizeIndex => $pageSize) {
+            $query = consus_entity_query($fields, $filter, $pageSize);
+            $url = consus_company_entity_url((string) $baseUrl, $environment, $company, $entitySet, $query);
+            $useOptionalAttempt = $index === 0 && $optional !== [];
+            try {
+                $fetched = consus_collect_rows_via_spill(
+                    static function (callable $onSpillRow) use ($fetchRows, $url, $auth): int {
+                        return $fetchRows($url, $auth, $onSpillRow);
+                    },
+                    $onRow
+                );
+                if ($useOptionalAttempt && $fetched['count'] === 0 && $index < $attemptCount - 1) {
+                    continue 2;
+                }
+                $missing = [];
+                if ($optional !== []) {
+                    $sample = $fetched['sample'];
+                    foreach ($optional as $field) {
+                        if (!is_array($sample) || !array_key_exists($field, $sample)) {
+                            $missing[] = $field;
+                        }
                     }
                 }
-            }
 
-            return [
-                'count' => $fetched['count'],
-                'optional_fields' => $missing === [] && $optional !== [],
-                'missing_optional' => $missing,
-            ];
-        } catch (Throwable $error) {
-            $message = $error->getMessage();
-            if (
-                str_contains($message, 'Tijdelijk OData-bestand bevat een onleesbare regel.')
-                || str_contains($message, 'Tijdelijk OData-bestand is onvolledig.')
-            ) {
-                throw $error;
+                return [
+                    'count' => $fetched['count'],
+                    'optional_fields' => $missing === [] && $optional !== [],
+                    'missing_optional' => $missing,
+                    'page_size_fallback' => $pageSize === 0 && CONSUS_ODATA_PAGE_SIZE > 0 && $pageSizeIndex > 0,
+                ];
+            } catch (Throwable $error) {
+                $message = $error->getMessage();
+                if (
+                    str_contains($message, 'Tijdelijk OData-bestand bevat een onleesbare regel.')
+                    || str_contains($message, 'Tijdelijk OData-bestand is onvolledig.')
+                ) {
+                    throw $error;
+                }
+                $lastError = $error;
+                $morePageSizes = $pageSizeIndex < count($pageSizes) - 1;
+                if ($morePageSizes && consus_odata_error_is_page_size($error)) {
+                    continue;
+                }
+                break;
             }
-            $lastError = $error;
         }
     }
 
@@ -1380,36 +1544,118 @@ function consus_odata_error_allows_entry_type_fallback(Throwable $error): bool
         || str_contains($lower, 'niet ondersteund');
 }
 
+function consus_odata_error_is_page_size(Throwable $error): bool
+{
+    $lower = strtolower($error->getMessage());
+
+    return str_contains($lower, 'page size')
+        || str_contains($lower, 'pagesize')
+        || str_contains($lower, 'max page')
+        || str_contains($lower, 'maximum page')
+        || str_contains($lower, 'paginagrootte');
+}
+
+/**
+ * @return array{count:int,optional_fields:bool,missing_optional:array<int, string>,page_size_fallback:bool}
+ */
+function consus_fetch_ledger_query(
+    string $company,
+    string $entryType,
+    string $fromDate,
+    string $toDate,
+    bool $includeAmount,
+    string $documentPrefix,
+    bool $includeDocument,
+    callable $onRow,
+    ?callable $onPage = null,
+    ?callable $fetchRows = null
+): array {
+    $query = consus_ledger_query(
+        [$entryType],
+        $fromDate,
+        $toDate,
+        $documentPrefix,
+        $includeAmount,
+        $includeDocument
+    );
+
+    return consus_each_entity_rows(
+        $company,
+        CONSUS_LEDGER_ENTITY,
+        consus_ledger_required_fields($includeAmount, $includeDocument || trim($documentPrefix) !== ''),
+        CONSUS_LEDGER_OPTIONAL_FIELDS,
+        (string) ($query['$filter'] ?? ''),
+        $onRow,
+        $fetchRows,
+        $onPage
+    );
+}
+
 /**
  * Probeert Entry_Type-bijschriften na elkaar. Het eerste verzoek dat BC accepteert wint.
- * Een geweigerd filter (verkeerd bijschrift of niet-ondersteunde expressie) probeert het volgende.
+ * Een geweigerd documentbereik probeert dezelfde Entry_Type zonder dat bereik;
+ * PHP filtert het prefix dan alsnog. Een ander geweigerd filter probeert het volgende bijschrift.
  *
  * @param array<int, string> $entryTypes
- * @return array{count:int,optional_fields:bool,missing_optional:array<int, string>}
+ * @return array{count:int,optional_fields:bool,missing_optional:array<int, string>,page_size_fallback:bool,document_filter_rejected:bool}
  */
 function consus_each_ledger_entry_type(
     string $company,
     array $entryTypes,
     string $fromDate,
-    callable $onRow
+    string $toDate,
+    bool $includeAmount,
+    string $documentPrefix,
+    bool $includeDocument,
+    callable $onRow,
+    ?callable $onPage = null,
+    ?callable $fetchRows = null
 ): array {
     $lastError = null;
+    $documentPrefix = trim($documentPrefix);
     foreach ($entryTypes as $entryType) {
         $entryType = trim((string) $entryType);
         if ($entryType === '') {
             continue;
         }
-        $query = consus_ledger_query([$entryType], $fromDate);
         try {
-            return consus_each_entity_rows(
+            $result = consus_fetch_ledger_query(
                 $company,
-                CONSUS_LEDGER_ENTITY,
-                CONSUS_LEDGER_FIELDS,
-                CONSUS_LEDGER_OPTIONAL_FIELDS,
-                (string) ($query['$filter'] ?? ''),
-                $onRow
+                $entryType,
+                $fromDate,
+                $toDate,
+                $includeAmount,
+                $documentPrefix,
+                $includeDocument || $documentPrefix !== '',
+                $onRow,
+                $onPage,
+                $fetchRows
             );
+            $result['document_filter_rejected'] = false;
+
+            return $result;
         } catch (Throwable $error) {
+            if ($documentPrefix !== '' && consus_odata_error_allows_entry_type_fallback($error)) {
+                try {
+                    $result = consus_fetch_ledger_query(
+                        $company,
+                        $entryType,
+                        $fromDate,
+                        $toDate,
+                        $includeAmount,
+                        '',
+                        true,
+                        $onRow,
+                        $onPage,
+                        $fetchRows
+                    );
+                    $result['document_filter_rejected'] = true;
+
+                    return $result;
+                } catch (Throwable $withoutPrefix) {
+                    $error = $withoutPrefix;
+                }
+            }
             $lastError = $error;
             if (!consus_odata_error_allows_entry_type_fallback($error)) {
                 throw $error;
@@ -1504,16 +1750,138 @@ function consus_apply_stock_ndjson(array &$items, string $path, string $sourceCo
 }
 
 /**
+ * @param array<string, mixed> $context
+ */
+function consus_page_progress(?callable $onProgress, array $context): ?callable
+{
+    if ($onProgress === null) {
+        return null;
+    }
+
+    return static function (int $pages, int $rows) use ($onProgress, $context): void {
+        $onProgress(array_merge($context, [
+            'pages' => $pages,
+            'rows' => $rows,
+        ]));
+    };
+}
+
+function consus_page_size_warning(string $entity): string
+{
+    return $entity . ': paginagrootte ' . CONSUS_ODATA_PAGE_SIZE . ' geweigerd, BC-standaard gebruikt.';
+}
+
+/**
+ * Artikelposten per maand. Het venster blijft twaalf maanden; een maand
+ * is alleen een kleinere BC-query. Een geweigerd documentbereik geldt voor
+ * de resterende maanden van dit type.
+ *
+ * @param array<int, string> $entryTypes
+ * @param array<string, array<string, mixed>> $items
+ * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
+ * @return array{count:int,missing_optional:array<int, string>,document_filter_rejected:bool,page_size_fallback:bool}
+ */
+function consus_collect_ledger(
+    string $company,
+    string $companyKey,
+    array $entryTypes,
+    string $kind,
+    string $documentPrefix,
+    bool $includeAmount,
+    array &$items,
+    array $windows,
+    ?callable $onProgress = null
+): array {
+    $odataPrefix = trim($documentPrefix);
+    $includeDocument = $odataPrefix !== '';
+    $rejected = false;
+    $pageSizeFallback = false;
+    $missing = [];
+    $count = 0;
+
+    foreach (consus_ledger_date_chunks($windows) as $chunk) {
+        $context = [
+            'company' => $company,
+            'company_key' => $companyKey,
+            'step' => $kind === 'sales' ? 'verkoop' : 'verbruik',
+            'entry_type' => implode(', ', $entryTypes),
+            'from' => $chunk['from'],
+            'to' => $chunk['to'],
+            'pages' => 0,
+            'rows' => 0,
+        ];
+        if ($onProgress !== null) {
+            $onProgress($context);
+        }
+
+        $result = consus_each_ledger_entry_type(
+            $company,
+            $entryTypes,
+            $chunk['from'],
+            $chunk['to'],
+            $includeAmount,
+            $odataPrefix,
+            $includeDocument,
+            static function (array $row) use (&$items, $companyKey, $windows, $kind, $documentPrefix): void {
+                if (!consus_document_no_has_prefix($row, $documentPrefix)) {
+                    return;
+                }
+                consus_apply_ledger_row($items, $row, $companyKey, $kind, $windows);
+            },
+            consus_page_progress($onProgress, $context)
+        );
+        $count += (int) ($result['count'] ?? 0);
+        if (!empty($result['document_filter_rejected'])) {
+            $rejected = true;
+            $odataPrefix = '';
+        }
+        if (!empty($result['page_size_fallback'])) {
+            $pageSizeFallback = true;
+        }
+        foreach ($result['missing_optional'] ?? [] as $field) {
+            $field = (string) $field;
+            if ($field !== '' && !in_array($field, $missing, true)) {
+                $missing[] = $field;
+            }
+        }
+    }
+
+    return [
+        'count' => $count,
+        'missing_optional' => $missing,
+        'document_filter_rejected' => $rejected,
+        'page_size_fallback' => $pageSizeFallback,
+    ];
+}
+
+/**
  * @param array<string, array<string, mixed>> $items
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
  * @return array{warnings:array<int, string>,foreign_spills:array<string, string>}
  */
-function consus_collect_company(string $company, string $companyKey, array &$items, array $windows): array
-{
+function consus_collect_company(
+    string $company,
+    string $companyKey,
+    array &$items,
+    array $windows,
+    ?callable $onProgress = null
+): array {
     $warnings = [];
     $foreignSpills = [];
+    $note = static function (array $extra) use ($onProgress, $company, $companyKey): void {
+        if ($onProgress === null) {
+            return;
+        }
+        $onProgress(array_merge([
+            'company' => $company,
+            'company_key' => $companyKey,
+            'pages' => 0,
+            'rows' => 0,
+        ], $extra));
+    };
 
     try {
+        $note(['step' => 'voorraad', 'entry_type' => CONSUS_STOCK_ENTITY]);
         $stockResult = consus_each_entity_rows(
             $company,
             CONSUS_STOCK_ENTITY,
@@ -1527,40 +1895,63 @@ function consus_collect_company(string $company, string $companyKey, array &$ite
                     return;
                 }
                 consus_foreign_spill_write($foreignSpills, $target, $row);
-            }
+            },
+            null,
+            consus_page_progress($onProgress, [
+                'company' => $company,
+                'company_key' => $companyKey,
+                'step' => 'voorraad',
+                'entry_type' => CONSUS_STOCK_ENTITY,
+            ])
         );
         if (($stockResult['missing_optional'] ?? []) !== []) {
             $warnings[] = CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $stockResult['missing_optional']) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.';
         }
+        if (!empty($stockResult['page_size_fallback'])) {
+            $warnings[] = consus_page_size_warning(CONSUS_STOCK_ENTITY);
+        }
 
-        $salesResult = consus_each_ledger_entry_type(
+        $salesResult = consus_collect_ledger(
             $company,
+            $companyKey,
             CONSUS_SALES_ENTRY_TYPES,
-            $windows['history_start'],
-            static function (array $row) use (&$items, $companyKey, $windows): void {
-                consus_apply_ledger_row($items, $row, $companyKey, 'sales', $windows);
-            }
+            'sales',
+            '',
+            true,
+            $items,
+            $windows,
+            $onProgress
         );
         if (($salesResult['missing_optional'] ?? []) !== []) {
             $warnings[] = 'Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $salesResult['missing_optional']) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.';
         }
+        if (!empty($salesResult['page_size_fallback'])) {
+            $warnings[] = consus_page_size_warning(CONSUS_LEDGER_ENTITY);
+        }
 
         foreach (consus_wo_ledger_parts() as $part) {
             $prefix = (string) $part['document_prefix'];
-            consus_each_ledger_entry_type(
+            $consumptionResult = consus_collect_ledger(
                 $company,
+                $companyKey,
                 $part['entry_types'],
-                $windows['history_start'],
-                static function (array $row) use (&$items, $companyKey, $windows, $prefix): void {
-                    if (!consus_document_no_has_prefix($row, $prefix)) {
-                        return;
-                    }
-                    consus_apply_ledger_row($items, $row, $companyKey, 'consumption', $windows);
-                }
+                'consumption',
+                $prefix,
+                false,
+                $items,
+                $windows,
+                $onProgress
             );
+            if (!empty($consumptionResult['document_filter_rejected']) && $prefix !== '') {
+                $warnings[] = 'Werkorderfilter op documentnummer wordt door BC geweigerd. Negatieve correcties worden volledig opgehaald en lokaal op prefix ' . $prefix . ' gefilterd.';
+            }
+            if (!empty($consumptionResult['page_size_fallback'])) {
+                $warnings[] = consus_page_size_warning(CONSUS_LEDGER_ENTITY);
+            }
         }
 
         try {
+            $note(['step' => 'artikelen', 'entry_type' => CONSUS_ITEM_ENTITY]);
             $vendorResult = consus_each_entity_rows(
                 $company,
                 CONSUS_ITEM_ENTITY,
@@ -1569,18 +1960,29 @@ function consus_collect_company(string $company, string $companyKey, array &$ite
                 '',
                 static function (array $row) use (&$items, $companyKey): void {
                     consus_apply_vendor_row($items, $row, $companyKey);
-                }
+                },
+                null,
+                consus_page_progress($onProgress, [
+                    'company' => $company,
+                    'company_key' => $companyKey,
+                    'step' => 'artikelen',
+                    'entry_type' => CONSUS_ITEM_ENTITY,
+                ])
             );
             if ($vendorResult['optional_fields'] === false && CONSUS_ITEM_OPTIONAL_FIELDS !== []) {
                 $warnings[] = CONSUS_ITEM_ENTITY . ': optionele velden (' . implode(', ', CONSUS_ITEM_OPTIONAL_FIELDS) . ') niet beschikbaar.';
+            }
+            if (!empty($vendorResult['page_size_fallback'])) {
+                $warnings[] = consus_page_size_warning(CONSUS_ITEM_ENTITY);
             }
         } catch (Throwable $error) {
             $warnings[] = 'Artikelen (leverancier) niet geladen: ' . $error->getMessage();
         }
 
         try {
+            $note(['step' => 'kostenplaats', 'entry_type' => CONSUS_DIMENSION_ENTITY]);
             $dimensionQuery = consus_dimension_query();
-            consus_each_entity_rows(
+            $dimensionResult = consus_each_entity_rows(
                 $company,
                 CONSUS_DIMENSION_ENTITY,
                 CONSUS_DIMENSION_FIELDS,
@@ -1588,14 +1990,24 @@ function consus_collect_company(string $company, string $companyKey, array &$ite
                 (string) ($dimensionQuery['$filter'] ?? ''),
                 static function (array $row) use (&$items, $companyKey): void {
                     consus_apply_dimension_row($items, $row, $companyKey);
-                }
+                },
+                null,
+                consus_page_progress($onProgress, [
+                    'company' => $company,
+                    'company_key' => $companyKey,
+                    'step' => 'kostenplaats',
+                    'entry_type' => CONSUS_DIMENSION_ENTITY,
+                ])
             );
+            if (!empty($dimensionResult['page_size_fallback'])) {
+                $warnings[] = consus_page_size_warning(CONSUS_DIMENSION_ENTITY);
+            }
         } catch (Throwable $error) {
             $warnings[] = 'Kostenplaats (dimensie ' . CONSUS_COST_CENTER_DIMENSION_CODE . ') niet geladen: ' . $error->getMessage();
         }
 
         return [
-            'warnings' => $warnings,
+            'warnings' => array_values(array_unique($warnings)),
             'foreign_spills' => consus_foreign_spill_finish($foreignSpills, false),
         ];
     } catch (Throwable $error) {
@@ -1700,7 +2112,240 @@ function consus_previous_rows_for_company(array $snapshot, string $companyKey): 
     return $rows;
 }
 
-function consus_run_nightly(): array
+function consus_progress_file(): string
+{
+    return consus_snapshot_file() . '.progress.json';
+}
+
+function consus_write_progress(array $progress): void
+{
+    $progress['updated_at'] = gmdate('c');
+    $json = json_encode($progress, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!is_string($json)) {
+        return;
+    }
+
+    $path = consus_progress_file();
+    $directory = dirname($path);
+    if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
+        return;
+    }
+
+    $temporary = $path . '.tmp.' . getmypid();
+    if (@file_put_contents($temporary, $json, LOCK_EX) === false) {
+        return;
+    }
+    if (!@rename($temporary, $path)) {
+        @unlink($temporary);
+
+        return;
+    }
+
+    if (empty($GLOBALS['consus_progress_echo'])) {
+        return;
+    }
+
+    $from = (string) ($progress['from'] ?? '');
+    $to = (string) ($progress['to'] ?? '');
+    $range = $from !== '' ? ' ' . $from . ' tot ' . $to : '';
+    fwrite(STDOUT, sprintf(
+        "  … %s / %s%s pagina's=%d regels=%d\n",
+        (string) ($progress['company'] ?? ''),
+        (string) ($progress['step'] ?? ''),
+        $range,
+        (int) ($progress['pages'] ?? 0),
+        (int) ($progress['rows'] ?? 0)
+    ));
+}
+
+/**
+ * Zelfde as_of, hetzelfde historievenster en een geslaagde refresh van vandaag.
+ * Een oudere snapshotversie telt niet: dan ontbreekt refreshed_on of de query is veranderd.
+ *
+ * @param array<string, mixed> $snapshot
+ * @param array{as_of:string,history_start:string} $windows
+ */
+function consus_company_refresh_is_current(array $snapshot, string $companyKey, array $windows): bool
+{
+    if ((int) ($snapshot['version'] ?? 0) !== CONSUS_SNAPSHOT_VERSION) {
+        return false;
+    }
+    if ((string) ($snapshot['as_of'] ?? '') !== (string) ($windows['as_of'] ?? '')) {
+        return false;
+    }
+
+    $previousWindows = is_array($snapshot['windows'] ?? null) ? $snapshot['windows'] : [];
+    if ((string) ($previousWindows['history_start'] ?? '') !== (string) ($windows['history_start'] ?? '')) {
+        return false;
+    }
+
+    foreach ($snapshot['companies'] ?? [] as $stat) {
+        if (!is_array($stat) || (string) ($stat['company_key'] ?? '') !== $companyKey) {
+            continue;
+        }
+        if (!empty($stat['stale'])) {
+            return false;
+        }
+
+        return (string) ($stat['refreshed_on'] ?? '') === (string) ($windows['as_of'] ?? '');
+    }
+
+    return false;
+}
+
+/**
+ * @param array<int, array<string, mixed>> $stats
+ * @return array<string, mixed>|null
+ */
+function consus_find_company_stat(array $stats, string $companyKey): ?array
+{
+    foreach ($stats as $stat) {
+        if (is_array($stat) && (string) ($stat['company_key'] ?? '') === $companyKey) {
+            return $stat;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * @param array<int, array<string, mixed>> $companyStats
+ * @param array<int, mixed> $previousStats
+ * @return array<int, array<string, mixed>>
+ */
+function consus_company_stats_for_publish(array $companyStats, array $previousStats): array
+{
+    $byKey = [];
+    foreach ($companyStats as $stat) {
+        if (!is_array($stat)) {
+            continue;
+        }
+        $key = (string) ($stat['company_key'] ?? '');
+        if ($key === '') {
+            continue;
+        }
+        $byKey[$key] = $stat;
+    }
+    foreach ($previousStats as $stat) {
+        if (!is_array($stat)) {
+            continue;
+        }
+        $key = (string) ($stat['company_key'] ?? '');
+        if ($key === '' || isset($byKey[$key])) {
+            continue;
+        }
+        $byKey[$key] = $stat;
+    }
+
+    $ordered = [];
+    foreach (array_keys(CONSUS_COMPANIES) as $key) {
+        if (isset($byKey[$key])) {
+            $ordered[] = $byKey[$key];
+        }
+    }
+
+    return $ordered;
+}
+
+/**
+ * Verse rijen van bedrijven die in deze run al klaar zijn, plus de vorige
+ * rijen van bedrijven die nog niet (opnieuw) geladen zijn.
+ *
+ * @param array<string, array<int, array<string, mixed>>> $freshRows
+ * @param array<string, array<int, array<string, mixed>>> $previousRows
+ * @return array<int, array<string, mixed>>
+ */
+function consus_rows_keeping_unfetched(array $freshRows, array $previousRows): array
+{
+    $keep = [];
+    foreach ($previousRows as $key => $rows) {
+        if (!isset($freshRows[$key])) {
+            $keep[(string) $key] = true;
+        }
+    }
+
+    return consus_combine_snapshot_rows($freshRows, $keep, $previousRows);
+}
+
+/**
+ * Zolang een bedrijf nog niet in deze run klaar is, blijft de pagina dat zien.
+ * Een echte fout (stale) wordt niet nog eens als "bezig" gemeld.
+ *
+ * @param array<int, array<string, mixed>> $companyStats
+ * @param array<string, array<int, array<string, mixed>>> $freshRows
+ * @param array<int, array<string, mixed>> $errors
+ * @return array<int, array<string, mixed>>
+ */
+function consus_running_company_errors(array $companyStats, array $freshRows, array $errors): array
+{
+    foreach (array_keys(CONSUS_COMPANIES) as $key) {
+        if (isset($freshRows[$key])) {
+            continue;
+        }
+        $failed = false;
+        foreach ($companyStats as $stat) {
+            if (is_array($stat) && (string) ($stat['company_key'] ?? '') === $key && !empty($stat['stale'])) {
+                $failed = true;
+                break;
+            }
+        }
+        if ($failed) {
+            continue;
+        }
+        $errors[] = [
+            'company' => consus_company_display_name((string) $key),
+            'error' => 'Nachtelijke verversing is nog bezig.',
+        ];
+    }
+
+    return $errors;
+}
+
+/**
+ * @param array<string, mixed> $windows
+ * @param array<int, array<string, mixed>> $companyStats
+ * @param array<int, array<string, mixed>> $errors
+ * @param array<int, array<string, mixed>> $warnings
+ * @param array<string, array<int, array<string, mixed>>> $freshRows
+ * @param array<string, array<int, array<string, mixed>>> $previousRows
+ * @param array<int, mixed> $previousStats
+ */
+function consus_publish_nightly_snapshot(
+    array $windows,
+    array $companyStats,
+    array $errors,
+    array $warnings,
+    array $freshRows,
+    array $previousRows,
+    array $previousStats,
+    bool $running = false
+): array {
+    if ($running) {
+        $errors = consus_running_company_errors($companyStats, $freshRows, $errors);
+    }
+    $rows = consus_rows_keeping_unfetched($freshRows, $previousRows);
+    $catalog = consus_catalog_from_rows($rows);
+    $snapshot = [
+        'version' => CONSUS_SNAPSHOT_VERSION,
+        'generated_at' => gmdate('c'),
+        'as_of' => $windows['as_of'],
+        'windows' => $windows,
+        'companies' => consus_company_stats_for_publish($companyStats, $previousStats),
+        'errors' => $errors,
+        'warnings' => $warnings,
+        'vendors' => $catalog['vendors'],
+        'cost_centers' => $catalog['cost_centers'],
+        'locations' => $catalog['locations'],
+        'rows' => $rows,
+    ];
+    consus_with_snapshot_lock(static function () use ($snapshot): void {
+        consus_write_snapshot($snapshot);
+    });
+
+    return $snapshot;
+}
+
+function consus_run_nightly(bool $force = false): array
 {
     $discovered = auth_discover_companies_across_active_environments();
     $names = is_array($discovered['companies'] ?? null) ? $discovered['companies'] : [];
@@ -1710,6 +2355,20 @@ function consus_run_nightly(): array
     }
 
     $windows = consus_period_windows();
+    $previous = consus_read_snapshot();
+    $previousRows = [];
+    foreach (array_keys(CONSUS_COMPANIES) as $key) {
+        $previousRows[(string) $key] = consus_previous_rows_for_company($previous, (string) $key);
+    }
+    $previousStats = is_array($previous['companies'] ?? null) ? $previous['companies'] : [];
+    $resumeSnapshot = [
+        'version' => $previous['version'] ?? 0,
+        'as_of' => $previous['as_of'] ?? '',
+        'windows' => is_array($previous['windows'] ?? null) ? $previous['windows'] : [],
+        'companies' => $previousStats,
+    ];
+    unset($previous);
+
     $freshRows = [];
     $foreignSpills = [];
     $companyStats = [];
@@ -1726,13 +2385,70 @@ function consus_run_nightly(): array
         $companyStats[] = $stat;
     }
 
+    $publish = static function (bool $running) use (
+        &$windows,
+        &$companyStats,
+        &$errors,
+        &$warnings,
+        &$freshRows,
+        &$previousRows,
+        &$previousStats
+    ): array {
+        return consus_publish_nightly_snapshot(
+            $windows,
+            $companyStats,
+            $errors,
+            $warnings,
+            $freshRows,
+            $previousRows,
+            $previousStats,
+            $running
+        );
+    };
+
     foreach ($companies as $companyInfo) {
         $startedAt = hrtime(true);
         $company = (string) $companyInfo['company'];
         $companyKey = (string) $companyInfo['company_key'];
+        if (!$force && consus_company_refresh_is_current($resumeSnapshot, $companyKey, $windows)) {
+            $freshRows[$companyKey] = $previousRows[$companyKey] ?? [];
+            foreach ($foreignSpills[$companyKey] ?? [] as $path) {
+                if (is_string($path)) {
+                    consus_release_temp_file($path);
+                }
+            }
+            unset($foreignSpills[$companyKey]);
+            $existing = consus_find_company_stat($previousStats, $companyKey);
+            $companyStats[] = [
+                'company' => $company,
+                'company_key' => $companyKey,
+                'stale' => false,
+                'resumed' => true,
+                'refreshed_on' => $windows['as_of'],
+                'duration_ms' => (int) ($existing['duration_ms'] ?? 0),
+            ];
+            consus_write_progress([
+                'company' => $company,
+                'company_key' => $companyKey,
+                'step' => 'overgeslagen',
+                'pages' => 0,
+                'rows' => count($freshRows[$companyKey]),
+            ]);
+            $publish(true);
+            continue;
+        }
+
         $localItems = [];
         try {
-            $result = consus_collect_company($company, $companyKey, $localItems, $windows);
+            $result = consus_collect_company(
+                $company,
+                $companyKey,
+                $localItems,
+                $windows,
+                static function (array $progress): void {
+                    consus_write_progress($progress);
+                }
+            );
             $rolled = consus_rollup_items($localItems, $windows);
             $localItems = [];
             $freshRows[$companyKey] = $rolled['rows'];
@@ -1760,8 +2476,11 @@ function consus_run_nightly(): array
                 'company' => $company,
                 'company_key' => $companyKey,
                 'stale' => false,
+                'resumed' => false,
+                'refreshed_on' => $windows['as_of'],
                 'duration_ms' => (int) round((hrtime(true) - $startedAt) / 1_000_000),
             ];
+            $publish(true);
         } catch (Throwable $error) {
             $localItems = [];
             gc_collect_cycles();
@@ -1770,8 +2489,10 @@ function consus_run_nightly(): array
                 'company' => $company,
                 'company_key' => $companyKey,
                 'stale' => true,
+                'resumed' => false,
                 'duration_ms' => (int) round((hrtime(true) - $startedAt) / 1_000_000),
             ];
+            $publish(true);
         }
     }
 
@@ -1780,15 +2501,6 @@ function consus_run_nightly(): array
         if (!empty($stat['stale'])) {
             $staleKeys[(string) ($stat['company_key'] ?? '')] = true;
         }
-    }
-
-    $previousRows = [];
-    if ($staleKeys !== []) {
-        $previous = consus_read_snapshot();
-        foreach (array_keys($staleKeys) as $key) {
-            $previousRows[(string) $key] = consus_previous_rows_for_company($previous, (string) $key);
-        }
-        unset($previous);
     }
 
     foreach (array_keys($staleKeys) as $key) {
@@ -1838,29 +2550,17 @@ function consus_run_nightly(): array
             }
         }
     }
-    unset($foreignSpills);
+    unset($foreignSpills, $staleKeys);
 
-    $rows = consus_combine_snapshot_rows($freshRows, $staleKeys, $previousRows);
+    $snapshot = $publish(false);
     unset($freshRows, $previousRows);
-    $catalog = consus_catalog_from_rows($rows);
-
-    $snapshot = [
-        'version' => CONSUS_SNAPSHOT_VERSION,
-        'generated_at' => gmdate('c'),
-        'as_of' => $windows['as_of'],
-        'windows' => $windows,
-        'companies' => $companyStats,
-        'errors' => $errors,
-        'warnings' => $warnings,
-        'vendors' => $catalog['vendors'],
-        'cost_centers' => $catalog['cost_centers'],
-        'locations' => $catalog['locations'],
-        'rows' => $rows,
-    ];
-
-    consus_with_snapshot_lock(static function () use ($snapshot): void {
-        consus_write_snapshot($snapshot);
-    });
+    consus_write_progress([
+        'company' => '',
+        'company_key' => '',
+        'step' => 'klaar',
+        'pages' => 0,
+        'rows' => count($snapshot['rows'] ?? []),
+    ]);
 
     return $snapshot;
 }
