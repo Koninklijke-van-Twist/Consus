@@ -100,7 +100,8 @@ if ($costFilter !== '' && !isset($departmentValues[$costFilter])) {
 $vendors = consus_vendor_options($rows, $companyFilter, $costFilter);
 $vendorNumbers = [];
 foreach ($vendors as $vendor) {
-    $vendorNumbers[(string) ($vendor['vendor_no'] ?? '')] = true;
+    $number = (string) ($vendor['vendor_no'] ?? '');
+    $vendorNumbers[$number === '' ? '__none__' : $number] = true;
 }
 if (array_key_exists('vendor', $_GET)) {
     $vendorFilter = trim((string) $_GET['vendor']);
@@ -131,9 +132,13 @@ $consumption = is_array($summary['consumption'] ?? null) ? $summary['consumption
 $turnover = is_array($summary['turnover'] ?? null) ? $summary['turnover'] : [];
 
 $selectedVendorName = 'Alle leveranciers';
-foreach ($vendors as $vendor) {
-    if (is_array($vendor) && (string) ($vendor['vendor_no'] ?? '') === $vendorFilter && $vendorFilter !== '') {
-        $selectedVendorName = (string) ($vendor['vendor_name'] ?? $vendorFilter);
+if ($vendorFilter === '__none__') {
+    $selectedVendorName = 'Geen leverancier';
+} else {
+    foreach ($vendors as $vendor) {
+        if (is_array($vendor) && (string) ($vendor['vendor_no'] ?? '') === $vendorFilter && $vendorFilter !== '') {
+            $selectedVendorName = (string) ($vendor['vendor_name'] ?? $vendorFilter);
+        }
     }
 }
 ?><!doctype html>
@@ -266,8 +271,12 @@ foreach ($vendors as $vendor) {
                 <select id="vendor" name="vendor">
                     <option value="">Alle leveranciers</option>
                     <?php foreach ($vendors as $vendor): ?>
-                        <?php $number = (string) ($vendor['vendor_no'] ?? ''); if ($number === '') { continue; } ?>
-                        <option value="<?= consus_h($number) ?>"<?= $vendorFilter === $number ? ' selected' : '' ?>><?= consus_h($vendor['vendor_name'] ?? $number) ?></option>
+                        <?php
+                        $number = (string) ($vendor['vendor_no'] ?? '');
+                        $vendorValue = $number === '' ? '__none__' : $number;
+                        $vendorLabel = $number === '' ? 'Geen leverancier' : (string) ($vendor['vendor_name'] ?? $number);
+                        ?>
+                        <option value="<?= consus_h($vendorValue) ?>"<?= $vendorFilter === $vendorValue ? ' selected' : '' ?>><?= consus_h($vendorLabel) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
