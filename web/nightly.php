@@ -14,7 +14,8 @@ ini_set('max_execution_time', '1800');
 ini_set('memory_limit', '512M');
 ignore_user_abort(true);
 
-require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '/consus_auth.php';
+consus_load_auth();
 if (PHP_SAPI !== 'cli') {
     require_once __DIR__ . '/logincheck.php';
 }

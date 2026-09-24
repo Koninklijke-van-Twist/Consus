@@ -3,7 +3,8 @@
 ini_set('display_errors', '0');
 error_reporting(E_ALL);
 
-require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '/consus_auth.php';
+consus_load_auth();
 require_once __DIR__ . '/logincheck.php';
 require_once __DIR__ . '/consus_data.php';
 

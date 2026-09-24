@@ -20,7 +20,8 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   KVT en HVT zijn alleen een hint voor eigen magazijn. Werkorderverbruik is
   `Negative Adjmt.` met documentnummer `WO…`, plus `Assembly Consumption`.
 
-Lokaal, zodra `web/auth.php` op de machine staat:
+Lokaal gebruikt Consus `~/Repositories/auth.php` (naast de repo). Op de server
+blijft dat `web/auth.php`.
 
 ```sh
 php web/nightly.php
@@ -34,6 +35,9 @@ php tests/consus_data_test.php
 
 ## auth.php
 
-`web/auth.php` staat alleen op de server en wordt niet ingecheckt. Zelfde
-variabelen als Penates en Aequitas: `$baseUrl`, `$environment`, `$auth_list`
-en `$allowedUsers`. Geen wachtwoorden in deze repository.
+Geen `auth.php` in deze repository. Lokaal wordt eerst
+`~/Repositories/auth.php` geladen, dezelfde gedeelde file naast Penates en
+Aequitas. Bestaat die niet, dan `web/auth.php` op de server. Die staat in
+`.gitignore` en wordt bij de FTP-deploy niet overschreven. Variabelen zijn
+dezelfde als bij de andere apps: `$baseUrl`, `$environment`, `$auth_list` en
+`$allowedUsers`.
