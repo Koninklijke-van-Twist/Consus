@@ -1133,6 +1133,103 @@ function consus_merge_warm_company_rows(
 }
 
 /**
+ * Zelfde warme merge als de leveranciersrijen, maar per artikel. Voorraad komt
+ * uit de verse rollup. Verbruik houdt oudere maanden; de overlapdag wordt
+ * vervangen. Wisselt het artikel van leverancier, dan blijft oud verbruik op
+ * de vorige sleutel staan.
+ *
+ * @param array<int, array<string, mixed>> $previousArticles
+ * @param array<int, array<string, mixed>> $freshArticles
+ * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string,retain_days_from?:string} $windows
+ * @return array<int, array<string, mixed>>
+ */
+function consus_merge_warm_company_articles(
+    array $previousArticles,
+    array $freshArticles,
+    array $windows,
+    string $overlapFrom,
+    string $overlapThrough
+): array {
+    $previous = [];
+    foreach ($previousArticles as $article) {
+        if (!is_array($article)) {
+            continue;
+        }
+        $previous[consus_article_key($article)] = $article;
+    }
+    $fresh = [];
+    foreach ($freshArticles as $article) {
+        if (!is_array($article)) {
+            continue;
+        }
+        $fresh[consus_article_key($article)] = $article;
+    }
+
+    $merged = [];
+    foreach (array_unique(array_merge(array_keys($previous), array_keys($fresh))) as $key) {
+        $prev = $previous[$key] ?? null;
+        $new = $fresh[$key] ?? null;
+        $base = is_array($new) ? $new : (is_array($prev) ? $prev : null);
+        if (!is_array($base)) {
+            continue;
+        }
+
+        $consumption = is_array($prev) ? consus_copy_consumption_qty(is_array($prev['consumption'] ?? null) ? $prev['consumption'] : []) : consus_empty_consumption_qty();
+        if (is_array($prev)) {
+            consus_subtract_consumption_qty_days($consumption, $overlapFrom, $overlapThrough);
+        }
+        if (is_array($new)) {
+            consus_add_consumption_qty_months($consumption, is_array($new['consumption'] ?? null) ? $new['consumption'] : []);
+        }
+        consus_finalize_consumption_qty($consumption, $windows);
+
+        $inventory = is_array($new) ? (float) ($new['inventory'] ?? 0) : 0.0;
+        $safety = is_array($new) ? (float) ($new['safety_stock'] ?? 0) : 0.0;
+        $reorder = is_array($new) ? (float) ($new['reorder_point'] ?? 0) : 0.0;
+        if (
+            abs($inventory) < 0.0000001
+            && abs($safety) < 0.0000001
+            && abs($reorder) < 0.0000001
+            && !consus_consumption_qty_has_movement($consumption)
+        ) {
+            continue;
+        }
+
+        $description = trim((string) ($base['description'] ?? ''));
+        if (is_array($new) && trim((string) ($new['description'] ?? '')) !== '') {
+            $description = trim((string) $new['description']);
+        } elseif (is_array($prev) && trim((string) ($prev['description'] ?? '')) !== '') {
+            $description = trim((string) $prev['description']);
+        }
+        $vendorName = trim((string) ($base['vendor_name'] ?? ''));
+        if (is_array($new) && trim((string) ($new['vendor_name'] ?? '')) !== '') {
+            $vendorName = trim((string) $new['vendor_name']);
+        } elseif (is_array($prev) && trim((string) ($prev['vendor_name'] ?? '')) !== '') {
+            $vendorName = trim((string) $prev['vendor_name']);
+        }
+
+        $merged[] = [
+            'company_key' => (string) ($base['company_key'] ?? ''),
+            'company_name' => (string) ($base['company_name'] ?? ''),
+            'item_no' => trim((string) ($base['item_no'] ?? '')),
+            'description' => $description,
+            'vendor_no' => trim((string) ($base['vendor_no'] ?? '')),
+            'vendor_name' => $vendorName,
+            'cost_center' => trim((string) ($base['cost_center'] ?? '')),
+            'location' => strtoupper(trim((string) ($base['location'] ?? ''))),
+            'inventory' => $inventory,
+            'safety_stock' => $safety,
+            'reorder_point' => $reorder,
+            'consumption' => $consumption,
+        ];
+    }
+
+    usort($merged, consus_compare_articles(...));
+
+    return $merged;
+}
+
+/**
  * @return array{ledger_through?:string,ledger_overlap_from?:string}
  */
 function consus_ledger_marker_from_stat(array $stat): array
@@ -1283,6 +1380,7 @@ function consus_new_item_fact(string $companyKey, string $itemNo, string $compan
         'vendor_no' => '',
         'vendor_name' => '',
         'cost_center' => '',
+        'description' => '',
         'inventory' => 0.0,
         'safety_stock' => 0.0,
         'reorder_point' => 0.0,
@@ -1374,21 +1472,31 @@ function consus_apply_stock_row(array &$items, array $row, string $sourceCompany
     }
 
     $location = consus_location_code($row);
-    if (!empty($items[$key]['_stock_seen'][$location])) {
-        return;
-    }
-    $items[$key]['_stock_seen'][$location] = true;
-
     $metrics = consus_location_metrics($items[$key], $location);
-    $inventory = consus_scalar_float($row['Inventory'] ?? 0);
-    $safety = consus_scalar_float($row['Safety_Stock_Quantity'] ?? 0);
-    $reorder = consus_scalar_float($row['Reorder_Point'] ?? 0);
-    $items[$key]['by_location'][$location]['inventory'] = (float) $metrics['inventory'] + $inventory;
-    $items[$key]['by_location'][$location]['safety_stock'] = (float) $metrics['safety_stock'] + $safety;
-    $items[$key]['by_location'][$location]['reorder_point'] = (float) $metrics['reorder_point'] + $reorder;
-    $items[$key]['inventory'] += $inventory;
-    $items[$key]['safety_stock'] += $safety;
-    $items[$key]['reorder_point'] += $reorder;
+    $seen = $items[$key]['_stock_seen'][$location] ?? [];
+    if (!is_array($seen)) {
+        $seen = [];
+    }
+
+    // VoorraadPerBedrijf levert hetzelfde artikel op dezelfde locatie soms
+    // twee keer, eerst met nullen. De eerste niet-nul per veld wint; een
+    // nulregel blokkeert de echte voorraad niet en een tweede niet-nul telt
+    // niet nog eens op.
+    $incoming = [
+        'inventory' => consus_scalar_float($row['Inventory'] ?? 0),
+        'safety_stock' => consus_scalar_float($row['Safety_Stock_Quantity'] ?? 0),
+        'reorder_point' => consus_scalar_float($row['Reorder_Point'] ?? 0),
+    ];
+    foreach ($incoming as $field => $value) {
+        if (!empty($seen[$field]) || abs($value) < 0.0000001) {
+            continue;
+        }
+        $items[$key]['by_location'][$location][$field] = (float) ($metrics[$field] ?? 0) + $value;
+        $items[$key][$field] += $value;
+        $metrics[$field] = $items[$key]['by_location'][$location][$field];
+        $seen[$field] = true;
+    }
+    $items[$key]['_stock_seen'][$location] = $seen;
 }
 
 /**
@@ -1422,6 +1530,11 @@ function consus_apply_vendor_row(array &$items, array $row, string $companyKey):
     $costCenter = consus_scalar_string($row['COST_CENTER'] ?? '');
     if ($costCenter !== '') {
         $items[$key]['cost_center'] = $costCenter;
+    }
+
+    $description = consus_scalar_string($row['Description'] ?? '');
+    if ($description !== '') {
+        $items[$key]['description'] = $description;
     }
 }
 
@@ -1488,6 +1601,280 @@ function consus_apply_ledger_row(array &$items, array $row, string $companyKey, 
     consus_add_to_period_stats($items[$key]['by_location'][$location][$kind][$bucket], $date, $qty, $amount, $windows);
 }
 
+/**
+ * Werkorderverbruik per artikel, alleen hoeveelheid. Maanden en de overlapdag
+ * zijn nodig voor de warme merge; de pagina toont m/q/y.
+ *
+ * @return array{months:array<string, float>,days:array<string, float>,m:float,q:float,y:float}
+ */
+function consus_empty_consumption_qty(): array
+{
+    return [
+        'months' => [],
+        'days' => [],
+        'm' => 0.0,
+        'q' => 0.0,
+        'y' => 0.0,
+    ];
+}
+
+/**
+ * @param array<string, mixed> $buckets
+ * @return array{months:array<string, float>,days:array<string, float>,m:float,q:float,y:float}
+ */
+function consus_consumption_qty_from_buckets(array $buckets): array
+{
+    $stats = consus_empty_consumption_qty();
+    foreach ($buckets as $bucket => $bucketStats) {
+        if (!is_string($bucket) || !isset(CONSUS_BUCKETS[$bucket]) || !is_array($bucketStats)) {
+            continue;
+        }
+        foreach (['m', 'q', 'y'] as $period) {
+            $periodStats = is_array($bucketStats[$period] ?? null) ? $bucketStats[$period] : [];
+            $stats[$period] += (float) ($periodStats['qty'] ?? 0);
+        }
+        foreach ($bucketStats['months'] ?? [] as $month => $values) {
+            if (!is_array($values)) {
+                continue;
+            }
+            $month = (string) $month;
+            $stats['months'][$month] = ($stats['months'][$month] ?? 0.0) + (float) ($values['qty'] ?? 0);
+        }
+        foreach ($bucketStats['days'] ?? [] as $date => $values) {
+            if (!is_array($values)) {
+                continue;
+            }
+            $date = (string) $date;
+            $stats['days'][$date] = ($stats['days'][$date] ?? 0.0) + (float) ($values['qty'] ?? 0);
+        }
+    }
+
+    return $stats;
+}
+
+/**
+ * @param array<string, mixed> $stats
+ * @return array{months:array<string, float>,days:array<string, float>,m:float,q:float,y:float}
+ */
+function consus_copy_consumption_qty(array $stats): array
+{
+    $copy = consus_empty_consumption_qty();
+    foreach ($stats['months'] ?? [] as $month => $qty) {
+        if (is_array($qty)) {
+            $qty = $qty['qty'] ?? 0;
+        }
+        $copy['months'][(string) $month] = (float) $qty;
+    }
+    foreach ($stats['days'] ?? [] as $date => $qty) {
+        if (is_array($qty)) {
+            $qty = $qty['qty'] ?? 0;
+        }
+        $parsed = consus_parse_date($date);
+        if ($parsed === '') {
+            continue;
+        }
+        $copy['days'][$parsed] = (float) $qty;
+    }
+    foreach (['m', 'q', 'y'] as $period) {
+        $value = $stats[$period] ?? 0;
+        if (is_array($value)) {
+            $value = $value['qty'] ?? 0;
+        }
+        $copy[$period] = (float) $value;
+    }
+
+    return $copy;
+}
+
+/**
+ * @param array{months:array<string, float>,days:array<string, float>,m:float,q:float,y:float} $stats
+ */
+function consus_subtract_consumption_qty_days(array &$stats, string $fromDate, string $throughDate): void
+{
+    $fromDate = consus_parse_date($fromDate);
+    $throughDate = consus_parse_date($throughDate);
+    if ($fromDate === '' || $throughDate === '' || $fromDate > $throughDate) {
+        return;
+    }
+
+    foreach ($stats['days'] as $date => $qty) {
+        $parsed = consus_parse_date($date);
+        if ($parsed === '' || $parsed < $fromDate || $parsed > $throughDate) {
+            continue;
+        }
+        $month = substr($parsed, 0, 7);
+        if (isset($stats['months'][$month])) {
+            $stats['months'][$month] -= (float) $qty;
+        }
+        unset($stats['days'][$date]);
+    }
+}
+
+/**
+ * @param array{months:array<string, float>,days:array<string, float>} $target
+ * @param array<string, mixed> $source
+ */
+function consus_add_consumption_qty_months(array &$target, array $source): void
+{
+    foreach ($source['months'] ?? [] as $month => $qty) {
+        if (is_array($qty)) {
+            $qty = $qty['qty'] ?? 0;
+        }
+        $month = (string) $month;
+        $target['months'][$month] = ($target['months'][$month] ?? 0.0) + (float) $qty;
+    }
+    foreach ($source['days'] ?? [] as $date => $qty) {
+        if (is_array($qty)) {
+            $qty = $qty['qty'] ?? 0;
+        }
+        $parsed = consus_parse_date($date);
+        if ($parsed === '') {
+            continue;
+        }
+        $target['days'][$parsed] = ($target['days'][$parsed] ?? 0.0) + (float) $qty;
+    }
+}
+
+/**
+ * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string,retain_days_from?:string} $windows
+ * @param array{months:array<string, float>,days:array<string, float>,m:float,q:float,y:float} $stats
+ */
+function consus_finalize_consumption_qty(array &$stats, array $windows): void
+{
+    $stats['m'] = 0.0;
+    $stats['q'] = 0.0;
+    $stats['y'] = 0.0;
+    $months = [];
+    foreach ($stats['months'] as $month => $qty) {
+        if (!is_string($month) || preg_match('/^\d{4}-\d{2}$/', $month) !== 1) {
+            continue;
+        }
+        $monthStart = $month . '-01';
+        if ($monthStart < (string) ($windows['history_start'] ?? '') || $monthStart > (string) ($windows['as_of'] ?? '')) {
+            continue;
+        }
+        if (abs((float) $qty) < 0.0000001) {
+            continue;
+        }
+        $months[$month] = (float) $qty;
+        if ($monthStart >= (string) ($windows['month_start'] ?? '')) {
+            $stats['m'] += (float) $qty;
+        }
+        if ($monthStart >= (string) ($windows['quarter_start'] ?? '')) {
+            $stats['q'] += (float) $qty;
+        }
+        if ($monthStart >= (string) ($windows['year_start'] ?? '')) {
+            $stats['y'] += (float) $qty;
+        }
+    }
+    ksort($months);
+    $stats['months'] = $months;
+
+    $retainFrom = consus_parse_date($windows['retain_days_from'] ?? '');
+    $asOf = consus_parse_date($windows['as_of'] ?? '');
+    $days = [];
+    foreach ($stats['days'] as $date => $qty) {
+        $parsed = consus_parse_date($date);
+        if ($parsed === '' || abs((float) $qty) < 0.0000001) {
+            continue;
+        }
+        if ($retainFrom !== '' && $parsed < $retainFrom) {
+            continue;
+        }
+        if ($asOf !== '' && $parsed > $asOf) {
+            continue;
+        }
+        $days[$parsed] = (float) $qty;
+    }
+    ksort($days);
+    $stats['days'] = $days;
+}
+
+function consus_consumption_qty_has_movement(array $stats): bool
+{
+    return ($stats['months'] ?? []) !== [] || ($stats['days'] ?? []) !== [];
+}
+
+/**
+ * @param array<string, mixed> $item
+ * @param array<string, mixed> $metrics
+ * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string,retain_days_from?:string} $windows
+ * @return array<string, mixed>|null
+ */
+function consus_article_from_location(
+    array $item,
+    string $location,
+    array $metrics,
+    string $vendorNo,
+    string $vendorName,
+    string $costCenter,
+    array $windows
+): ?array {
+    $inventory = (float) ($metrics['inventory'] ?? 0);
+    $safety = (float) ($metrics['safety_stock'] ?? 0);
+    $reorder = (float) ($metrics['reorder_point'] ?? 0);
+    $consumption = consus_consumption_qty_from_buckets(is_array($metrics['consumption'] ?? null) ? $metrics['consumption'] : []);
+    consus_finalize_consumption_qty($consumption, $windows);
+    $itemNo = trim((string) ($item['item_no'] ?? ''));
+    if ($itemNo === '') {
+        return null;
+    }
+    if (
+        abs($inventory) < 0.0000001
+        && abs($safety) < 0.0000001
+        && abs($reorder) < 0.0000001
+        && !consus_consumption_qty_has_movement($consumption)
+    ) {
+        return null;
+    }
+
+    $companyKey = (string) ($item['company_key'] ?? '');
+
+    return [
+        'company_key' => $companyKey,
+        'company_name' => consus_company_display_name($companyKey, (string) ($item['company_name'] ?? '')),
+        'item_no' => $itemNo,
+        'description' => trim((string) ($item['description'] ?? '')),
+        'vendor_no' => $vendorNo,
+        'vendor_name' => $vendorName,
+        'cost_center' => $costCenter,
+        'location' => $location,
+        'inventory' => $inventory,
+        'safety_stock' => $safety,
+        'reorder_point' => $reorder,
+        'consumption' => $consumption,
+    ];
+}
+
+function consus_article_key(array $article): string
+{
+    return implode('|', [
+        (string) ($article['company_key'] ?? ''),
+        trim((string) ($article['vendor_no'] ?? '')),
+        trim((string) ($article['cost_center'] ?? '')),
+        strtoupper(trim((string) ($article['location'] ?? ''))),
+        trim((string) ($article['item_no'] ?? '')),
+    ]);
+}
+
+function consus_compare_articles(array $left, array $right): int
+{
+    return strnatcasecmp(
+        implode('|', [
+            (string) ($left['company_key'] ?? ''),
+            (string) ($left['item_no'] ?? ''),
+            (string) ($left['location'] ?? ''),
+            (string) ($left['vendor_no'] ?? ''),
+        ]),
+        implode('|', [
+            (string) ($right['company_key'] ?? ''),
+            (string) ($right['item_no'] ?? ''),
+            (string) ($right['location'] ?? ''),
+            (string) ($right['vendor_no'] ?? ''),
+        ])
+    );
+}
+
 function consus_compare_snapshot_rows(array $left, array $right): int
 {
     return strnatcasecmp(
@@ -1500,12 +1887,13 @@ function consus_compare_snapshot_rows(array $left, array $right): int
  * @param array<string, array<string, mixed>> $items
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
  * @param array<int, string> $unmappedLocations
- * @return array{rows:array<int, array<string, mixed>>,vendors:array<int, array{vendor_no:string,vendor_name:string}>,cost_centers:array<int, string>,locations:array<int, string>}
+ * @return array{rows:array<int, array<string, mixed>>,articles:array<int, array<string, mixed>>,vendors:array<int, array{vendor_no:string,vendor_name:string}>,cost_centers:array<int, string>,locations:array<int, string>}
  */
 function consus_rollup_items(array $items, array $windows, array $unmappedLocations = []): array
 {
-    unset($windows, $unmappedLocations);
+    unset($unmappedLocations);
     $grouped = [];
+    $articles = [];
     foreach ($items as $item) {
         if (!is_array($item)) {
             continue;
@@ -1569,11 +1957,16 @@ function consus_rollup_items(array $items, array $windows, array $unmappedLocati
             $grouped[$groupKey]['item_count'] = count($grouped[$groupKey]['item_nos']);
             consus_merge_bucket_maps($grouped[$groupKey]['sales'], is_array($metrics['sales'] ?? null) ? $metrics['sales'] : []);
             consus_merge_bucket_maps($grouped[$groupKey]['consumption'], is_array($metrics['consumption'] ?? null) ? $metrics['consumption'] : []);
+            $article = consus_article_from_location($item, $locationCode, $metrics, $vendorNo, $vendorName, $costCenter, $windows);
+            if ($article !== null) {
+                $articles[] = $article;
+            }
         }
     }
 
     $rows = array_values($grouped);
     usort($rows, consus_compare_snapshot_rows(...));
+    usort($articles, consus_compare_articles(...));
 
     $vendors = [];
     $costCenters = [];
@@ -1608,6 +2001,7 @@ function consus_rollup_items(array $items, array $windows, array $unmappedLocati
 
     return [
         'rows' => $rows,
+        'articles' => $articles,
         'vendors' => $vendorList,
         'cost_centers' => array_values($costCenterList),
         'locations' => array_values($locationList),
@@ -1810,6 +2204,71 @@ function consus_summarize(array $snapshot, string $companyKey, string $vendorNo,
     ];
 }
 
+/**
+ * Eén regel per artikel binnen de filters. Locaties worden opgeteld.
+ * Sortering is artikelnummer, daarna bedrijf.
+ *
+ * @param array<string, mixed> $snapshot
+ * @return array<int, array{company_key:string,company_name:string,item_no:string,description:string,safety_stock:float,inventory:float,consumption_m:float,consumption_q:float,consumption_y:float}>
+ */
+function consus_list_articles(array $snapshot, string $companyKey, string $vendorNo, string $costCenter, string $location = ''): array
+{
+    $matched = consus_matching_rows(
+        is_array($snapshot['articles'] ?? null) ? $snapshot['articles'] : [],
+        $companyKey,
+        $costCenter,
+        $vendorNo,
+        $location
+    );
+    $grouped = [];
+    foreach ($matched as $article) {
+        if (!is_array($article)) {
+            continue;
+        }
+        $itemNo = trim((string) ($article['item_no'] ?? ''));
+        if ($itemNo === '') {
+            continue;
+        }
+        $articleCompany = (string) ($article['company_key'] ?? '');
+        $key = $articleCompany . '|' . $itemNo;
+        if (!isset($grouped[$key])) {
+            $grouped[$key] = [
+                'company_key' => $articleCompany,
+                'company_name' => consus_company_display_name($articleCompany, (string) ($article['company_name'] ?? '')),
+                'item_no' => $itemNo,
+                'description' => trim((string) ($article['description'] ?? '')),
+                'safety_stock' => 0.0,
+                'inventory' => 0.0,
+                'consumption_m' => 0.0,
+                'consumption_q' => 0.0,
+                'consumption_y' => 0.0,
+            ];
+        }
+        $description = trim((string) ($article['description'] ?? ''));
+        if (strlen($description) > strlen($grouped[$key]['description'])) {
+            $grouped[$key]['description'] = $description;
+        }
+        $grouped[$key]['safety_stock'] += (float) ($article['safety_stock'] ?? 0);
+        $grouped[$key]['inventory'] += (float) ($article['inventory'] ?? 0);
+        $consumption = is_array($article['consumption'] ?? null) ? $article['consumption'] : [];
+        $grouped[$key]['consumption_m'] += (float) ($consumption['m'] ?? 0);
+        $grouped[$key]['consumption_q'] += (float) ($consumption['q'] ?? 0);
+        $grouped[$key]['consumption_y'] += (float) ($consumption['y'] ?? 0);
+    }
+
+    $list = array_values($grouped);
+    usort($list, static function (array $left, array $right): int {
+        $byItem = strnatcasecmp((string) $left['item_no'], (string) $right['item_no']);
+        if ($byItem !== 0) {
+            return $byItem;
+        }
+
+        return strnatcasecmp((string) $left['company_key'], (string) $right['company_key']);
+    });
+
+    return $list;
+}
+
 function consus_empty_snapshot(): array
 {
     $windows = consus_period_windows();
@@ -1826,7 +2285,50 @@ function consus_empty_snapshot(): array
         'cost_centers' => [],
         'locations' => [],
         'rows' => [],
+        'articles' => [],
     ];
+}
+
+/**
+ * Alle rijen zonder leverancier: de artikelkaart is niet geland. Een warme
+ * merge zou de historie op die lege sleutel laten staan. Dan het hele venster.
+ *
+ * @param array<int, mixed> $rows
+ */
+function consus_company_rows_need_full_ledger(array $rows): bool
+{
+    $saw = false;
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $saw = true;
+        if (trim((string) ($row['vendor_no'] ?? '')) !== '') {
+            return false;
+        }
+    }
+
+    return $saw;
+}
+
+/**
+ * Warm grootboek alleen als de snapshot deze versie is, er rijen zijn, en
+ * minstens één leverancier bekend is. Anders is de eerste nacht na een
+ * versiewissel of een mislukte artikelkaart koud.
+ *
+ * @param array<string, mixed> $snapshot
+ * @param array<int, mixed> $companyRows
+ */
+function consus_snapshot_can_warm_ledger(array $snapshot, array $companyRows): bool
+{
+    if ($companyRows === []) {
+        return false;
+    }
+    if ((int) ($snapshot['version'] ?? 0) !== CONSUS_SNAPSHOT_VERSION) {
+        return false;
+    }
+
+    return !consus_company_rows_need_full_ledger($companyRows);
 }
 
 function consus_read_snapshot(): array
@@ -2118,11 +2620,9 @@ function consus_each_entity_rows(
     $fetchRows ??= static function (string $url, array $auth, callable $onRow) use ($onPage): int {
         return consus_each_url_live($url, $auth, $onRow, $onPage);
     };
-    $attempts = [];
-    if ($optional !== []) {
-        $attempts[] = array_values(array_unique(array_merge($required, $optional)));
-    }
-    $attempts[] = $required;
+    $requiredLeft = array_values(array_unique($required));
+    $optionalLeft = array_values(array_unique($optional));
+    $dropped = [];
 
     $pageSizes = [];
     if (CONSUS_ODATA_PAGE_SIZE > 0) {
@@ -2131,54 +2631,89 @@ function consus_each_entity_rows(
     $pageSizes[] = 0;
 
     $lastError = null;
-    $attemptCount = count($attempts);
-    foreach ($attempts as $index => $fields) {
-        foreach ($pageSizes as $pageSizeIndex => $pageSize) {
-            $query = consus_entity_query($fields, $filter, $pageSize);
-            $url = consus_company_entity_url((string) $baseUrl, $environment, $company, $entitySet, $query);
-            $useOptionalAttempt = $index === 0 && $optional !== [];
-            try {
-                $fetched = consus_collect_rows_via_spill(
-                    static function (callable $onSpillRow) use ($fetchRows, $url, $auth): int {
-                        return $fetchRows($url, $auth, $onSpillRow);
-                    },
-                    $onRow
-                );
-                if ($useOptionalAttempt && $fetched['count'] === 0 && $index < $attemptCount - 1) {
-                    continue 2;
-                }
-                $missing = [];
-                if ($optional !== []) {
+    $guard = 0;
+    while ($guard++ < 40) {
+        $attempts = [];
+        if ($optionalLeft !== []) {
+            $attempts[] = array_values(array_unique(array_merge($requiredLeft, $optionalLeft)));
+        }
+        if ($requiredLeft !== []) {
+            $attempts[] = $requiredLeft;
+        }
+        if ($attempts === []) {
+            break;
+        }
+
+        $attemptCount = count($attempts);
+        $peelField = null;
+        foreach ($attempts as $index => $fields) {
+            foreach ($pageSizes as $pageSizeIndex => $pageSize) {
+                $query = consus_entity_query($fields, $filter, $pageSize);
+                $url = consus_company_entity_url((string) $baseUrl, $environment, $company, $entitySet, $query);
+                $useOptionalAttempt = $index === 0 && $optionalLeft !== [];
+                try {
+                    $fetched = consus_collect_rows_via_spill(
+                        static function (callable $onSpillRow) use ($fetchRows, $url, $auth): int {
+                            return $fetchRows($url, $auth, $onSpillRow);
+                        },
+                        $onRow
+                    );
+                    if ($useOptionalAttempt && $fetched['count'] === 0 && $index < $attemptCount - 1) {
+                        continue 2;
+                    }
+                    $missing = $dropped;
                     $sample = $fetched['sample'];
-                    foreach ($optional as $field) {
+                    foreach ($optionalLeft as $field) {
                         if (!is_array($sample) || !array_key_exists($field, $sample)) {
                             $missing[] = $field;
                         }
                     }
-                }
 
-                return [
-                    'count' => $fetched['count'],
-                    'optional_fields' => $missing === [] && $optional !== [],
-                    'missing_optional' => $missing,
-                    'page_size_fallback' => $pageSize === 0 && CONSUS_ODATA_PAGE_SIZE > 0 && $pageSizeIndex > 0,
-                ];
-            } catch (Throwable $error) {
-                $message = $error->getMessage();
-                if (
-                    str_contains($message, 'Tijdelijk OData-bestand bevat een onleesbare regel.')
-                    || str_contains($message, 'Tijdelijk OData-bestand is onvolledig.')
-                ) {
-                    throw $error;
+                    return [
+                        'count' => $fetched['count'],
+                        'optional_fields' => $missing === [] && $optional !== [],
+                        'missing_optional' => array_values(array_unique($missing)),
+                        'page_size_fallback' => $pageSize === 0 && CONSUS_ODATA_PAGE_SIZE > 0 && $pageSizeIndex > 0,
+                    ];
+                } catch (Throwable $error) {
+                    $message = $error->getMessage();
+                    if (
+                        str_contains($message, 'Tijdelijk OData-bestand bevat een onleesbare regel.')
+                        || str_contains($message, 'Tijdelijk OData-bestand is onvolledig.')
+                    ) {
+                        throw $error;
+                    }
+                    $lastError = $error;
+                    $rejected = consus_odata_rejected_field_name($error, $fields);
+                    if ($rejected !== null && (in_array($rejected, $optionalLeft, true) || (in_array($rejected, $requiredLeft, true) && count($requiredLeft) > 1))) {
+                        $peelField = $rejected;
+                        break 2;
+                    }
+                    $morePageSizes = $pageSizeIndex < count($pageSizes) - 1;
+                    if ($morePageSizes && consus_odata_error_is_page_size($error)) {
+                        continue;
+                    }
+                    break;
                 }
-                $lastError = $error;
-                $morePageSizes = $pageSizeIndex < count($pageSizes) - 1;
-                if ($morePageSizes && consus_odata_error_is_page_size($error)) {
-                    continue;
-                }
-                break;
             }
         }
+
+        if ($peelField === null) {
+            break;
+        }
+        $dropped[] = $peelField;
+        $optionalLeft = array_values(array_filter(
+            $optionalLeft,
+            static function (string $field) use ($peelField): bool {
+                return $field !== $peelField;
+            }
+        ));
+        $requiredLeft = array_values(array_filter(
+            $requiredLeft,
+            static function (string $field) use ($peelField): bool {
+                return $field !== $peelField;
+            }
+        ));
     }
 
     throw new RuntimeException(
@@ -2202,6 +2737,31 @@ function consus_odata_error_allows_entry_type_fallback(Throwable $error): bool
         || str_contains($lower, 'filter expression')
         || str_contains($lower, 'not supported')
         || str_contains($lower, 'niet ondersteund');
+}
+
+/**
+ * BC noemt een geweigerd veld tussen aanhalingstekens. Alleen een naam die
+ * in deze $select zit telt, zodat een paginagrootte of een optiefout geen
+ * veld wordt.
+ */
+function consus_odata_rejected_field_name(Throwable $error, array $fields): ?string
+{
+    if (consus_odata_error_is_page_size($error)) {
+        return null;
+    }
+
+    $message = $error->getMessage();
+    foreach ($fields as $field) {
+        $field = (string) $field;
+        if ($field === '') {
+            continue;
+        }
+        if (preg_match("/['\"]" . preg_quote($field, '/') . "['\"]/", $message) === 1) {
+            return $field;
+        }
+    }
+
+    return null;
 }
 
 function consus_odata_error_is_page_size(Throwable $error): bool
@@ -2825,8 +3385,11 @@ function consus_collect_entity_with_checkpoint(
     $existing = is_array($steps[$stepId] ?? null) ? $steps[$stepId] : null;
     if (is_array($existing) && !empty($existing['done'])) {
         $file = (string) ($existing['file'] ?? '');
-        $replayed = $file === '' ? 0 : consus_checkpoint_replay($file, $replayRow);
-        if ($replayed >= 0) {
+        $replayed = $file === '' ? -1 : consus_checkpoint_replay($file, $replayRow);
+        // Een lege tussenstap (0 regels) is geen geslaagde voorraad of
+        // artikelkaart. Opnieuw ophalen, anders publiceert hervatten nullen
+        // en een lege leverancier terwijl het grootboek wel terugkomt.
+        if ($replayed > 0) {
             return [
                 'replayed' => true,
                 'missing' => false,
@@ -3265,8 +3828,15 @@ function consus_collect_company(
                     $addWarning('Opgeslagen artikelen ontbreken en worden opnieuw opgehaald.');
                 }
                 $vendorResult = is_array($vendorOutcome['result'] ?? null) ? $vendorOutcome['result'] : [];
-                if (($vendorResult['optional_fields'] ?? null) === false && CONSUS_ITEM_OPTIONAL_FIELDS !== []) {
-                    $addWarning(CONSUS_ITEM_ENTITY . ': optionele velden (' . implode(', ', CONSUS_ITEM_OPTIONAL_FIELDS) . ') niet beschikbaar.');
+                $missingVendorFields = [];
+                foreach ($vendorResult['missing_optional'] ?? [] as $field) {
+                    $field = (string) $field;
+                    if ($field !== '' && !in_array($field, $missingVendorFields, true)) {
+                        $missingVendorFields[] = $field;
+                    }
+                }
+                if ($missingVendorFields !== []) {
+                    $addWarning(CONSUS_ITEM_ENTITY . ': velden niet beschikbaar (' . implode(', ', $missingVendorFields) . '). Nummer en leverancier blijven staan als die query wel lukte.');
                 }
                 if (!empty($vendorResult['page_size_fallback'])) {
                     $addWarning(consus_page_size_warning(CONSUS_ITEM_ENTITY));
@@ -3436,6 +4006,22 @@ function consus_previous_rows_for_company(array $snapshot, string $companyKey): 
     }
 
     return $rows;
+}
+
+/**
+ * @param array<string, mixed> $snapshot
+ * @return array<int, array<string, mixed>>
+ */
+function consus_previous_articles_for_company(array $snapshot, string $companyKey): array
+{
+    $articles = [];
+    foreach ($snapshot['articles'] ?? [] as $article) {
+        if (is_array($article) && (string) ($article['company_key'] ?? '') === $companyKey) {
+            $articles[] = $article;
+        }
+    }
+
+    return $articles;
 }
 
 function consus_progress_file(): string
@@ -3635,6 +4221,8 @@ function consus_running_company_errors(array $companyStats, array $freshRows, ar
  * @param array<string, array<int, array<string, mixed>>> $freshRows
  * @param array<string, array<int, array<string, mixed>>> $previousRows
  * @param array<int, mixed> $previousStats
+ * @param array<string, array<int, array<string, mixed>>> $freshArticles
+ * @param array<string, array<int, array<string, mixed>>> $previousArticles
  */
 function consus_publish_nightly_snapshot(
     array $windows,
@@ -3644,12 +4232,15 @@ function consus_publish_nightly_snapshot(
     array $freshRows,
     array $previousRows,
     array $previousStats,
-    bool $running = false
+    bool $running = false,
+    array $freshArticles = [],
+    array $previousArticles = []
 ): array {
     if ($running) {
         $errors = consus_running_company_errors($companyStats, $freshRows, $errors);
     }
     $rows = consus_rows_keeping_unfetched($freshRows, $previousRows);
+    $articles = consus_rows_keeping_unfetched($freshArticles, $previousArticles);
     $catalog = consus_catalog_from_rows($rows);
     $snapshot = [
         'version' => CONSUS_SNAPSHOT_VERSION,
@@ -3663,6 +4254,7 @@ function consus_publish_nightly_snapshot(
         'cost_centers' => $catalog['cost_centers'],
         'locations' => $catalog['locations'],
         'rows' => $rows,
+        'articles' => $articles,
     ];
     consus_with_snapshot_lock(static function () use ($snapshot): void {
         consus_write_snapshot($snapshot);
@@ -3683,8 +4275,10 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
     $windows = consus_period_windows();
     $previous = consus_read_snapshot();
     $previousRows = [];
+    $previousArticles = [];
     foreach (array_keys(CONSUS_COMPANIES) as $key) {
         $previousRows[(string) $key] = consus_previous_rows_for_company($previous, (string) $key);
+        $previousArticles[(string) $key] = consus_previous_articles_for_company($previous, (string) $key);
     }
     $previousStats = is_array($previous['companies'] ?? null) ? $previous['companies'] : [];
     $resumeSnapshot = [
@@ -3696,6 +4290,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
     unset($previous);
 
     $freshRows = [];
+    $freshArticles = [];
     $foreignSpills = [];
     $companyStats = [];
     $errors = [];
@@ -3718,7 +4313,9 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         &$warnings,
         &$freshRows,
         &$previousRows,
-        &$previousStats
+        &$previousStats,
+        &$freshArticles,
+        &$previousArticles
     ): array {
         return consus_publish_nightly_snapshot(
             $windows,
@@ -3728,7 +4325,9 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
             $freshRows,
             $previousRows,
             $previousStats,
-            $running
+            $running,
+            $freshArticles,
+            $previousArticles
         );
     };
 
@@ -3757,6 +4356,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         $companyKey = (string) $companyInfo['company_key'];
         if (!$force && consus_company_refresh_is_current($resumeSnapshot, $companyKey, $windows)) {
             $freshRows[$companyKey] = $previousRows[$companyKey] ?? [];
+            $freshArticles[$companyKey] = $previousArticles[$companyKey] ?? [];
             foreach ($foreignSpills[$companyKey] ?? [] as $path) {
                 if (is_string($path)) {
                     consus_release_temp_file($path);
@@ -3794,11 +4394,12 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         }
 
         $existing = consus_find_company_stat($previousStats, $companyKey);
+        $companyPrevious = $previousRows[$companyKey] ?? [];
         $plan = consus_ledger_plan(
             is_array($existing) ? $existing : [],
             $windows,
-            ($previousRows[$companyKey] ?? []) !== [],
-            $fullLedger
+            $companyPrevious !== [],
+            $fullLedger || !consus_snapshot_can_warm_ledger($resumeSnapshot, $companyPrevious)
         );
         $storedCheckpoint = $checkpoint['companies'][$companyKey] ?? null;
         if (!is_array($storedCheckpoint) || !consus_checkpoint_plan_matches($storedCheckpoint, $plan)) {
@@ -3833,11 +4434,19 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
             $rolled = consus_rollup_items($localItems, $windows);
             $localItems = [];
             $freshRows[$companyKey] = $rolled['rows'];
+            $freshArticles[$companyKey] = is_array($rolled['articles'] ?? null) ? $rolled['articles'] : [];
             unset($rolled);
             if ($plan['mode'] === 'warm') {
                 $freshRows[$companyKey] = consus_merge_warm_company_rows(
                     $previousRows[$companyKey] ?? [],
                     $freshRows[$companyKey],
+                    $windows,
+                    $plan['from'],
+                    $plan['overlap_through']
+                );
+                $freshArticles[$companyKey] = consus_merge_warm_company_articles(
+                    $previousArticles[$companyKey] ?? [],
+                    $freshArticles[$companyKey],
                     $windows,
                     $plan['from'],
                     $plan['overlap_through']
@@ -3924,6 +4533,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         $rolled = consus_rollup_items($foreignOnly, $windows);
         unset($foreignOnly);
         $freshRows[$key] = $rolled['rows'];
+        $freshArticles[$key] = is_array($rolled['articles'] ?? null) ? $rolled['articles'] : [];
         unset($rolled);
         foreach ($companyStats as $index => $stat) {
             if (is_array($stat) && (string) ($stat['company_key'] ?? '') === $key) {
@@ -3949,7 +4559,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
     unset($foreignSpills, $staleKeys);
 
     $snapshot = $publish(false);
-    unset($freshRows, $previousRows);
+    unset($freshRows, $previousRows, $freshArticles, $previousArticles);
     consus_write_progress([
         'company' => '',
         'company_key' => '',

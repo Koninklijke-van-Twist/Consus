@@ -22,6 +22,7 @@ function test_snapshot(array $items, array $windows): array
     $snapshot['as_of'] = $windows['as_of'];
     $snapshot['windows'] = $windows;
     $snapshot['rows'] = $rolled['rows'];
+    $snapshot['articles'] = $rolled['articles'];
     $snapshot['vendors'] = $rolled['vendors'];
     $snapshot['cost_centers'] = $rolled['cost_centers'];
 
@@ -280,6 +281,7 @@ consus_apply_vendor_row($items, [
     'Vendor_No' => 'PERK',
     'LVS_Vendor_Name' => 'Perkins Engines',
     'COST_CENTER' => 'MAG',
+    'Description' => 'Filterelement',
 ], 'kvt');
 consus_apply_vendor_row($items, [
     'No' => 'NIET-IN-VOORRAAD',
@@ -360,6 +362,36 @@ consus_apply_ledger_row($items, [
 
 test_assert(!isset($items['kvt|NIET-IN-VOORRAAD']), 'artikelkaart zonder voorraad of posten telt niet mee');
 test_assert((float) $items['kvt|A1']['inventory'] === 17.0, 'KVT-duplicaat telt niet op, M100 blijft wel');
+test_assert((string) $items['kvt|A1']['description'] === 'Filterelement', 'omschrijving komt van de artikelkaart');
+$zeroFirst = [];
+consus_apply_stock_row($zeroFirst, [
+    'Item_No' => 'Z1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Location_Code' => 'KVT',
+    'Inventory' => 0,
+    'Safety_Stock_Quantity' => 0,
+    'Reorder_Point' => 0,
+], 'Koninklijke van Twist');
+consus_apply_stock_row($zeroFirst, [
+    'Item_No' => 'Z1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Location_Code' => 'KVT',
+    'Inventory' => 12,
+    'Safety_Stock_Quantity' => 5,
+    'Reorder_Point' => 3,
+], 'Koninklijke van Twist');
+consus_apply_stock_row($zeroFirst, [
+    'Item_No' => 'Z1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Location_Code' => 'KVT',
+    'Inventory' => 40,
+    'Safety_Stock_Quantity' => 9,
+    'Reorder_Point' => 8,
+], 'Koninklijke van Twist');
+test_assert((float) $zeroFirst['kvt|Z1']['inventory'] === 12.0, 'nulregel blokkeert de echte voorraad niet');
+test_assert((float) $zeroFirst['kvt|Z1']['safety_stock'] === 5.0, 'nulregel blokkeert de veiligheidsvoorraad niet');
+test_assert((float) $zeroFirst['kvt|Z1']['reorder_point'] === 3.0, 'nulregel blokkeert het bestelpunt niet');
+test_assert((float) $zeroFirst['kvt|Z1']['by_location']['KVT']['inventory'] === 12.0, 'tweede niet-nul op dezelfde locatie telt niet op');
 test_assert((string) $items['kvt|A1']['cost_center'] === 'MAG', 'COST_CENTER op de artikelkaart wint van de dimensie');
 test_assert((string) $items['kvt|A2']['cost_center'] === 'WERK', 'dimensiewaarde vult een lege kostenplaats');
 test_assert(isset($items['kvt|A1']['by_location']['KVT']['sales']['eigen']), 'verkoopbucket bestaat na een post');
@@ -409,6 +441,50 @@ test_assert($departmentLocations === ['BYKLANT', 'LOC-ZZ'], 'locaties volgen de 
 
 $allDepartments = consus_summarize($snapshot, 'kvt', '', '');
 test_assert((int) $allDepartments['item_count'] === 2, 'lege afdeling betekent alle afdelingen');
+
+$perkinsArticles = consus_list_articles($snapshot, 'kvt', 'PERK', '', '');
+test_assert(count($perkinsArticles) === 1 && $perkinsArticles[0]['item_no'] === 'A1', 'Perkins KVT toont artikel A1');
+test_assert($perkinsArticles[0]['description'] === 'Filterelement', 'artikellijst houdt de omschrijving');
+test_assert(abs((float) $perkinsArticles[0]['safety_stock'] - 5) < 0.0001, 'veiligheidsvoorraad per artikel telt locaties op');
+test_assert(abs((float) $perkinsArticles[0]['inventory'] - 17) < 0.0001, 'voorraad per artikel telt locaties op');
+test_assert(abs((float) $perkinsArticles[0]['consumption_y']) < 0.0001, 'A1 heeft geen WO-verbruik');
+$perkinsWarehouseArticles = consus_list_articles($snapshot, 'kvt', 'PERK', '', 'KVT');
+test_assert(abs((float) $perkinsWarehouseArticles[0]['inventory'] - 10) < 0.0001, 'locatiefilter beperkt de artikelvoorraad');
+test_assert(abs((float) $perkinsWarehouseArticles[0]['safety_stock'] - 4) < 0.0001, 'locatiefilter beperkt de veiligheidsvoorraad');
+$departmentArticles = consus_list_articles($snapshot, 'kvt', '', 'WERK', '');
+test_assert(count($departmentArticles) === 1 && $departmentArticles[0]['item_no'] === 'A2', 'afdeling filtert de artikellijst');
+test_assert(abs((float) $departmentArticles[0]['consumption_m'] - 3) < 0.0001, 'WO-verbruik per artikel is de maandhoeveelheid');
+test_assert(abs((float) $departmentArticles[0]['consumption_q'] - 3) < 0.0001, 'WO-verbruik per artikel is het kwartaal');
+test_assert(abs((float) $departmentArticles[0]['consumption_y'] - 3) < 0.0001, 'WO-verbruik per artikel is het jaar');
+$bothArticles = consus_list_articles($snapshot, '', 'PERK', '', '');
+test_assert(array_column($bothArticles, 'item_no') === ['A1', 'B1'], 'artikelen van KVT en HVT blijven apart en op nummer');
+$articleInventory = 0.0;
+$articleSafety = 0.0;
+$articleConsumption = 0.0;
+foreach (consus_list_articles($snapshot, 'kvt', '', '', '') as $listed) {
+    $articleInventory += (float) $listed['inventory'];
+    $articleSafety += (float) $listed['safety_stock'];
+    $articleConsumption += (float) $listed['consumption_y'];
+}
+test_assert(abs($articleInventory - (float) $allDepartments['inventory']) < 0.0001, 'som van artikelvoorraad is de samenvatting');
+test_assert(abs($articleSafety - (float) $allDepartments['safety_stock']) < 0.0001, 'som van artikel-veiligheidsvoorraad is de samenvatting');
+test_assert(
+    abs($articleConsumption - (
+        (float) ($allDepartments['consumption']['eigen']['y']['qty'] ?? 0)
+        + (float) ($allDepartments['consumption']['egt']['y']['qty'] ?? 0)
+        + (float) ($allDepartments['consumption']['dropship']['y']['qty'] ?? 0)
+    )) < 0.0001,
+    'som van WO-verbruik per artikel is de samenvatting'
+);
+$blankVendorRows = [[
+    'company_key' => 'kvt',
+    'vendor_no' => '',
+    'inventory' => 0,
+]];
+test_assert(consus_company_rows_need_full_ledger($blankVendorRows), 'rijen zonder leverancier vragen een koud grootboek');
+test_assert(!consus_company_rows_need_full_ledger([['vendor_no' => 'PERK']]), 'een bekende leverancier blijft warm');
+test_assert(!consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION - 1], [['vendor_no' => 'PERK']]), 'oude snapshotversie is koud');
+test_assert(consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION], [['vendor_no' => 'PERK']]), 'huidige versie met leverancier mag warm');
 
 $low = consus_new_item_fact('kvt', 'L1', 'Koninklijke van Twist');
 $low['vendor_no'] = 'A';
@@ -717,6 +793,32 @@ try {
     test_assert($pageCalls === 2, 'te grote pagina probeert zonder $top');
     test_assert($pageRows === ['P1'], 'mislukte paginagrootte wordt niet toegepast');
     test_assert($pageFetched['page_size_fallback'] === true, 'terugval op BC-standaard is zichtbaar');
+
+    $peelCalls = 0;
+    $peeledRows = [];
+    $peeled = consus_each_entity_rows(
+        'Koninklijke van Twist',
+        CONSUS_ITEM_ENTITY,
+        ['No', 'Vendor_No'],
+        ['LVS_Vendor_Name', 'Description'],
+        '',
+        static function (array $row) use (&$peeledRows): void {
+            $peeledRows[] = (string) ($row['Vendor_No'] ?? '');
+        },
+        static function (string $url, array $auth, callable $onRow) use (&$peelCalls): int {
+            unset($auth);
+            $peelCalls++;
+            if (str_contains($url, 'Description')) {
+                throw new RuntimeException("HTTP 400 Could not find a property named 'Description' on type 'NAV.AppItemCard'");
+            }
+            $onRow(['No' => 'A1', 'Vendor_No' => 'PERK', 'LVS_Vendor_Name' => 'Perkins']);
+
+            return 1;
+        }
+    );
+    test_assert($peelCalls === 2, 'een geweigerd veld wordt uit de select gehaald');
+    test_assert(($peeledRows[0] ?? '') === 'PERK', 'leverancier blijft na het weghalen van het veld');
+    test_assert($peeled['missing_optional'] === ['Description'], 'het geweigerde veld staat bij de ontbrekende velden');
 
     $networkCalls = 0;
     try {
@@ -1039,6 +1141,112 @@ test_assert((float) $mergedByKey['PERK|M100']['inventory'] === 0.0, 'locatie zon
 test_assert(abs((float) $mergedByKey['PERK|M100']['sales']['eigen']['months']['2026-09']['qty'] - 5) < 0.0001, 'verkoop zonder nieuwe posten houdt de historie na aftrek van de overlap');
 test_assert(abs((float) $mergedByKey['ANDERS|KVT']['sales']['eigen']['months']['2026-09']['qty'] - 3) < 0.0001, 'nieuwe groep houdt alleen de warme delta');
 
+$previousArticles = [[
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'item_no' => 'A1',
+    'description' => 'Filterelement',
+    'vendor_no' => 'PERK',
+    'vendor_name' => 'Perkins',
+    'cost_center' => 'MAG',
+    'location' => 'KVT',
+    'inventory' => 9,
+    'safety_stock' => 2,
+    'reorder_point' => 1,
+    'consumption' => [
+        'months' => ['2026-08' => 4.0, '2026-09' => 10.0],
+        'days' => ['2026-09-23' => 3.0],
+        'm' => 10.0,
+        'q' => 14.0,
+        'y' => 14.0,
+    ],
+], [
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'item_no' => 'MOVED',
+    'description' => '',
+    'vendor_no' => 'PERK',
+    'vendor_name' => 'Perkins',
+    'cost_center' => 'MAG',
+    'location' => 'KVT',
+    'inventory' => 1,
+    'safety_stock' => 0,
+    'reorder_point' => 0,
+    'consumption' => [
+        'months' => ['2026-09' => 5.0],
+        'days' => ['2026-09-23' => 1.0],
+        'm' => 5.0,
+        'q' => 5.0,
+        'y' => 5.0,
+    ],
+]];
+$freshArticles = [[
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'item_no' => 'A1',
+    'description' => 'Filterelement',
+    'vendor_no' => 'PERK',
+    'vendor_name' => 'Perkins',
+    'cost_center' => 'MAG',
+    'location' => 'KVT',
+    'inventory' => 8,
+    'safety_stock' => 4,
+    'reorder_point' => 2,
+    'consumption' => [
+        'months' => ['2026-09' => 6.0],
+        'days' => ['2026-09-24' => 2.0],
+        'm' => 6.0,
+        'q' => 6.0,
+        'y' => 6.0,
+    ],
+], [
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'item_no' => 'MOVED',
+    'description' => 'Verhuisd',
+    'vendor_no' => 'ANDERS',
+    'vendor_name' => 'Anders',
+    'cost_center' => 'MAG',
+    'location' => 'KVT',
+    'inventory' => 3,
+    'safety_stock' => 1,
+    'reorder_point' => 0,
+    'consumption' => [
+        'months' => ['2026-09' => 2.0],
+        'days' => ['2026-09-24' => 2.0],
+        'm' => 2.0,
+        'q' => 2.0,
+        'y' => 2.0,
+    ],
+]];
+$mergedArticles = consus_merge_warm_company_articles($previousArticles, $freshArticles, $windows, '2026-09-23', '2026-09-23');
+$mergedArticleByKey = [];
+foreach ($mergedArticles as $mergedArticle) {
+    $mergedArticleByKey[$mergedArticle['vendor_no'] . '|' . $mergedArticle['item_no']] = $mergedArticle;
+}
+test_assert(abs((float) $mergedArticleByKey['PERK|A1']['consumption']['months']['2026-09'] - 13) < 0.0001, 'artikelverbruik is oud min overlap plus de nieuwe query');
+test_assert(abs((float) $mergedArticleByKey['PERK|A1']['consumption']['months']['2026-08'] - 4) < 0.0001, 'oudere verbruiksmaand van het artikel blijft');
+test_assert(abs((float) $mergedArticleByKey['PERK|A1']['consumption']['m'] - 13) < 0.0001, 'artikelmaand wordt herberekend');
+test_assert((float) $mergedArticleByKey['PERK|A1']['inventory'] === 8.0, 'artikelvoorraad komt uit de verse rollup');
+test_assert((float) $mergedArticleByKey['PERK|A1']['safety_stock'] === 4.0, 'artikel-veiligheidsvoorraad komt uit de verse rollup');
+test_assert(abs((float) $mergedArticleByKey['PERK|MOVED']['consumption']['months']['2026-09'] - 4) < 0.0001, 'oud verbruik blijft bij de vorige leverancier');
+test_assert((float) $mergedArticleByKey['PERK|MOVED']['inventory'] === 0.0, 'verhuisd artikel heeft geen voorraad meer bij de oude leverancier');
+test_assert((float) $mergedArticleByKey['ANDERS|MOVED']['inventory'] === 3.0, 'verhuisd artikel houdt de verse voorraad');
+test_assert(abs((float) $mergedArticleByKey['ANDERS|MOVED']['consumption']['m'] - 2) < 0.0001, 'nieuwe leverancier houdt alleen de warme delta');
+$listedMoved = consus_list_articles([
+    'articles' => $mergedArticles,
+], 'kvt', '', '', '');
+$movedByVendor = [];
+foreach ($mergedArticles as $mergedArticle) {
+    if ($mergedArticle['item_no'] === 'MOVED') {
+        $movedByVendor[$mergedArticle['vendor_no']] = true;
+    }
+}
+test_assert(isset($movedByVendor['PERK'], $movedByVendor['ANDERS']), 'verhuisd artikel blijft in beide leveranciersslices');
+$listedPerk = consus_list_articles(['articles' => $mergedArticles], 'kvt', 'PERK', '', 'KVT');
+test_assert(array_column($listedPerk, 'item_no') === ['A1', 'MOVED'], 'filter leverancier en locatie beperkt de artikellijst');
+unset($listedMoved);
+
 $octoberWindows = consus_period_windows(new DateTimeImmutable('2026-10-01', new DateTimeZone('Europe/Amsterdam')));
 $octoberMerged = consus_merge_warm_company_rows(
     [[
@@ -1131,6 +1339,63 @@ try {
     $secondStock = consus_collect_entity_with_checkpoint($stockSteps, 'kvt', 'voorraad', $replayStock, $fetchStock, $saveStock, true);
     test_assert($secondStock['replayed'] === true && $stockFetches === 1, 'voorraad wordt niet opnieuw opgehaald');
     test_assert($stockApplied === ['fetch', 'S1'], 'hervatte voorraad leest de opgeslagen regel');
+
+    $emptySteps = [
+        'voorraad' => [
+            'done' => true,
+            'file' => 'kvt-voorraad-leeg.ndjson',
+            'rows' => 0,
+        ],
+    ];
+    $emptyFile = consus_checkpoint_directory() . '/kvt-voorraad-leeg.ndjson';
+    file_put_contents($emptyFile, '');
+    $emptyFetches = 0;
+    $emptyApplied = [];
+    $emptyFetched = consus_collect_entity_with_checkpoint(
+        $emptySteps,
+        'kvt',
+        'voorraad',
+        static function (array $row) use (&$emptyApplied): void {
+            $emptyApplied[] = (string) ($row['Item_No'] ?? '');
+        },
+        static function (?array &$writer) use (&$emptyFetches): array {
+            $emptyFetches++;
+            consus_checkpoint_write_row($writer, [
+                'Item_No' => 'S2',
+                'Company_Name' => 'Koninklijke van Twist',
+                'Location_Code' => 'KVT',
+                'Inventory' => 6,
+                'Safety_Stock_Quantity' => 2,
+                'Reorder_Point' => 1,
+            ]);
+
+            return ['count' => 1, 'optional_fields' => true, 'missing_optional' => [], 'page_size_fallback' => false];
+        },
+        static function (): void {
+        },
+        true
+    );
+    test_assert($emptyFetched['replayed'] === false && $emptyFetches === 1, 'lege voorraadstap wordt opnieuw opgehaald');
+    test_assert($emptyApplied === [], 'lege tussenstap past geen regels toe');
+    $emptyReplay = [];
+    consus_collect_entity_with_checkpoint(
+        $emptySteps,
+        'kvt',
+        'voorraad',
+        static function (array $row) use (&$emptyReplay): void {
+            $emptyReplay[] = (string) ($row['Item_No'] ?? '');
+        },
+        static function (?array &$writer): array {
+            unset($writer);
+            test_assert(false, 'gevulde voorraadstap hoeft niet nog eens');
+
+            return ['count' => 0];
+        },
+        static function (): void {
+        },
+        true
+    );
+    test_assert($emptyReplay === ['S2'], 'na de nieuwe ophaalronde hervat de voorraad wel');
 
     $failSteps = [];
     $stockFailed = false;

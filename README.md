@@ -23,16 +23,21 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   bedrijf heeft, gebruikt nightly die voorraad. Zijn er wel vorige rijen,
   dan blijven die staan en worden de tijdelijke bestanden verwijderd.
 - Artikelposten blijven het rolling venster van twaalf maanden (maand, kwartaal,
-  jaar en de maandreeks). De snapshot bewaart totalen per leverancier/locatie,
-  geen artikelposten. `$select` laat `Entry_Type` weg en haalt omzet alleen bij
+  jaar en de maandreeks). De snapshot bewaart totalen per leverancier/locatie
+  en daarnaast compacte artikelregels (nummer, omschrijving als AppItemCard die
+  heeft, voorraad, veiligheidsvoorraad, bestelpunt en WO-verbruik per maand).
+  Geen ruwe artikelposten en geen verkoopmatrix per artikel. `$select` laat `Entry_Type` weg en haalt omzet alleen bij
   verkoop en `Document_No` alleen bij negatieve correctie. Die correctie vraagt
   `Document_No` van `WO` tot vóór `WP` (BC weigert `startswith`); PHP controleert
   het prefix daarna nog. Weigert BC het bereik, dan komt de volle set binnen en
   filtert PHP als voorheen. Elke query gebruikt `$top` 20000; een geweigerde
   paginagrootte valt terug op de BC-standaard. Bedrijven blijven na elkaar, niet
   parallel.
-- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 6, of
-  `full`) haalt nightly per kalendermaand het hele venster. Na een geslaagde
+- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 7, of
+  `full`) haalt nightly per kalendermaand het hele venster. Een oudere
+  snapshotversie is ook koud, net als een bedrijf waarvan elke rij nog een
+  lege leverancier heeft: anders blijft de historie op die lege groep staan.
+  Na een geslaagde
   run staat op het bedrijf `ledger_through` (de peildatum) en
   `ledger_overlap_from` (dezelfde dag). Een latere nacht vraagt alleen
   `Posting_Date ge ledger_overlap_from`: die ene overlapdag vangt late
@@ -71,6 +76,16 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   de gekozen locaties. Eigen en EGT delen die noemer. Dropship telt niet mee.
 - De pagina filtert eerst op afdeling, daarna op leverancier en locatie uit
   die cache. Perkins kan de eerste leverancierskeuze zijn en is te wissen.
+  Onder de totalen staat een artikeltabel op artikelnummer, met
+  veiligheidsvoorraad, voorraad van de gekozen locaties en WO-verbruik
+  (maand, kwartaal, jaar).
+- VoorraadPerBedrijf mag hetzelfde artikel op dezelfde locatie twee keer
+  sturen. De eerste niet-nul van voorraad, veiligheidsvoorraad en bestelpunt
+  wint; een eerdere nulregel blokkeert die waarde niet en een tweede niet-nul
+  telt niet dubbel. Een geweigerd veld op AppItemCard (bijvoorbeeld
+  omschrijving of `LVS_Vendor_Name`) wordt uit `$select` gehaald; nummer en
+  leverancier blijven. Een lege tussenstap voor voorraad of artikelen wordt
+  opnieuw opgehaald, niet als klaar overgeslagen.
 - Eigen, EGT en dropship zijn inkooppaden, geen locatiecodes: leeg is magazijn,
   `DROP_SHIP` of leverancier `90052` is dropship, leverancier `90101` is EGT.
   KVT en HVT zijn alleen een hint voor eigen magazijn. Werkorderverbruik is
