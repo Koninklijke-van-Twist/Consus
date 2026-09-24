@@ -1,9 +1,9 @@
-name: Deploy to FTP on main push
+name: Deploy to FTP on master push
 
 on:
   push:
     branches:
-      - main
+      - master
 
 permissions:
   contents: read
@@ -36,7 +36,7 @@ jobs:
           FTP_REMOTE_DIR: ${{ secrets.FTP_REMOTE_DIR }}
 
       # Deploy code; behoud runtime-data en de server-specifieke auth-configuratie.
-      # Zelfde mirror als Penates/Aequitas. Deze repo publiceert op main, niet master.
+      # Zelfde mirror als Penates/Aequitas. Deze repo publiceert op master, zoals de andere KVT-apps.
       - name: Deploy web/ to FTP (with delete & excludes)
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
