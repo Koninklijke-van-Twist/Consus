@@ -318,7 +318,7 @@ foreach ($vendors as $vendor) {
                 <table>
                     <thead>
                         <tr>
-                            <th>Locatiegroep</th>
+                            <th>Inkooppad</th>
                             <th class="numeric">Maand</th>
                             <th class="numeric">Kwartaal</th>
                             <th class="numeric">Jaar</th>
