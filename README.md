@@ -33,7 +33,7 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   filtert PHP als voorheen. Elke query gebruikt `$top` 20000; een geweigerde
   paginagrootte valt terug op de BC-standaard. Bedrijven blijven na elkaar, niet
   parallel.
-- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 9, of
+- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 10, of
   `full`) haalt nightly per kalendermaand het hele venster. Een oudere
   snapshotversie is ook koud, net als een bedrijf waarvan elke rij nog een
   lege leverancier heeft: anders blijft de historie op die lege groep staan.
@@ -87,10 +87,14 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   sturen. De eerste niet-nul van voorraad, veiligheidsvoorraad en bestelpunt
   wint; een eerdere nulregel blokkeert die waarde niet en een tweede niet-nul
   telt niet dubbel. `Company_Name` mag de lange bedrijfsnaam of het label
-  `KVT` / `HVT` zijn. Een gevulde naam die bij het andere bedrijf hoort wordt
-  niet aan de query-bron gehangen. Levert de eigen query geen aantallen, dan
-  gebruikt nightly die regels als ze in de query van het andere bedrijf
-  stonden. Bestelpunt leest `Reorder_Point`, en anders `Bestelpunt`.
+  `KVT` / `HVT` zijn, ook als `K.V.T.` of `KVT B.V.`. `KVT Gas` blijft erbuiten.
+  Een gevulde naam die bij het andere bedrijf hoort wordt niet aan de
+  query-bron gehangen; die regel gaat mee in de checkpoint en bij een
+  hervatting opnieuw naar dat bedrijf. Een checkpoint met alleen nullen wordt
+  opnieuw opgehaald. Levert de eigen query geen aantallen, dan gebruikt
+  nightly die regels als ze in de query van het andere bedrijf stonden.
+  Leverancier en afdeling van die voorraad komen op de bestaande regel als
+  die nog leeg was. Bestelpunt leest `Reorder_Point`, en anders `Bestelpunt`.
   Veiligheidsvoorraad en bestelpunt mogen op de artikelkaart staan als
   VoorraadPerBedrijf alleen de voorraad vult. Die waarde gaat één keer naar
   de locatie die al voorraad heeft. Blijft een van die twee 0, of ontbreekt

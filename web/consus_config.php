@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 9;
+const CONSUS_SNAPSHOT_VERSION = 10;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
