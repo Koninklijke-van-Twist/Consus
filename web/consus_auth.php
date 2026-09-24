@@ -5,11 +5,17 @@
  *
  * Lokaal wint ~/Repositories/auth.php (naast de app-repo's, dezelfde plek als
  * bij Tim). Op de server valt het terug op web/auth.php, dat niet in git staat.
+ * CONSUS_AUTH_FILE wijst desgewenst naar een ander bestand (tests).
  */
 
 function consus_auth_candidates(): array
 {
     $paths = [];
+    $override = getenv('CONSUS_AUTH_FILE');
+    if (is_string($override) && trim($override) !== '') {
+        $paths[] = trim($override);
+    }
+
     foreach (['HOME', 'USERPROFILE'] as $key) {
         $base = getenv($key);
         if (!is_string($base) || $base === '') {
@@ -34,7 +40,11 @@ function consus_auth_candidates(): array
 
 function consus_load_auth(): void
 {
-    global $baseUrl;
+    // require_once binnen deze functie erft de lokale scope. Zonder global
+    // blijven toewijzingen in auth.php lokaal en zijn ze na return weg.
+    // logincheck.php doet dan array_any() op null en de pagina geeft HTTP 500.
+    global $baseUrl, $allowedUsers, $auth_list, $environment, $auth, $primaryEnvironment;
+
     if (isset($baseUrl) && is_string($baseUrl) && $baseUrl !== '') {
         return;
     }
