@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 11;
+const CONSUS_SNAPSHOT_VERSION = 12;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
@@ -119,6 +119,8 @@ const CONSUS_STOCK_OPTIONAL_FIELDS = [
     'ReorderPoint',
     'Veiligheidsvoorraad',
     'SafetyStockQuantity',
+    'Global_Dimension_1_Code',
+    'LVS_Global_Dimension_1_Code',
     'CompanyName',
     'Bedrijfsnaam',
     'Bedrijf',
@@ -148,6 +150,7 @@ const CONSUS_ITEM_OPTIONAL_FIELDS = [
     'Kostenplaats',
     'Afdeling',
     'Global_Dimension_1_Code',
+    'LVS_Global_Dimension_1_Code',
     'Shortcut_Dimension_1_Code',
     'Safety_Stock_Quantity',
     'Veiligheidsvoorraad',
@@ -176,16 +179,27 @@ const CONSUS_LEDGER_OPTIONAL_FIELDS = [
     'PurchasingCode',
     CONSUS_ILE_VENDOR_NO_FIELD,
     'Buy_from_Vendor_No',
+    'Global_Dimension_1_Code',
+    'LVS_Global_Dimension_1_Code',
 ];
 
 /**
- * Kostenplaats voor de latere afdelingsdropdown.
- * Eerst dimensiecode 15 op artikel (tabel 27). Levert die niets, dan
- * KOSTENPLAATS, AFDELING en CC — nog steeds gefilterd, nooit de hele pagina.
- * De dimensiewaarde is de afdeling en wordt niet gefilterd. Een COST_CENTER-
- * veld op AppItemCard wint van deze dimensie als het gevuld is. Globale
- * dimensie 2 wordt niet gebruikt.
+ * Afdeling is kostenplaats: Global Dimension 1, hetzelfde als Demeter.
+ * De code komt uit GeneralLedgerSetup (bijvoorbeeld SALES_DEPARTMENT), niet
+ * uit een vast nummer. DimensionValueList levert de namen. DefaultDimensions
+ * koppelt die code aan het artikel (tabel 27). Globale dimensie 2 niet.
  */
+const CONSUS_GL_SETUP_ENTITY = 'GeneralLedgerSetup';
+const CONSUS_GL_SETUP_FIELDS = [
+    'Global_Dimension_1_Code',
+];
+const CONSUS_DIMENSION_VALUE_ENTITY = 'DimensionValueList';
+const CONSUS_DIMENSION_VALUE_FIELDS = [
+    'Dimension_Code',
+    'Code',
+    'Name',
+    'Blocked',
+];
 const CONSUS_DIMENSION_ENTITY = 'DefaultDimensions';
 const CONSUS_DIMENSION_FIELDS = [
     'No',
@@ -199,7 +213,6 @@ const CONSUS_DIMENSION_OPTIONAL_FIELDS = [
     'Value_Code',
 ];
 const CONSUS_DIMENSION_TABLE_ID = 27;
-const CONSUS_COST_CENTER_DIMENSION_CODE = '15';
 
 /**
  * Aantal rijen per OData-pagina ($top). 20000 is de gebruikelijke BC-bovengrens,

@@ -87,14 +87,23 @@ if (!isset(CONSUS_COMPANIES[$companyFilter])) {
 }
 
 $rows = is_array($snapshot['rows'] ?? null) ? $snapshot['rows'] : [];
-$departments = consus_department_options($rows, $companyFilter);
+$departmentCatalog = is_array($snapshot['departments'] ?? null) ? $snapshot['departments'] : [];
+$departmentChoices = consus_department_choices($rows, $departmentCatalog, $companyFilter);
 $costFilter = trim((string) ($_GET['cost_center'] ?? ''));
 $departmentValues = [];
-foreach ($departments as $department) {
-    $departmentValues[$department === '' ? '__none__' : $department] = true;
+foreach ($departmentChoices as $departmentChoice) {
+    $departmentValues[(string) ($departmentChoice['value'] ?? '')] = true;
 }
 if ($costFilter !== '' && !isset($departmentValues[$costFilter])) {
-    $costFilter = '';
+    $matchedDepartment = '';
+    foreach ($departmentChoices as $departmentChoice) {
+        $departmentValue = (string) ($departmentChoice['value'] ?? '');
+        if ($departmentValue !== '__none__' && consus_cost_centers_match($departmentValue, $costFilter)) {
+            $matchedDepartment = $departmentValue;
+            break;
+        }
+    }
+    $costFilter = $matchedDepartment;
 }
 
 $vendors = consus_vendor_options($rows, $companyFilter, $costFilter);
@@ -263,9 +272,12 @@ if ($vendorFilter === '__none__') {
                 <label for="cost_center">Afdeling</label>
                 <select id="cost_center" name="cost_center">
                     <option value="">Alle afdelingen</option>
-                    <?php foreach ($departments as $department): ?>
-                        <?php $departmentValue = $department === '' ? '__none__' : $department; ?>
-                        <option value="<?= consus_h($departmentValue) ?>"<?= $costFilter === $departmentValue ? ' selected' : '' ?>><?= consus_h($department === '' ? '(geen afdeling)' : $department) ?></option>
+                    <?php foreach ($departmentChoices as $departmentChoice): ?>
+                        <?php
+                        $departmentValue = (string) ($departmentChoice['value'] ?? '');
+                        $departmentLabel = $departmentValue === '__none__' ? '(geen afdeling)' : (string) ($departmentChoice['label'] ?? $departmentValue);
+                        ?>
+                        <option value="<?= consus_h($departmentValue) ?>"<?= $costFilter === $departmentValue ? ' selected' : '' ?>><?= consus_h($departmentLabel) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>

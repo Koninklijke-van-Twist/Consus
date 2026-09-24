@@ -33,7 +33,7 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   filtert PHP als voorheen. Elke query gebruikt `$top` 20000; een geweigerde
   paginagrootte valt terug op de BC-standaard. Bedrijven blijven na elkaar, niet
   parallel.
-- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 11, of
+- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 12, of
   `full`) haalt nightly per kalendermaand het hele venster. Een oudere
   snapshotversie is ook koud, net als een bedrijf waarvan elke rij nog een
   lege leverancier heeft: anders blijft de historie op die lege groep staan.
@@ -125,12 +125,19 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   voorraad is, of ontbreekt de locatie terwijl er wel voorraad is, dan zet
   nightly een opmerking in de snapshot. Ontbreekt de afdeling, ook als de
   voorraad nog 0 is, dan eveneens. De pagina toont die onder de kop “De
-  nachtrun is afgerond, met opmerkingen.” Kostenplaats komt van `COST_CENTER`
-  of globale dimensie 1 op de artikelkaart, en anders van DefaultDimensions
-  dimensie 15. Levert dimensie 15 niets, dan volgen `KOSTENPLAATS`,
-  `AFDELING` en `CC`, nog steeds gefilterd. Weigert BC het tabelfilter, dan
-  blijft het filter op dezelfde dimensiecode staan. Globale dimensie 2 wordt
-  niet gelezen.
+  nachtrun is afgerond, met opmerkingen.” Afdeling is kostenplaats en is
+  Global Dimension 1, hetzelfde als Demeter. Nightly leest
+  `GeneralLedgerSetup.Global_Dimension_1_Code` (bijvoorbeeld
+  `SALES_DEPARTMENT`, niet een vast nummer 15) en daarna
+  `DimensionValueList` voor die code, alleen ongeblokkeerde numerieke codes
+  onder 100 met een tekstnaam. De dropdown toont `code - naam`. Op de regel
+  staat de genormaliseerde code (`05` en `5` zijn gelijk); een lege afdeling
+  blijft `(geen afdeling)` met waarde `__none__`. De code op het artikel komt
+  van `Global_Dimension_1_Code` of `LVS_Global_Dimension_1_Code` op de
+  artikelkaart, de voorraad of de artikelpost, en anders van
+  DefaultDimensions voor diezelfde setupcode. Weigert BC het tabelfilter,
+  dan blijft het filter op die code staan. Globale dimensie 2 wordt niet
+  gelezen.
   Een geweigerd veld op AppItemCard (bijvoorbeeld
   omschrijving of `LVS_Vendor_Name`) wordt uit `$select` gehaald; nummer en
   leverancier blijven. Een lege tussenstap voor voorraad of artikelen wordt
