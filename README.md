@@ -29,10 +29,20 @@ blijft dat `web/auth.php`.
 php web/nightly.php
 ```
 
+Ingelogde diagnose bij een kale HTTP 500: open `nightly.php?log_debug=1`
+(`true` en `yes` mogen ook). Alleen ná de bestaande logincheck; anoniem
+blijft het 403, zonder JSON-debug. Het verzoek zet foutrapportage aan en
+probeert bij een fatal of timeout alsnog JSON te sturen (`ok`, `error`,
+`debug.type`, `message`, `file`, `line`). Een nog steeds lege 500 komt dan
+van de proxy of van Apache die de worker stopt, niet van een PHP-fatal die
+nog kon schrijven. Zonder parameter en op de CLI verandert er niets.
+Geen tokens, geen inhoud van `auth.php`, geen volledige `$_SERVER`.
+
 Classificatietests, zonder Business Central:
 
 ```sh
 php tests/consus_data_test.php
+php tests/nightly_debug_test.php
 ```
 
 ## auth.php
