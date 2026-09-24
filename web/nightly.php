@@ -306,8 +306,8 @@ if (defined('CONSUS_NIGHTLY_LIBRARY')) {
     return;
 }
 
-set_time_limit(1800);
-ini_set('max_execution_time', '1800');
+set_time_limit(10800);
+ini_set('max_execution_time', '10800');
 ini_set('memory_limit', '512M');
 ignore_user_abort(true);
 
