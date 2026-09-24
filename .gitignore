@@ -8,3 +8,4 @@ web/analytics/*.sqlite-*
 web/data/*.json
 web/data/*.json.tmp.*
 web/data/*.lock
+web/data/*.checkpoint/

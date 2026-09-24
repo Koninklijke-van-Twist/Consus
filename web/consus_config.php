@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 4;
+const CONSUS_SNAPSHOT_VERSION = 6;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
@@ -122,14 +122,15 @@ const CONSUS_ITEM_OPTIONAL_FIELDS = [
 ];
 
 const CONSUS_LEDGER_ENTITY = 'ItemLedgerEntries';
+/**
+ * Velden die elke artikelpost nodig heeft. Entry_Type zit al in $filter.
+ * Omzet en documentnummer komen er alleen bij voor de query die ze gebruikt.
+ */
 const CONSUS_LEDGER_FIELDS = [
     'Item_No',
-    'Entry_Type',
     'Quantity',
-    'Sales_Amount_Actual',
     'Posting_Date',
     'Location_Code',
-    'Document_No',
 ];
 /** Inkooppad op de artikelpost. Beperkt de opgehaalde set niet. */
 const CONSUS_LEDGER_OPTIONAL_FIELDS = [
@@ -152,4 +153,10 @@ const CONSUS_DIMENSION_FIELDS = [
 const CONSUS_DIMENSION_TABLE_ID = 27;
 const CONSUS_COST_CENTER_DIMENSION_CODE = '15';
 
-const CONSUS_ODATA_BATCH_SIZE = 12;
+/**
+ * Aantal rijen per OData-pagina ($top). 20000 is de gebruikelijke BC-bovengrens,
+ * zodat een pagina niet uit tientallen regels bestaat en ook niet de hele
+ * artikelposthistorie in één response stopt. Weigert BC die grootte, dan
+ * valt nightly terug op de serverstandaard.
+ */
+const CONSUS_ODATA_PAGE_SIZE = 20000;

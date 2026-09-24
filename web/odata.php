@@ -60,9 +60,13 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
     return $all;
 }
 
-function odata_get_json(string $url, array $auth): array
+function odata_init_curl(array $auth)
 {
-    $ch = curl_init($url);
+    $ch = curl_init();
+    if ($ch === false) {
+        throw new Exception('cURL kon niet worden gestart.');
+    }
+
     $userAgent = 'Consus-ODataClient/1.0 (Windows; nl-NL)';
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -71,6 +75,7 @@ function odata_get_json(string $url, array $auth): array
         CURLOPT_TIMEOUT => 300,
         CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
         CURLOPT_USERAGENT => $userAgent,
+        CURLOPT_ENCODING => '',
         CURLOPT_HTTPHEADER => [
             "Accept: application/json",
             "Accept-Language: nl-NL,nl;q=0.9,en;q=0.8",
@@ -91,6 +96,13 @@ function odata_get_json(string $url, array $auth): array
     // curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     // curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
 
+    return $ch;
+}
+
+function odata_curl_json($ch, string $url): array
+{
+    curl_setopt($ch, CURLOPT_URL, $url);
+
     $raw = curl_exec($ch);
     if ($raw === false) {
         throw new Exception("cURL error: " . curl_error($ch));
@@ -108,6 +120,16 @@ function odata_get_json(string $url, array $auth): array
     }
 
     return $json;
+}
+
+function odata_get_json(string $url, array $auth): array
+{
+    $ch = odata_init_curl($auth);
+    try {
+        return odata_curl_json($ch, $url);
+    } finally {
+        curl_close($ch);
+    }
 }
 
 function build_cache_key(string $url, array $auth): string

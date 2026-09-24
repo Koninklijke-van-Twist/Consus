@@ -47,11 +47,22 @@ test_assert(consus_procurement_bucket('', 'PERK') === 'eigen', 'artikelleveranci
 test_assert(consus_procurement_bucket('', '') === 'eigen' && consus_procurement_bucket_from_row(['Location_Code' => 'BYKLANT']) === 'eigen', 'locatiecode maakt geen dropship');
 
 test_assert(CONSUS_SALES_ENTRY_TYPES === ['Sale'], 'verkoop is de Engelse optienaam Sale');
-$salesFilters = consus_ledger_filters(CONSUS_SALES_ENTRY_TYPES, '2025-10-01');
+test_assert(CONSUS_ODATA_PAGE_SIZE === 20000, 'pagina is groot genoeg om round-trips te beperken');
+$chunks = consus_ledger_date_chunks($windows);
+test_assert(count($chunks) === 12, 'artikelposten lopen per maand door het twaalfmaandsvenster');
+test_assert($chunks[0] === ['from' => '2025-10-01', 'to' => '2025-11-01'], 'eerste maand start op history_start');
+test_assert($chunks[11] === ['from' => '2026-09-01', 'to' => '2026-09-25'], 'lopende maand stopt de dag na as_of');
+$previousChunkEnd = $windows['history_start'];
+foreach ($chunks as $chunk) {
+    test_assert($chunk['from'] === $previousChunkEnd, 'maanden sluiten op elkaar aan');
+    $previousChunkEnd = $chunk['to'];
+}
+test_assert($previousChunkEnd === '2026-09-25', 'laatste grens is de dag na as_of');
+$salesFilters = consus_ledger_filters(CONSUS_SALES_ENTRY_TYPES, $chunks[0]['from'], $chunks[0]['to'], '', true, false);
 test_assert(count($salesFilters) === 1, 'verkoop is één Entry_Type-query');
 test_assert(
-    $salesFilters[0]['$filter'] === "Entry_Type eq 'Sale' and Posting_Date ge 2025-10-01",
-    'verkoopfilter gebruikt de Engelse optienaam'
+    $salesFilters[0]['$filter'] === "Entry_Type eq 'Sale' and Posting_Date ge 2025-10-01 and Posting_Date lt 2025-11-01",
+    'verkoopfilter gebruikt de Engelse optienaam en een maandgrens'
 );
 test_assert(!str_contains($salesFilters[0]['$filter'], 'Verkoop'), 'Nederlands bijschrift Verkoop is geen optie op ItemLedgerEntries');
 foreach ($salesFilters as $salesQuery) {
@@ -63,7 +74,12 @@ foreach ($salesFilters as $salesQuery) {
     test_assert(!str_contains($salesQuery['$filter'], 'DROP_SHIP'), 'verkoopfilter niet vast op inkoopcode');
     test_assert(!str_contains($salesQuery['$filter'], 'COST_CENTER'), 'verkoopfilter niet vast op afdeling');
     test_assert(!str_contains($salesQuery['$filter'], 'Location_Code'), 'verkoop haalt alle locaties op');
+    test_assert(!str_contains($salesQuery['$filter'], 'Document_No'), 'verkoop filtert niet op documentnummer');
     test_assert(str_contains($salesQuery['$select'], 'Location_Code'), 'locatiecode blijft in de select');
+    test_assert(str_contains($salesQuery['$select'], 'Sales_Amount_Actual'), 'verkoop houdt omzet');
+    test_assert(!str_contains($salesQuery['$select'], 'Document_No'), 'verkoop haalt geen documentnummer op');
+    test_assert(!str_contains($salesQuery['$select'], 'Entry_Type'), 'entry type staat al in het filter');
+    test_assert((int) $salesQuery['$top'] === CONSUS_ODATA_PAGE_SIZE, 'verkoop gebruikt de afgesproken paginagrootte');
 }
 $combinedSales = false;
 try {
@@ -79,16 +95,21 @@ test_assert($woParts[0]['document_prefix'] === 'WO', 'negatieve correctie houdt 
 test_assert($woParts[1]['document_prefix'] === '', 'assemblageverbruik heeft geen documentprefix');
 test_assert($woParts[0]['entry_types'] === ['Negative Adjmt.'], 'primair verbruik is Negative Adjmt.');
 test_assert($woParts[1]['entry_types'] === ['Assembly Consumption'], 'tweede verbruikquery is Assembly Consumption');
-$primaryFilters = consus_ledger_filters($woParts[0]['entry_types'], '2025-10-01');
-$alsoFilters = consus_ledger_filters($woParts[1]['entry_types'], '2025-10-01');
+$primaryFilters = consus_ledger_filters($woParts[0]['entry_types'], '2025-10-01', '2025-11-01', $woParts[0]['document_prefix'], false);
+$alsoFilters = consus_ledger_filters($woParts[1]['entry_types'], '2025-10-01', '2025-11-01', '', false);
 test_assert(
-    $primaryFilters[0]['$filter'] === "Entry_Type eq 'Negative Adjmt.' and Posting_Date ge 2025-10-01",
-    'primair verbruik is Negative Adjmt. zonder startswith'
+    $primaryFilters[0]['$filter'] === "Entry_Type eq 'Negative Adjmt.' and Posting_Date ge 2025-10-01 and Posting_Date lt 2025-11-01 and Document_No ge 'WO' and Document_No lt 'WP'",
+    'primair verbruik is Negative Adjmt. met een WO-bereik in plaats van startswith'
 );
 test_assert(
-    $alsoFilters[0]['$filter'] === "Entry_Type eq 'Assembly Consumption' and Posting_Date ge 2025-10-01",
+    $alsoFilters[0]['$filter'] === "Entry_Type eq 'Assembly Consumption' and Posting_Date ge 2025-10-01 and Posting_Date lt 2025-11-01",
     'assemblageverbruik is een eigen query'
 );
+test_assert(str_contains($primaryFilters[0]['$select'], 'Document_No'), 'negatieve correctie houdt documentnummer voor de PHP-check');
+test_assert(!str_contains($primaryFilters[0]['$select'], 'Sales_Amount_Actual'), 'verbruik haalt geen omzet op');
+test_assert(!str_contains($alsoFilters[0]['$select'], 'Document_No'), 'assemblageverbruik haalt geen documentnummer op');
+test_assert(!str_contains($alsoFilters[0]['$select'], 'Sales_Amount_Actual'), 'assemblageverbruik haalt geen omzet op');
+test_assert(consus_document_prefix_bounds('WO') === ['from' => 'WO', 'to' => 'WP'], 'WO-bereik loopt tot WP');
 test_assert(!str_contains($primaryFilters[0]['$filter'], 'Negatieve correctie'), 'Negatieve correctie is geen optie');
 test_assert(!str_contains($alsoFilters[0]['$filter'], 'Assemblageverbruik'), 'Assemblageverbruik is geen optie');
 foreach (array_merge($primaryFilters, $alsoFilters) as $woQuery) {
@@ -111,6 +132,108 @@ test_assert(consus_odata_error_allows_entry_type_fallback($rejectedFilter), '501
 $notAnOption = new RuntimeException("HTTP 400 Unknown: 'Verkoop' is not an option. The existing options are: Purchase,Sale,Positive Adjmt.,Negative Adjmt.,Transfer,Consumption,Output, ,Assembly Consumption,Assembly ...");
 test_assert(consus_odata_error_allows_entry_type_fallback($notAnOption), '400 is not an option probeert het volgende bijschrift');
 test_assert(!consus_odata_error_allows_entry_type_fallback(new RuntimeException('cURL error: timeout')), 'netwerkfout is geen filterfout');
+test_assert(consus_odata_error_is_page_size(new RuntimeException('HTTP 400 The maximum page size is 1000')), 'paginagrootte is herkenbaar');
+test_assert(!consus_odata_error_is_page_size(new RuntimeException('HTTP 501 filterexpressie')), 'filterfout is geen paginagrootte');
+$resumeSnapshot = [
+    'version' => CONSUS_SNAPSHOT_VERSION,
+    'as_of' => $windows['as_of'],
+    'windows' => $windows,
+    'companies' => [[
+        'company' => 'Koninklijke van Twist',
+        'company_key' => 'kvt',
+        'stale' => false,
+        'refreshed_on' => $windows['as_of'],
+    ]],
+];
+test_assert(consus_company_refresh_is_current($resumeSnapshot, 'kvt', $windows), 'vers bedrijf van vandaag slaan we over');
+test_assert(!consus_company_refresh_is_current($resumeSnapshot, 'hvt', $windows), 'ander bedrijf blijft laden');
+$resumeSnapshot['companies'][0]['stale'] = true;
+test_assert(!consus_company_refresh_is_current($resumeSnapshot, 'kvt', $windows), 'stale bedrijf laadt opnieuw');
+$resumeSnapshot['companies'][0]['stale'] = false;
+$resumeSnapshot['companies'][0]['refreshed_on'] = '2026-09-23';
+test_assert(!consus_company_refresh_is_current($resumeSnapshot, 'kvt', $windows), 'gisteren telt niet voor vandaag');
+$resumeSnapshot['companies'][0]['refreshed_on'] = $windows['as_of'];
+$resumeSnapshot['version'] = CONSUS_SNAPSHOT_VERSION - 1;
+test_assert(!consus_company_refresh_is_current($resumeSnapshot, 'kvt', $windows), 'oude snapshotversie wordt opnieuw geladen');
+$keptRows = consus_rows_keeping_unfetched(
+    ['kvt' => [['company_key' => 'kvt', 'vendor_name' => 'Vers', 'vendor_no' => 'V', 'cost_center' => '', 'location' => '']]],
+    [
+        'kvt' => [['company_key' => 'kvt', 'vendor_name' => 'Oud', 'vendor_no' => 'O', 'cost_center' => '', 'location' => '']],
+        'hvt' => [['company_key' => 'hvt', 'vendor_name' => 'Blijft', 'vendor_no' => 'B', 'cost_center' => '', 'location' => '']],
+    ]
+);
+test_assert(array_column($keptRows, 'vendor_no') === ['V', 'B'], 'nog niet geladen bedrijf houdt de vorige rijen');
+$publishTemp = sys_get_temp_dir() . '/consus-publish-' . getmypid() . '.json';
+$savedPublishEnv = getenv('CONSUS_SNAPSHOT_FILE');
+putenv('CONSUS_SNAPSHOT_FILE=' . $publishTemp);
+@unlink($publishTemp);
+$partialPublish = consus_publish_nightly_snapshot(
+    $windows,
+    [[
+        'company' => 'Koninklijke van Twist',
+        'company_key' => 'kvt',
+        'stale' => false,
+        'refreshed_on' => $windows['as_of'],
+        'duration_ms' => 5,
+    ]],
+    [],
+    [],
+    ['kvt' => [[
+        'company_key' => 'kvt',
+        'vendor_no' => 'V',
+        'vendor_name' => 'Vers',
+        'cost_center' => '',
+        'location' => '',
+    ]]],
+    ['hvt' => [[
+        'company_key' => 'hvt',
+        'vendor_no' => 'B',
+        'vendor_name' => 'Blijft',
+        'cost_center' => '',
+        'location' => '',
+    ]]],
+    [],
+    true
+);
+test_assert(count($partialPublish['errors']) === 1, 'lopend bedrijf meldt dat de run nog bezig is');
+test_assert(str_contains((string) $partialPublish['errors'][0]['error'], 'nog bezig'), 'bezig-melding is Nederlands');
+test_assert(in_array('B', array_column($partialPublish['rows'], 'vendor_no'), true), 'bezig-snapshot houdt de vorige rijen');
+$donePublish = consus_publish_nightly_snapshot(
+    $windows,
+    [
+        ['company' => 'Koninklijke van Twist', 'company_key' => 'kvt', 'stale' => false, 'refreshed_on' => $windows['as_of'], 'duration_ms' => 5],
+        ['company' => 'Hunter van Twist', 'company_key' => 'hvt', 'stale' => false, 'refreshed_on' => $windows['as_of'], 'duration_ms' => 6],
+    ],
+    [],
+    [],
+    [
+        'kvt' => [[
+            'company_key' => 'kvt',
+            'vendor_no' => 'V',
+            'vendor_name' => 'Vers',
+            'cost_center' => '',
+            'location' => '',
+        ]],
+        'hvt' => [[
+            'company_key' => 'hvt',
+            'vendor_no' => 'B',
+            'vendor_name' => 'Blijft',
+            'cost_center' => '',
+            'location' => '',
+        ]],
+    ],
+    [],
+    [],
+    false
+);
+test_assert($donePublish['errors'] === [], 'afgeronde run zonder fouten heeft geen bezig-melding');
+@unlink($publishTemp);
+@unlink($publishTemp . '.lock');
+if ($savedPublishEnv === false) {
+    putenv('CONSUS_SNAPSHOT_FILE');
+} else {
+    putenv('CONSUS_SNAPSHOT_FILE=' . $savedPublishEnv);
+}
 
 $dimensionQuery = consus_dimension_query();
 test_assert(
@@ -121,6 +244,8 @@ test_assert(!str_contains($dimensionQuery['$filter'], 'Dimension_Value_Code'), '
 
 $stockQuery = consus_entity_query(CONSUS_STOCK_FIELDS);
 test_assert(!isset($stockQuery['$filter']), 'voorraadquery filtert niet op één bedrijf of leverancier');
+test_assert((int) $stockQuery['$top'] === CONSUS_ODATA_PAGE_SIZE, 'voorraad gebruikt dezelfde paginagrootte');
+test_assert(!isset(consus_entity_query(CONSUS_STOCK_FIELDS, '', 0)['$top']), 'paginagrootte 0 laat $top weg');
 
 $scoped = consus_companies_in_scope(['KVT Gas', 'Hunter van Twist', 'Koninklijke van Twist B.V.']);
 test_assert(array_column($scoped, 'company_key') === ['kvt', 'hvt'], 'alleen KVT en HVT, KVT Gas valt buiten scope');
@@ -566,6 +691,114 @@ try {
     );
     test_assert($emptyThenRow === ['ALLEEN'], 'lege optionele poging probeert opnieuw zonder die regels');
     test_assert($emptyCalls === 2, 'lege optionele poging telt als verzoek');
+
+    $pageCalls = 0;
+    $pageRows = [];
+    $pageFetched = consus_each_entity_rows(
+        'Koninklijke van Twist',
+        CONSUS_LEDGER_ENTITY,
+        ['Item_No', 'Quantity'],
+        [],
+        "Entry_Type eq 'Sale'",
+        static function (array $row) use (&$pageRows): void {
+            $pageRows[] = (string) ($row['Item_No'] ?? '');
+        },
+        static function (string $url, array $auth, callable $onRow) use (&$pageCalls): int {
+            unset($auth);
+            $pageCalls++;
+            if (str_contains($url, 'top=')) {
+                throw new RuntimeException('HTTP 400 The maximum page size is 1000');
+            }
+            $onRow(['Item_No' => 'P1', 'Quantity' => -1]);
+
+            return 1;
+        }
+    );
+    test_assert($pageCalls === 2, 'te grote pagina probeert zonder $top');
+    test_assert($pageRows === ['P1'], 'mislukte paginagrootte wordt niet toegepast');
+    test_assert($pageFetched['page_size_fallback'] === true, 'terugval op BC-standaard is zichtbaar');
+
+    $networkCalls = 0;
+    try {
+        consus_each_entity_rows(
+            'Koninklijke van Twist',
+            CONSUS_LEDGER_ENTITY,
+            ['Item_No'],
+            [],
+            "Entry_Type eq 'Sale'",
+            static function (): void {
+            },
+            static function (string $url, array $auth, callable $onRow) use (&$networkCalls): int {
+                unset($url, $auth, $onRow);
+                $networkCalls++;
+                throw new RuntimeException('cURL error: timeout');
+            }
+        );
+        test_assert(false, 'netwerkfout moet falen');
+    } catch (RuntimeException $networkError) {
+        test_assert(str_contains($networkError->getMessage(), 'cURL error'), 'netwerkfout blijft een netwerkfout');
+    }
+    test_assert($networkCalls === 1, 'netwerkfout probeert geen andere paginagrootte');
+
+    $withPrefix = 0;
+    $withoutPrefix = 0;
+    $prefixRows = [];
+    $prefixResult = consus_each_ledger_entry_type(
+        'Koninklijke van Twist',
+        ['Negative Adjmt.'],
+        '2025-10-01',
+        '2025-11-01',
+        false,
+        'WO',
+        true,
+        static function (array $row) use (&$prefixRows): void {
+            $prefixRows[] = (string) ($row['Item_No'] ?? '');
+        },
+        null,
+        static function (string $url, array $auth, callable $onRow) use (&$withPrefix, &$withoutPrefix): int {
+            unset($auth);
+            $decoded = rawurldecode($url);
+            if (str_contains($decoded, "Document_No ge 'WO'")) {
+                $withPrefix++;
+                throw new RuntimeException('HTTP 501 from OData: De OData-filterexpressie wordt niet ondersteund.');
+            }
+            $withoutPrefix++;
+            test_assert(str_contains($decoded, 'Document_No'), 'terugval houdt Document_No in de select');
+            test_assert(!str_contains($decoded, 'Sales_Amount_Actual'), 'verbruikterugval haalt geen omzet op');
+            $onRow(['Item_No' => 'W1', 'Document_No' => 'WO1', 'Quantity' => -1]);
+
+            return 1;
+        }
+    );
+    test_assert($withPrefix >= 1, 'documentbereik wordt geprobeerd');
+    test_assert($withoutPrefix === 1, 'zonder bereik lukt het in één keer');
+    test_assert($prefixResult['document_filter_rejected'] === true, 'geweigerd documentbereik valt terug');
+    test_assert($prefixRows === ['W1'], 'terugval past de regel één keer toe');
+
+    $fatalCalls = 0;
+    try {
+        consus_each_ledger_entry_type(
+            'Koninklijke van Twist',
+            ['Negative Adjmt.'],
+            '2025-10-01',
+            '2025-11-01',
+            false,
+            'WO',
+            true,
+            static function (): void {
+            },
+            null,
+            static function (string $url, array $auth, callable $onRow) use (&$fatalCalls): int {
+                unset($url, $auth, $onRow);
+                $fatalCalls++;
+                throw new RuntimeException('cURL error: timeout');
+            }
+        );
+        test_assert(false, 'netwerkfout op artikelposten moet falen');
+    } catch (RuntimeException $ledgerNetwork) {
+        test_assert(str_contains($ledgerNetwork->getMessage(), 'cURL error'), 'netwerkfout wordt niet als filterfout behandeld');
+    }
+    test_assert($fatalCalls === 2, 'netwerkfout laat het documentfilter niet vallen');
 } finally {
     foreach ($savedGlobals as $globalName => $globalValue) {
         $GLOBALS[$globalName] = $globalValue;
@@ -577,11 +810,507 @@ try {
     }
 }
 
+$badTo = false;
+try {
+    consus_ledger_query(['Sale'], '2025-10-01', '2025-10-01', '', true);
+} catch (InvalidArgumentException $badToError) {
+    $badTo = str_contains($badToError->getMessage(), 'tot-datum');
+}
+test_assert($badTo, 'ongeldige tot-datum blijft Nederlands');
+
+$progressTemp = sys_get_temp_dir() . '/consus-progress-' . getmypid() . '.json';
+$savedProgressEnv = getenv('CONSUS_SNAPSHOT_FILE');
+putenv('CONSUS_SNAPSHOT_FILE=' . $progressTemp);
+@unlink(consus_progress_file());
+consus_write_progress([
+    'company' => 'Koninklijke van Twist',
+    'company_key' => 'kvt',
+    'step' => 'verkoop',
+    'from' => '2025-10-01',
+    'to' => '2025-11-01',
+    'pages' => 3,
+    'rows' => 40,
+]);
+$progress = json_decode((string) file_get_contents(consus_progress_file()), true);
+test_assert(is_array($progress) && ($progress['step'] ?? '') === 'verkoop', 'voortgang noemt de stap');
+test_assert(($progress['pages'] ?? 0) === 3, 'voortgang telt pagina\'s');
+test_assert(($progress['from'] ?? '') === '2025-10-01', 'voortgang noemt de maand');
+test_assert(($progress['rows'] ?? 0) === 40, 'voortgang telt regels');
+@unlink(consus_progress_file());
+@unlink($progressTemp);
+@unlink($progressTemp . '.lock');
+if ($savedProgressEnv === false) {
+    putenv('CONSUS_SNAPSHOT_FILE');
+} else {
+    putenv('CONSUS_SNAPSHOT_FILE=' . $savedProgressEnv);
+}
+
 $index = (string) file_get_contents(__DIR__ . '/../web/index.php');
 test_assert(!str_contains($index, 'odata_get'), 'index.php doet geen OData-call');
 test_assert(!str_contains($index, 'curl_'), 'index.php gebruikt geen cURL');
 test_assert(!str_contains($index, 'consus_run_nightly'), 'index.php start geen BC-refresh');
 test_assert(!str_contains($index, 'Perkins'), 'index.php zet Perkins niet vast');
 test_assert(str_contains((string) file_get_contents(__DIR__ . '/../web/nightly.php'), 'consus_run_nightly'), 'nightly.php is de refresh');
+
+$lockProbeDir = sys_get_temp_dir() . '/consus-lock-probe-' . getmypid();
+mkdir($lockProbeDir, 0775, true);
+$snapshotProbe = $lockProbeDir . '/consus_snapshot.json';
+putenv('CONSUS_SNAPSHOT_FILE=' . $snapshotProbe);
+$badLock = $snapshotProbe . '.lock';
+mkdir($badLock, 0775);
+$sawBadLock = false;
+try {
+    consus_with_snapshot_lock(static function (): void {
+    });
+} catch (RuntimeException $lockError) {
+    $sawBadLock = true;
+    test_assert(str_contains($lockError->getMessage(), $badLock), 'lockfout noemt het pad');
+    test_assert(str_contains($lockError->getMessage(), 'geen gewoon bestand'), 'lockfout meldt geen gewoon bestand');
+    test_assert(str_contains($lockError->getMessage(), 'web/data'), 'lockfout noemt de repo-map web/data');
+    test_assert(str_contains($lockError->getMessage(), '/var/www/html/consus/data/'), 'lockfout noemt het serverpad');
+}
+test_assert($sawBadLock, 'directory-lock gooit een fout');
+rmdir($badLock);
+putenv('CONSUS_SNAPSHOT_FILE');
+rmdir($lockProbeDir);
+
+$stepIds = array_column(consus_ledger_steps(), 'id');
+test_assert($stepIds === ['verkoop', 'verbruik-wo', 'verbruik-assemblage'], 'checkpoints per verkoop, WO en assemblage');
+test_assert(consus_shift_date('2026-09-24', -1) === '2026-09-23', 'dag terug blijft een kalenderdag');
+
+$warmQuery = consus_ledger_query(['Sale'], '2026-09-23', '2026-09-25', '', true, false);
+test_assert(
+    str_contains($warmQuery['$filter'], 'Posting_Date ge 2026-09-23')
+    && str_contains($warmQuery['$filter'], 'Posting_Date lt 2026-09-25'),
+    'warme filter begint op het watermerk en houdt een bovengrens'
+);
+
+$warmStat = [
+    'ledger_through' => '2026-09-23',
+    'ledger_overlap_from' => '2026-09-23',
+    'stale' => true,
+];
+test_assert(consus_warm_ledger_from($warmStat, $windows, true, false) === '2026-09-23', 'stale met watermerk blijft warm');
+test_assert(consus_warm_ledger_from($warmStat, $windows, true, true) === '', 'full negeert het watermerk');
+test_assert(consus_warm_ledger_from($warmStat, $windows, false, false) === '', 'zonder vorige rijen geen warm');
+test_assert(consus_warm_ledger_from([], $windows, true, false) === '', 'zonder watermerk koud');
+$staleMarker = $warmStat;
+$staleMarker['ledger_through'] = '2024-01-01';
+$staleMarker['ledger_overlap_from'] = '2024-01-01';
+test_assert(consus_warm_ledger_from($staleMarker, $windows, true, false) === '', 'watermerk buiten het venster is koud');
+
+$warmPlan = consus_ledger_plan($warmStat, $windows, true, false);
+test_assert($warmPlan['mode'] === 'warm', 'plan met watermerk is warm');
+test_assert($warmPlan['chunks'] === [['from' => '2026-09-23', 'to' => '2026-09-25']], 'warm haalt de overlapdag en de nieuwe dag');
+$coldPlan = consus_ledger_plan($warmStat, $windows, true, true);
+test_assert($coldPlan['mode'] === 'cold' && count($coldPlan['chunks']) === 12, 'full haalt twaalf maanden');
+
+$failedKeep = consus_failed_company_stat('Koninklijke van Twist', 'kvt', 4, $warmStat, true);
+test_assert(($failedKeep['ledger_through'] ?? '') === '2026-09-23', 'stale houdt het watermerk als de vorige rijen blijven');
+test_assert(($failedKeep['ledger_overlap_from'] ?? '') === '2026-09-23', 'stale houdt ook de overlapdag');
+test_assert(!isset($failedKeep['refreshed_on']), 'mislukte run zet refreshed_on niet');
+$failedDrop = consus_failed_company_stat('Koninklijke van Twist', 'kvt', 4, $warmStat, false);
+test_assert(!isset($failedDrop['ledger_through']), 'zonder vorige rijen valt het watermerk weg');
+$stockOnlyStat = consus_stock_only_company_stat($failedKeep);
+test_assert(!isset($stockOnlyStat['ledger_through']) && !isset($stockOnlyStat['ledger_overlap_from']), 'alleen-voorraad wist het watermerk');
+
+$completed = consus_completed_company_stat('Koninklijke van Twist', 'kvt', $windows, 9, 'warm', true);
+test_assert($completed['refreshed_on'] === $windows['as_of'], 'refreshed_on komt pas als het bedrijf af is');
+test_assert($completed['ledger_through'] === $windows['as_of'] && $completed['ledger_overlap_from'] === $windows['as_of'], 'watermerk is de peildatum, één dag overlap');
+test_assert($completed['checkpoint_resumed'] === true && $completed['ledger_mode'] === 'warm', 'afgerond bedrijf onthoudt hervatting en warm');
+
+$partialCompany = [
+    'version' => CONSUS_SNAPSHOT_VERSION,
+    'as_of' => $windows['as_of'],
+    'windows' => $windows,
+    'companies' => [[
+        'company_key' => 'kvt',
+        'stale' => false,
+        'ledger_through' => $windows['as_of'],
+        'ledger_overlap_from' => $windows['as_of'],
+    ]],
+];
+test_assert(!consus_company_refresh_is_current($partialCompany, 'kvt', $windows), 'watermerk zonder refreshed_on slaat het bedrijf niet over');
+
+$previousWarm = [[
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'vendor_no' => 'PERK',
+    'vendor_name' => 'Perkins',
+    'cost_center' => 'MAG',
+    'location' => 'KVT',
+    'inventory' => 9,
+    'safety_stock' => 2,
+    'reorder_point' => 1,
+    'item_count' => 3,
+    'item_nos' => ['A1' => true, 'OLD' => true, 'MOVED' => true],
+    'sales' => ['eigen' => [
+        'months' => [
+            '2025-10' => ['qty' => 10, 'amount' => 100],
+            '2026-08' => ['qty' => 4, 'amount' => 40],
+            '2026-09' => ['qty' => 20, 'amount' => 200],
+        ],
+        'days' => [
+            '2026-09-23' => ['qty' => 5, 'amount' => 50],
+        ],
+        'm' => ['qty' => 999, 'amount' => 999],
+        'q' => ['qty' => 999, 'amount' => 999],
+        'y' => ['qty' => 999, 'amount' => 999],
+    ]],
+    'consumption' => [],
+], [
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'vendor_no' => 'PERK',
+    'vendor_name' => 'Perkins',
+    'cost_center' => 'MAG',
+    'location' => 'M100',
+    'inventory' => 3,
+    'safety_stock' => 1,
+    'reorder_point' => 1,
+    'item_count' => 1,
+    'item_nos' => ['A9' => true],
+    'sales' => ['eigen' => [
+        'months' => ['2026-09' => ['qty' => 6, 'amount' => 60]],
+        'days' => ['2026-09-23' => ['qty' => 1, 'amount' => 10]],
+        'm' => ['qty' => 6, 'amount' => 60],
+        'q' => ['qty' => 6, 'amount' => 60],
+        'y' => ['qty' => 6, 'amount' => 60],
+    ]],
+    'consumption' => [],
+]];
+$freshWarm = [[
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'vendor_no' => 'PERK',
+    'vendor_name' => 'Perkins',
+    'cost_center' => 'MAG',
+    'location' => 'KVT',
+    'inventory' => 12,
+    'safety_stock' => 4,
+    'reorder_point' => 2,
+    'item_count' => 1,
+    'item_nos' => ['A1' => true],
+    'sales' => ['eigen' => [
+        'months' => ['2026-09' => ['qty' => 9, 'amount' => 90]],
+        'days' => ['2026-09-24' => ['qty' => 2, 'amount' => 20]],
+        'm' => ['qty' => 9, 'amount' => 90],
+        'q' => ['qty' => 9, 'amount' => 90],
+        'y' => ['qty' => 9, 'amount' => 90],
+    ]],
+    'consumption' => [],
+], [
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'vendor_no' => 'ANDERS',
+    'vendor_name' => 'Anders',
+    'cost_center' => 'MAG',
+    'location' => 'KVT',
+    'inventory' => 4,
+    'safety_stock' => 0,
+    'reorder_point' => 0,
+    'item_count' => 1,
+    'item_nos' => ['MOVED' => true],
+    'sales' => ['eigen' => [
+        'months' => ['2026-09' => ['qty' => 3, 'amount' => 30]],
+        'days' => ['2026-09-24' => ['qty' => 3, 'amount' => 30]],
+        'm' => ['qty' => 3, 'amount' => 30],
+        'q' => ['qty' => 3, 'amount' => 30],
+        'y' => ['qty' => 3, 'amount' => 30],
+    ]],
+    'consumption' => [],
+]];
+$mergedWarm = consus_merge_warm_company_rows($previousWarm, $freshWarm, $windows, '2026-09-23', '2026-09-23');
+$mergedByKey = [];
+foreach ($mergedWarm as $mergedRow) {
+    $mergedByKey[$mergedRow['vendor_no'] . '|' . $mergedRow['location']] = $mergedRow;
+}
+$perk = $mergedByKey['PERK|KVT'];
+test_assert(abs((float) $perk['sales']['eigen']['months']['2026-09']['qty'] - 24) < 0.0001, 'september is oud min overlap plus de nieuwe query');
+test_assert(abs((float) $perk['sales']['eigen']['months']['2026-08']['qty'] - 4) < 0.0001, 'oudere maand blijft staan');
+test_assert(abs((float) $perk['sales']['eigen']['months']['2025-10']['qty'] - 10) < 0.0001, 'maand buiten het warme venster blijft staan');
+test_assert(abs((float) $perk['sales']['eigen']['m']['qty'] - 24) < 0.0001, 'maandtotaal wordt herberekend en niet opgeteld bij het oude');
+test_assert(abs((float) $perk['sales']['eigen']['q']['qty'] - 28) < 0.0001, 'kwartaal telt augustus en september');
+test_assert(!isset($perk['sales']['eigen']['days']['2026-09-23']), 'oude overlapdag is vervangen');
+test_assert(abs((float) $perk['sales']['eigen']['days']['2026-09-24']['qty'] - 2) < 0.0001, 'nieuwe overlapdag is de peildatum');
+test_assert((float) $perk['inventory'] === 12.0, 'voorraad komt uit de verse snapshot');
+test_assert(isset($perk['item_nos']['OLD']) && isset($perk['item_nos']['A1']) && !isset($perk['item_nos']['MOVED']), 'artikel dat van leverancier wisselt verlaat de oude groep');
+test_assert((float) $mergedByKey['PERK|M100']['inventory'] === 0.0, 'locatie zonder verse voorraad gaat naar nul');
+test_assert(abs((float) $mergedByKey['PERK|M100']['sales']['eigen']['months']['2026-09']['qty'] - 5) < 0.0001, 'verkoop zonder nieuwe posten houdt de historie na aftrek van de overlap');
+test_assert(abs((float) $mergedByKey['ANDERS|KVT']['sales']['eigen']['months']['2026-09']['qty'] - 3) < 0.0001, 'nieuwe groep houdt alleen de warme delta');
+
+$octoberWindows = consus_period_windows(new DateTimeImmutable('2026-10-01', new DateTimeZone('Europe/Amsterdam')));
+$octoberMerged = consus_merge_warm_company_rows(
+    [[
+        'company_key' => 'kvt',
+        'company_name' => 'Koninklijke van Twist',
+        'vendor_no' => 'PERK',
+        'vendor_name' => 'Perkins',
+        'cost_center' => '',
+        'location' => 'KVT',
+        'inventory' => 9,
+        'safety_stock' => 0,
+        'reorder_point' => 0,
+        'item_nos' => ['A1' => true],
+        'sales' => ['eigen' => [
+            'months' => [
+                '2025-10' => ['qty' => 10, 'amount' => 10],
+                '2026-09' => ['qty' => 30, 'amount' => 30],
+            ],
+            'days' => ['2026-09-30' => ['qty' => 3, 'amount' => 3]],
+            'm' => ['qty' => 30, 'amount' => 30],
+            'q' => ['qty' => 30, 'amount' => 30],
+            'y' => ['qty' => 30, 'amount' => 30],
+        ]],
+        'consumption' => [],
+    ]],
+    [[
+        'company_key' => 'kvt',
+        'company_name' => 'Koninklijke van Twist',
+        'vendor_no' => 'PERK',
+        'vendor_name' => 'Perkins',
+        'cost_center' => '',
+        'location' => 'KVT',
+        'inventory' => 8,
+        'safety_stock' => 0,
+        'reorder_point' => 0,
+        'item_nos' => ['A1' => true],
+        'sales' => ['eigen' => [
+            'months' => [
+                '2026-09' => ['qty' => 4, 'amount' => 4],
+                '2026-10' => ['qty' => 1, 'amount' => 1],
+            ],
+            'days' => ['2026-10-01' => ['qty' => 1, 'amount' => 1]],
+            'm' => ['qty' => 1, 'amount' => 1],
+            'q' => ['qty' => 1, 'amount' => 1],
+            'y' => ['qty' => 5, 'amount' => 5],
+        ]],
+        'consumption' => [],
+    ]],
+    $octoberWindows,
+    '2026-09-30',
+    '2026-09-30'
+);
+$octoberRow = $octoberMerged[0];
+test_assert(abs((float) $octoberRow['sales']['eigen']['months']['2026-09']['qty'] - 31) < 0.0001, 'september blijft volledig na de maandgrens');
+test_assert(abs((float) $octoberRow['sales']['eigen']['m']['qty'] - 1) < 0.0001, 'nieuwe maand telt alleen oktober');
+test_assert(!isset($octoberRow['sales']['eigen']['months']['2025-10']), 'maand die uit het venster valt verdwijnt');
+test_assert(abs((float) $octoberRow['sales']['eigen']['days']['2026-10-01']['qty'] - 1) < 0.0001, 'overlapdag schuift mee naar de nieuwe peildatum');
+
+$checkpointRoot = sys_get_temp_dir() . '/consus-checkpoint-' . getmypid() . '.json';
+$savedCheckpointEnv = getenv('CONSUS_SNAPSHOT_FILE');
+putenv('CONSUS_SNAPSHOT_FILE=' . $checkpointRoot);
+@unlink($checkpointRoot);
+consus_clear_checkpoint();
+try {
+    $stockSteps = [];
+    $stockApplied = [];
+    $stockFetches = 0;
+    $stockSaves = 0;
+    $fetchStock = static function (?array &$writer) use (&$stockFetches, &$stockApplied): array {
+        $stockFetches++;
+        $stockApplied[] = 'fetch';
+        consus_checkpoint_write_row($writer, [
+            'Item_No' => 'S1',
+            'Company_Name' => 'Koninklijke van Twist',
+            'Location_Code' => 'KVT',
+            'Inventory' => 4,
+        ]);
+
+        return ['count' => 1];
+    };
+    $replayStock = static function (array $row) use (&$stockApplied): void {
+        $stockApplied[] = (string) ($row['Item_No'] ?? '');
+    };
+    $saveStock = static function () use (&$stockSaves): void {
+        $stockSaves++;
+    };
+    $firstStock = consus_collect_entity_with_checkpoint($stockSteps, 'kvt', 'voorraad', $replayStock, $fetchStock, $saveStock, true);
+    test_assert($firstStock['replayed'] === false && $stockSaves === 1, 'voorraad schrijft een tussenstap');
+    test_assert(($stockSteps['voorraad']['done'] ?? false) === true, 'voorraadstap is af');
+    $secondStock = consus_collect_entity_with_checkpoint($stockSteps, 'kvt', 'voorraad', $replayStock, $fetchStock, $saveStock, true);
+    test_assert($secondStock['replayed'] === true && $stockFetches === 1, 'voorraad wordt niet opnieuw opgehaald');
+    test_assert($stockApplied === ['fetch', 'S1'], 'hervatte voorraad leest de opgeslagen regel');
+
+    $failSteps = [];
+    $stockFailed = false;
+    try {
+        consus_collect_entity_with_checkpoint(
+            $failSteps,
+            'hvt',
+            'voorraad',
+            static function (array $row): void {
+                unset($row);
+            },
+            static function (?array &$writer): array {
+                unset($writer);
+                throw new RuntimeException('cURL error: timeout');
+            },
+            static function (): void {
+            },
+            true
+        );
+    } catch (RuntimeException $stockFail) {
+        $stockFailed = str_contains($stockFail->getMessage(), 'cURL error');
+    }
+    test_assert($stockFailed, 'mislukte voorraad faalt');
+    test_assert(empty($failSteps['voorraad']['done']), 'mislukte voorraad is niet af');
+    test_assert(!is_file(consus_checkpoint_directory() . '/hvt-voorraad.ndjson'), 'mislukte voorraad laat geen bestand achter');
+    $stockTmps = glob(consus_checkpoint_directory() . '/*.tmp.*');
+    test_assert($stockTmps === [] || $stockTmps === false, 'tijdelijke tussenstand is opgeruimd');
+
+    $savedResumeGlobals = [];
+    foreach (['baseUrl', 'auth_list', 'environment', 'demeter_company_environment_map'] as $globalName) {
+        $savedResumeGlobals[$globalName] = $GLOBALS[$globalName] ?? null;
+    }
+    $GLOBALS['baseUrl'] = 'https://bc.example.test/BC';
+    $GLOBALS['auth_list'] = [
+        'Test' => ['mode' => 'basic', 'user' => 'svc', 'pass' => 'x'],
+    ];
+    $GLOBALS['environment'] = 'Test';
+    $GLOBALS['demeter_company_environment_map'] = [
+        'Koninklijke van Twist' => 'Test',
+    ];
+    try {
+        $resumeChunks = [
+            ['from' => '2026-09-01', 'to' => '2026-09-23'],
+            ['from' => '2026-09-23', 'to' => '2026-09-25'],
+        ];
+        $failSecondMonth = true;
+        $resumeFetches = 0;
+        $resumeFetch = static function (string $url, array $auth, callable $onRow) use (&$resumeFetches, &$failSecondMonth): int {
+            unset($auth);
+            $resumeFetches++;
+            $decoded = rawurldecode($url);
+            if (str_contains($decoded, 'Posting_Date ge 2026-09-23')) {
+                $onRow([
+                    'Item_No' => 'A1',
+                    'Quantity' => -4,
+                    'Sales_Amount_Actual' => 40,
+                    'Posting_Date' => '2026-09-24',
+                    'Location_Code' => 'KVT',
+                ]);
+                if ($failSecondMonth) {
+                    throw new RuntimeException('cURL error: timeout');
+                }
+
+                return 1;
+            }
+            test_assert(str_contains($decoded, 'Posting_Date ge 2026-09-01'), 'open maand houdt zijn eigen grens');
+            $onRow([
+                'Item_No' => 'A1',
+                'Quantity' => -10,
+                'Sales_Amount_Actual' => 100,
+                'Posting_Date' => '2026-09-10',
+                'Location_Code' => 'KVT',
+            ]);
+
+            return 1;
+        };
+        $resumeStep = ['months' => []];
+        $saveResume = static function () use (&$resumeStep, $windows): void {
+            $stored = consus_empty_checkpoint($windows);
+            $stored['companies']['kvt'] = [
+                'company' => 'Koninklijke van Twist',
+                'company_key' => 'kvt',
+                'mode' => 'cold',
+                'ledger_from' => '2026-09-01',
+                'steps' => ['verkoop' => $resumeStep],
+                'warnings' => [],
+            ];
+            consus_write_checkpoint($stored);
+        };
+        $resumeItems = [];
+        $resumeThrew = false;
+        try {
+            consus_collect_ledger(
+                'Koninklijke van Twist',
+                'kvt',
+                ['Sale'],
+                'sales',
+                '',
+                true,
+                $resumeItems,
+                $windows,
+                null,
+                $resumeChunks,
+                $resumeFetch,
+                $resumeStep,
+                $saveResume,
+                'verkoop',
+                'cold'
+            );
+        } catch (RuntimeException $resumeError) {
+            $resumeThrew = str_contains($resumeError->getMessage(), 'cURL error');
+        }
+        test_assert($resumeThrew, 'afgebroken maand faalt');
+        test_assert($resumeFetches >= 2, 'de afgebroken maand is wel geprobeerd');
+        test_assert(isset($resumeStep['months']['2026-09-01']), 'afgeronde maand blijft in de tussenstand');
+        test_assert(!isset($resumeStep['months']['2026-09-23']), 'afgebroken maand wordt niet vastgelegd');
+        test_assert(
+            abs((float) ($resumeItems['kvt|A1']['by_location']['KVT']['sales']['eigen']['m']['qty'] ?? 0) - 10) < 0.0001,
+            'half binnengehaalde maand telt niet mee'
+        );
+        test_assert(is_file(consus_checkpoint_directory() . '/' . consus_checkpoint_basename('kvt', 'verkoop', '2026-09-01')), 'afgeronde maand staat op schijf');
+        test_assert(!is_file(consus_checkpoint_directory() . '/' . consus_checkpoint_basename('kvt', 'verkoop', '2026-09-23')), 'afgebroken maand laat geen bestand achter');
+        $loadedPartial = consus_load_checkpoint($windows);
+        test_assert(isset($loadedPartial['companies']['kvt']['steps']['verkoop']['months']['2026-09-01']), 'manifest onthoudt de afgeronde maand');
+        test_assert(!isset($loadedPartial['companies']['kvt']['steps']['verkoop']['months']['2026-09-23']), 'manifest onthoudt de afgebroken maand niet');
+
+        $failSecondMonth = false;
+        $resumeFetches = 0;
+        $resumedItems = [];
+        consus_collect_ledger(
+            'Koninklijke van Twist',
+            'kvt',
+            ['Sale'],
+            'sales',
+            '',
+            true,
+            $resumedItems,
+            $windows,
+            null,
+            $resumeChunks,
+            $resumeFetch,
+            $resumeStep,
+            $saveResume,
+            'verkoop',
+            'cold'
+        );
+        test_assert($resumeFetches === 1, 'hervatten haalt alleen de open maand op');
+        test_assert(
+            abs((float) ($resumedItems['kvt|A1']['by_location']['KVT']['sales']['eigen']['m']['qty'] ?? 0) - 14) < 0.0001,
+            'hervatte maanden vormen samen het venster'
+        );
+        test_assert(
+            abs((float) ($resumedItems['kvt|A1']['by_location']['KVT']['sales']['eigen']['days']['2026-09-24']['qty'] ?? 0) - 4) < 0.0001,
+            'alleen de peildatum blijft als overlapdag bewaard'
+        );
+        test_assert(isset($resumeStep['months']['2026-09-23']), 'tweede maand is daarna vastgelegd');
+        test_assert(!consus_checkpoint_plan_matches(
+            ['mode' => 'cold', 'ledger_from' => '2026-09-01'],
+            ['mode' => 'warm', 'from' => '2026-09-23']
+        ), 'een warm plan hervat geen koude tussenstand');
+        $source = (string) file_get_contents(__DIR__ . '/../web/consus_data.php');
+        test_assert(preg_match('/if \(\$force\) \{\s+consus_clear_checkpoint\(\);/', $source) === 1, 'force wist de tussenstand');
+        $nextDay = consus_period_windows(new DateTimeImmutable('2026-09-25', new DateTimeZone('Europe/Amsterdam')));
+        $clearedCheckpoint = consus_load_checkpoint($nextDay);
+        test_assert($clearedCheckpoint['companies'] === [], 'andere peildatum wist de tussenstand');
+        test_assert(!is_file(consus_checkpoint_manifest_file()), 'vervallen manifest is weg');
+    } finally {
+        foreach ($savedResumeGlobals as $globalName => $globalValue) {
+            $GLOBALS[$globalName] = $globalValue;
+        }
+    }
+} finally {
+    consus_clear_checkpoint();
+    @unlink($checkpointRoot);
+    @unlink($checkpointRoot . '.lock');
+    if ($savedCheckpointEnv === false) {
+        putenv('CONSUS_SNAPSHOT_FILE');
+    } else {
+        putenv('CONSUS_SNAPSHOT_FILE=' . $savedCheckpointEnv);
+    }
+}
 
 echo "OK\n";
