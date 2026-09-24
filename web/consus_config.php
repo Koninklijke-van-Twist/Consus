@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 6;
+const CONSUS_SNAPSHOT_VERSION = 7;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
@@ -110,15 +110,21 @@ const CONSUS_STOCK_OPTIONAL_FIELDS = [
 ];
 
 const CONSUS_ITEM_ENTITY = 'AppItemCard';
+/**
+ * Verplicht zijn alleen nummer en leverancier. LVS_Vendor_Name is een
+ * maatwerkveld: als BC het weigert, mag dat de leveranciersdropdown niet
+ * leeg trekken. Omschrijving komt mee als de pagina het veld heeft.
+ */
 const CONSUS_ITEM_FIELDS = [
     'No',
     'Vendor_No',
-    'LVS_Vendor_Name',
 ];
-/** Optioneel; nightly probeert ze en valt terug op de verplichte velden. */
+/** Optioneel; een geweigerd veld wordt uit $select gehaald en de query opnieuw gedaan. */
 const CONSUS_ITEM_OPTIONAL_FIELDS = [
+    'LVS_Vendor_Name',
     'COST_CENTER',
     'Vendor_Name',
+    'Description',
 ];
 
 const CONSUS_LEDGER_ENTITY = 'ItemLedgerEntries';

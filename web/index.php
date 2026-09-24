@@ -122,6 +122,10 @@ if ($locationFilter !== '' && !isset($locationValues[$locationFilter])) {
 }
 
 $summary = consus_summarize($snapshot, $companyFilter, $vendorFilter, $costFilter, $locationFilter);
+$articlesReady = (int) ($snapshot['version'] ?? 0) === CONSUS_SNAPSHOT_VERSION;
+$articles = $articlesReady
+    ? consus_list_articles($snapshot, $companyFilter, $vendorFilter, $costFilter, $locationFilter)
+    : [];
 $sales = is_array($summary['sales'] ?? null) ? $summary['sales'] : [];
 $consumption = is_array($summary['consumption'] ?? null) ? $summary['consumption'] : [];
 $turnover = is_array($summary['turnover'] ?? null) ? $summary['turnover'] : [];
@@ -237,6 +241,14 @@ foreach ($vendors as $vendor) {
     <?php if (($snapshot['errors'] ?? []) !== []): ?>
         <div class="notice error">De laatste nachtelijke controle was niet voor ieder bedrijf succesvol. Eerdere cijfers zijn waar mogelijk behouden.</div>
     <?php endif; ?>
+    <?php if (is_array($snapshot['warnings'] ?? null) && $snapshot['warnings'] !== []): ?>
+        <div class="notice">
+            <?php foreach ($snapshot['warnings'] as $warning): ?>
+                <?php if (!is_array($warning)) { continue; } ?>
+                <div><?= consus_h(trim((string) ($warning['company'] ?? ''))) ?><?= trim((string) ($warning['company'] ?? '')) !== '' ? ': ' : '' ?><?= consus_h((string) ($warning['warning'] ?? '')) ?></div>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
     <section class="panel">
         <form class="toolbar" method="get">
             <div class="field">
@@ -305,6 +317,55 @@ foreach ($vendors as $vendor) {
             <span class="stat-label">WO-verbruik dit jaar</span>
             <strong class="stat-value"><?= consus_h(consus_format_qty(consus_period_total($consumption, 'y', 'qty'))) ?></strong>
         </div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head">
+            <h2>Artikelen</h2>
+            <p>Per artikel, gesorteerd op artikelnummer. Veiligheidsvoorraad en voorraad zijn van de gekozen locaties. WO-verbruik is Negative Adjmt. met documentnummer WO, plus Assembly Consumption, in maand, kwartaal en jaar.</p>
+        </div>
+        <?php if (!$hasCache): ?>
+            <div class="empty">Nog geen artikelen. De cache is leeg.</div>
+        <?php elseif (!$articlesReady): ?>
+            <div class="empty">De artikellijst staat in de cache na de volgende geslaagde nachtrun.</div>
+        <?php elseif ($articles === []): ?>
+            <div class="empty">Geen artikelen voor deze filters.</div>
+        <?php else: ?>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Artikel</th>
+                            <th>Omschrijving</th>
+                            <?php if ($companyFilter === ''): ?>
+                                <th>Bedrijf</th>
+                            <?php endif; ?>
+                            <th class="numeric">Veiligheidsvoorraad</th>
+                            <th class="numeric">Voorraad</th>
+                            <th class="numeric">WO maand</th>
+                            <th class="numeric">WO kwartaal</th>
+                            <th class="numeric">WO jaar</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($articles as $article): ?>
+                            <tr>
+                                <td><?= consus_h($article['item_no']) ?></td>
+                                <td><?= $article['description'] !== '' ? consus_h($article['description']) : '<span class="muted">—</span>' ?></td>
+                                <?php if ($companyFilter === ''): ?>
+                                    <td><?= consus_h(consus_company_label((string) $article['company_key'])) ?></td>
+                                <?php endif; ?>
+                                <td class="numeric"><?= consus_h(consus_format_qty((float) $article['safety_stock'])) ?></td>
+                                <td class="numeric"><?= consus_h(consus_format_qty((float) $article['inventory'])) ?></td>
+                                <td class="numeric"><?= consus_h(consus_format_qty((float) $article['consumption_m'])) ?></td>
+                                <td class="numeric"><?= consus_h(consus_format_qty((float) $article['consumption_q'])) ?></td>
+                                <td class="numeric"><?= consus_h(consus_format_qty((float) $article['consumption_y'])) ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        <?php endif; ?>
     </section>
 
     <section class="panel">
