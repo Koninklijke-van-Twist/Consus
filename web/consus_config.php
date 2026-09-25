@@ -221,3 +221,15 @@ const CONSUS_DIMENSION_TABLE_ID = 27;
  * valt nightly terug op de serverstandaard.
  */
 const CONSUS_ODATA_PAGE_SIZE = 20000;
+
+/**
+ * Mímir max_age for UI / on-demand / live recheck when $mimirApi is set.
+ * Consus index.php doet geen OData; deze TTL geldt als er toch live wordt gehaald.
+ */
+const CONSUS_ODATA_TTL = 86400;
+
+/**
+ * Mímir max_age for nightly.php snapshot builds (4h — cache sharing, nightly still refreshes).
+ */
+const CONSUS_NIGHTLY_MAX_AGE = 14400;
+

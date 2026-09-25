@@ -16,6 +16,8 @@
  * auth.php, geen tokens.
  *
  * Tests laden alleen de helpers via define('CONSUS_NIGHTLY_LIBRARY', true).
+ *
+ * Mímir max_age op nightly-fetches: CONSUS_NIGHTLY_MAX_AGE (14400).
  */
 
 function consus_nightly_flag_requested(mixed $env, mixed $query, array $argv, string $name): bool

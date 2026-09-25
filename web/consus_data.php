@@ -4,6 +4,25 @@ require_once __DIR__ . '/consus_config.php';
 require_once __DIR__ . '/auth_helper.php';
 require_once __DIR__ . '/odata.php';
 
+
+/**
+ * Effectieve Mímir max_age / legacy TTL-hint voor OData-fetches.
+ * Nightly zet $GLOBALS['consus_odata_max_age'] = CONSUS_NIGHTLY_MAX_AGE.
+ */
+function consus_odata_max_age(): int
+{
+    $override = $GLOBALS['consus_odata_max_age'] ?? null;
+    if (is_int($override) && $override >= 0) {
+        return $override;
+    }
+    if (is_numeric($override) && (int) $override >= 0) {
+        return (int) $override;
+    }
+
+    return CONSUS_ODATA_TTL;
+}
+
+
 function consus_snapshot_file(): string
 {
     $override = getenv('CONSUS_SNAPSHOT_FILE');
@@ -3124,6 +3143,23 @@ function consus_fetch_url_live(string $url, array $auth): array
 
 function consus_each_url_live(string $url, array $auth, callable $onRow, ?callable $onPage = null): int
 {
+    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled()) {
+        $ttl = consus_odata_max_age();
+        $rows = odata_mimir_fetch_all($url, $ttl === 0 ? 3600 : $ttl);
+        $count = 0;
+        foreach ($rows as $row) {
+            if (is_array($row)) {
+                $onRow($row);
+                $count++;
+            }
+        }
+        if ($onPage !== null) {
+            $onPage(1, $count);
+        }
+
+        return $count;
+    }
+
     $count = 0;
     $pages = 0;
     $next = $url;
@@ -3295,8 +3331,27 @@ function consus_each_entity_rows(
 ): array {
     global $baseUrl;
 
-    $environment = auth_get_environment_for_company($company);
-    $auth = auth_get_auth_for_environment($environment);
+    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled()) {
+        try {
+            $environment = auth_get_environment_for_company($company);
+        } catch (Throwable $ignored) {
+            $environment = 'mimir';
+        }
+        try {
+            $auth = auth_get_auth_for_environment($environment);
+        } catch (Throwable $ignored) {
+            $auth = [];
+        }
+        if (!is_string($baseUrl) || trim($baseUrl) === '') {
+            $baseUrl = 'https://mimir.invalid/';
+        }
+        if (!is_string($environment) || trim($environment) === '') {
+            $environment = 'mimir';
+        }
+    } else {
+        $environment = auth_get_environment_for_company($company);
+        $auth = auth_get_auth_for_environment($environment);
+    }
     $fetchRows ??= static function (string $url, array $auth, callable $onRow) use ($onPage): int {
         return consus_each_url_live($url, $auth, $onRow, $onPage);
     };
@@ -5805,6 +5860,9 @@ function consus_publish_nightly_snapshot(
 
 function consus_run_nightly(bool $force = false, bool $fullLedger = false): array
 {
+    // Nightly Mímir max_age = 4h (CONSUS_NIGHTLY_MAX_AGE). UI/on-demand keeps CONSUS_ODATA_TTL.
+    $GLOBALS['consus_odata_max_age'] = CONSUS_NIGHTLY_MAX_AGE;
+
     $discovered = auth_discover_companies_across_active_environments();
     $names = is_array($discovered['companies'] ?? null) ? $discovered['companies'] : [];
     $companies = consus_companies_in_scope($names);

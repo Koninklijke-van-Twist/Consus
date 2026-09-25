@@ -43,9 +43,11 @@ function consus_load_auth(): void
     // require_once binnen deze functie erft de lokale scope. Zonder global
     // blijven toewijzingen in auth.php lokaal en zijn ze na return weg.
     // logincheck.php doet dan array_any() op null en de pagina geeft HTTP 500.
-    global $baseUrl, $allowedUsers, $auth_list, $environment, $auth, $primaryEnvironment;
+    global $baseUrl, $allowedUsers, $auth_list, $environment, $auth, $primaryEnvironment, $mimirApi, $mimirBase;
 
-    if (isset($baseUrl) && is_string($baseUrl) && $baseUrl !== '') {
+    $mimirReady = isset($mimirApi) && is_string($mimirApi) && trim($mimirApi) !== '';
+    $baseReady = isset($baseUrl) && is_string($baseUrl) && $baseUrl !== '';
+    if ($mimirReady || $baseReady) {
         return;
     }
 

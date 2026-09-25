@@ -173,6 +173,29 @@ php tests/consus_data_test.php
 php tests/nightly_debug_test.php
 ```
 
+
+## Mímir (optional)
+
+Zet in `web/auth.php` of `~/Repositories/auth.php` (niet in git):
+
+```php
+$mimirApi  = 'mimir_…';
+// optioneel:
+$mimirBase = 'https://sleutels.kvt.nl/mimir/api';
+```
+
+Met `$mimirApi` gezet zijn `$auth_list`, `$environment`, `$baseUrl` en `$auth` ongebruikt voor Business Central — company-discovery en alle OData-fetches (nightly snapshot via `consus_each_url_live` / `odata_get_all`) lopen via Mímir. Zonder `$mimirApi` blijft het bestaande directe BC-pad ongewijzigd.
+
+**max_age-beleid**
+
+| Soort fetch | `max_age` naar Mímir |
+| --- | --- |
+| `nightly.php` snapshot-build | **14400** (`CONSUS_NIGHTLY_MAX_AGE`, 4u) |
+| UI / on-demand / live | **86400** (`CONSUS_ODATA_TTL`) — `index.php` doet zelf geen OData |
+| `hourly.php` | niet aanwezig in Consus |
+
+Tim moet `$mimirApi` (en optioneel `$mimirBase`) lokaal/op de server zetten; `auth.php` wordt niet gecommit. Zie [Mímir Implementatie](https://wiki.kvt.nl/books/mimir/page/implementatie).
+
 ## auth.php
 
 Geen `auth.php` in deze repository. Lokaal wordt eerst
