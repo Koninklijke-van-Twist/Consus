@@ -311,6 +311,31 @@ if (!is_array($sandboxCompanyCall) || $sandboxCompanyCall['user'] !== 'sandbox-u
 unset($GLOBALS['demeter_company_environment_map']);
 $auth_list = ['Production' => $auth];
 
+odata_mimir_circuit_reset();
+$mimirBase = 'http://127.0.0.1:9';
+$callsBeforeMissingSandbox = count($calls);
+$liveMissingAuth = null;
+try {
+    consus_each_url_live(
+        "https://mimir.invalid/Sandbox/ODataV4/Company('Hunter%20van%20Twist')/AppWerkorders?\$select=No",
+        $auth,
+        static function (array $row): void {
+        }
+    );
+    fail('live-fallback zonder Sandbox-auth moet de Mímir-fout teruggeven');
+} catch (Throwable $exception) {
+    $liveMissingAuth = $exception;
+}
+if (!$liveMissingAuth instanceof Throwable || strpos($liveMissingAuth->getMessage(), 'Mímir') === false) {
+    fail('live-fallback zonder environment-auth gaf niet de Mímir-fout: ' . ($liveMissingAuth instanceof Throwable ? $liveMissingAuth->getMessage() : 'geen exception'));
+}
+if (!odata_mimir_circuit_open()) {
+    fail('een Mímir-storing moet het circuit openen, ook als de environment-auth ontbreekt');
+}
+if (count($calls) !== $callsBeforeMissingSandbox) {
+    fail('live-fallback mag de meegegeven credentials niet naar het andere environment sturen: ' . json_encode($calls[$callsBeforeMissingSandbox] ?? null));
+}
+
 $loggedBeforeRethrow = fallback_count();
 $callsBeforeRethrow = count($calls);
 odata_mimir_circuit_reset();

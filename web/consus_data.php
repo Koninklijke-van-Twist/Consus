@@ -3166,9 +3166,14 @@ function consus_each_url_live(string $url, array $auth, callable $onRow, ?callab
                 $directAuth = $auth;
                 if (function_exists('odata_bc_resolve_environment_from_url') && function_exists('odata_bc_auth_for_resolved')) {
                     $matched = odata_bc_auth_for_resolved(odata_bc_resolve_environment_from_url($url), $auth);
-                    if (is_array($matched)) {
-                        $directAuth = $matched;
+                    if (!is_array($matched)) {
+                        $previous = function_exists('odata_mimir_last_error') ? odata_mimir_last_error() : null;
+                        if ($previous instanceof Throwable) {
+                            throw $previous;
+                        }
+                        throw new Exception('Mímir mislukt.');
                     }
+                    $directAuth = $matched;
                 } elseif (function_exists('odata_bc_auth_for_fallback')) {
                     $resolved = odata_bc_auth_for_fallback($auth);
                     if (is_array($resolved)) {
