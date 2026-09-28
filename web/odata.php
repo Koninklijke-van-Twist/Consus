@@ -80,11 +80,11 @@ function odata_mimir_last_error(): ?Throwable
 function odata_mimir_trip(Throwable $exception): void
 {
     $state = &odata_mimir_circuit_state();
-    if ($state['open'] === true) {
-        return;
+    if ($state['open'] !== true) {
+        $state['open'] = true;
+        $state['error'] = $exception;
     }
-    $state['open'] = true;
-    $state['error'] = $exception;
+    odata_bc_restore_fallback_credentials();
 }
 
 function odata_mimir_circuit_reset(): void
@@ -258,19 +258,27 @@ function odata_bc_ensure_config_loaded(): void
 
 function odata_bc_base_url(): ?string
 {
-    global $baseUrl;
-    if (!isset($baseUrl) || !is_string($baseUrl)) {
-        return null;
+    global $baseUrl, $base;
+    $candidates = [];
+    if (isset($baseUrl) && is_string($baseUrl)) {
+        $candidates[] = $baseUrl;
     }
-    $base = trim($baseUrl);
-    if ($base === '' || stripos($base, 'mimir.invalid') !== false) {
-        return null;
+    if (isset($base) && is_string($base)) {
+        $candidates[] = $base;
     }
-    return rtrim($base, '/') . '/';
+    foreach ($candidates as $candidate) {
+        $value = trim($candidate);
+        if ($value === '' || stripos($value, 'mimir.invalid') !== false) {
+            continue;
+        }
+        return rtrim($value, '/') . '/';
+    }
+    return null;
 }
 
 function odata_bc_environment(): ?string
 {
+    odata_bc_restore_fallback_credentials();
     global $environment, $auth_list;
     if (isset($environment) && is_string($environment)) {
         $env = trim($environment);
@@ -379,6 +387,102 @@ function odata_bc_auth_for_named_environment(string $env): ?array
     return null;
 }
 
+function odata_bc_auth_list_is_populated(): bool
+{
+    global $auth_list;
+    if (!isset($auth_list) || !is_array($auth_list)) {
+        return false;
+    }
+    foreach ($auth_list as $entry) {
+        if (odata_auth_is_usable($entry)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Mímir-context mag $auth legen. Bewaar het origineel tot de BC-fallback het nodig heeft.
+ *
+ * @param mixed $auth
+ * @param mixed $environment
+ */
+function odata_bc_preserve_fallback_credentials($auth, $environment): void
+{
+    if (!isset($GLOBALS['CONSUS_BC_FALLBACK_PRESERVED']) || !is_array($GLOBALS['CONSUS_BC_FALLBACK_PRESERVED'])) {
+        $GLOBALS['CONSUS_BC_FALLBACK_PRESERVED'] = [];
+    }
+    if (odata_auth_is_usable($auth) && !odata_auth_is_usable($GLOBALS['CONSUS_BC_FALLBACK_PRESERVED']['auth'] ?? null)) {
+        $GLOBALS['CONSUS_BC_FALLBACK_PRESERVED']['auth'] = $auth;
+    }
+    $env = is_string($environment) ? trim($environment) : '';
+    $saved = $GLOBALS['CONSUS_BC_FALLBACK_PRESERVED']['environment'] ?? null;
+    $savedEnv = is_string($saved) ? trim($saved) : '';
+    if ($env !== '' && strcasecmp($env, 'mimir') !== 0 && ($savedEnv === '' || strcasecmp($savedEnv, 'mimir') === 0)) {
+        $GLOBALS['CONSUS_BC_FALLBACK_PRESERVED']['environment'] = $env;
+    }
+}
+
+/**
+ * Zet bewaarde BC-credentials terug zodra het circuit open is.
+ * Buiten de fallback blijft de Mímir-sentinel staan.
+ */
+function odata_bc_restore_fallback_credentials(): void
+{
+    if (!odata_mimir_circuit_open()) {
+        return;
+    }
+    $slot = $GLOBALS['CONSUS_BC_FALLBACK_PRESERVED'] ?? null;
+    if (!is_array($slot)) {
+        return;
+    }
+    global $auth, $environment;
+    if (odata_auth_is_usable($auth ?? null)) {
+        return;
+    }
+    if (!odata_auth_is_usable($slot['auth'] ?? null)) {
+        return;
+    }
+    $auth = $slot['auth'];
+    $saved = $slot['environment'] ?? null;
+    if (!is_string($saved)) {
+        return;
+    }
+    $savedEnv = trim($saved);
+    if ($savedEnv !== '' && strcasecmp($savedEnv, 'mimir') !== 0) {
+        $environment = $savedEnv;
+    }
+}
+
+function odata_bc_primary_environment_name(): ?string
+{
+    odata_bc_restore_fallback_credentials();
+    global $environment;
+    if (isset($environment) && is_string($environment)) {
+        $env = trim($environment);
+        if ($env !== '' && strcasecmp($env, 'mimir') !== 0) {
+            return $env;
+        }
+    }
+    $slot = $GLOBALS['CONSUS_BC_FALLBACK_PRESERVED'] ?? null;
+    if (is_array($slot) && isset($slot['environment']) && is_string($slot['environment'])) {
+        $saved = trim($slot['environment']);
+        if ($saved !== '' && strcasecmp($saved, 'mimir') !== 0) {
+            return $saved;
+        }
+    }
+    return null;
+}
+
+function odata_bc_environment_matches_primary(string $env): bool
+{
+    $primary = odata_bc_primary_environment_name();
+    if ($primary === null) {
+        return false;
+    }
+    return strcasecmp(trim($env), $primary) === 0;
+}
+
 /**
  * @param array{env: ?string, specific: bool} $resolved
  */
@@ -386,8 +490,21 @@ function odata_bc_auth_for_resolved(array $resolved, array $passed): ?array
 {
     $env = $resolved['env'] ?? null;
     $specific = ($resolved['specific'] ?? false) === true;
-    if ($specific && is_string($env)) {
-        return odata_bc_auth_for_named_environment($env);
+    if ($specific && is_string($env) && trim($env) !== '') {
+        $named = odata_bc_auth_for_named_environment($env);
+        if ($named !== null) {
+            return $named;
+        }
+        // Eigen auth_list-entry ontbreekt. $auth geldt als de lijst leeg is,
+        // of als dit de primaire $environment is. Een ander environment met
+        // gevulde lijst blijft null, zodat de Mímir-fout terugkomt.
+        if (!odata_bc_auth_list_is_populated() || odata_bc_environment_matches_primary($env)) {
+            if (odata_auth_is_usable($passed)) {
+                return $passed;
+            }
+            return odata_bc_auth_for_fallback([]);
+        }
+        return null;
     }
     if (odata_auth_is_usable($passed)) {
         return $passed;
@@ -400,9 +517,16 @@ function odata_bc_auth_for_fallback(array $passed): ?array
     if (odata_auth_is_usable($passed)) {
         return $passed;
     }
+    odata_bc_restore_fallback_credentials();
     global $auth;
     if (isset($auth) && odata_auth_is_usable($auth)) {
         return $auth;
+    }
+    if (odata_mimir_circuit_open()) {
+        $slot = $GLOBALS['CONSUS_BC_FALLBACK_PRESERVED'] ?? null;
+        if (is_array($slot) && odata_auth_is_usable($slot['auth'] ?? null)) {
+            return $slot['auth'];
+        }
     }
     $env = odata_bc_environment();
     if ($env !== null) {
@@ -719,10 +843,7 @@ function odata_direct_companies_as_rows(?string $environmentFilter = null): arra
 
     $out = [];
     foreach ($envs as $env) {
-        $auth = odata_bc_auth_for_named_environment($env);
-        if ($auth === null && count($envs) === 1 && $environmentFilter === null) {
-            $auth = odata_bc_auth_for_fallback([]);
-        }
+        $auth = odata_bc_auth_for_resolved(['env' => $env, 'specific' => true], []);
         if ($auth === null) {
             continue;
         }
