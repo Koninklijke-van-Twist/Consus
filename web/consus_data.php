@@ -3143,14 +3143,57 @@ function consus_fetch_url_live(string $url, array $auth): array
 
 function consus_each_url_live(string $url, array $auth, callable $onRow, ?callable $onPage = null): int
 {
-    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled()) {
-        $ttl = consus_odata_max_age();
-        $rows = odata_mimir_fetch_all($url, $ttl === 0 ? 3600 : $ttl);
+    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled() && function_exists('odata_mimir_or_direct')) {
+        return odata_mimir_or_direct(
+            static function () use ($url, $onRow, $onPage): int {
+                $ttl = consus_odata_max_age();
+                $rows = odata_mimir_fetch_all_impl($url, $ttl === 0 ? 3600 : $ttl);
+                $count = 0;
+                foreach ($rows as $row) {
+                    if (is_array($row)) {
+                        $onRow($row);
+                        $count++;
+                    }
+                }
+                if ($onPage !== null) {
+                    $onPage(1, $count);
+                }
+
+                return $count;
+            },
+            static function () use ($url, $auth, $onRow, $onPage): int {
+                $directUrl = function_exists('odata_bc_url_from_odata_url') ? odata_bc_url_from_odata_url($url) : $url;
+                $directAuth = $auth;
+                if (function_exists('odata_bc_auth_for_fallback')) {
+                    $resolved = odata_bc_auth_for_fallback($auth);
+                    if (is_array($resolved)) {
+                        $directAuth = $resolved;
+                    }
+                }
+
+                return consus_each_url_live_direct($directUrl, $directAuth, $onRow, $onPage);
+            }
+        );
+    }
+
+    return consus_each_url_live_direct($url, $auth, $onRow, $onPage);
+}
+
+/**
+ * Pre-Mímir live OData: pagina's rechtstreeks uit BC, zonder filecache.
+ * De snapshot is de dagcache.
+ */
+function consus_each_url_live_direct(string $url, array $auth, callable $onRow, ?callable $onPage = null): int
+{
+    if (isset($GLOBALS['CONSUS_ODATA_BC_FETCH']) && is_callable($GLOBALS['CONSUS_ODATA_BC_FETCH'])) {
+        $rows = $GLOBALS['CONSUS_ODATA_BC_FETCH']($url, $auth, 0);
         $count = 0;
-        foreach ($rows as $row) {
-            if (is_array($row)) {
-                $onRow($row);
-                $count++;
+        if (is_array($rows)) {
+            foreach ($rows as $row) {
+                if (is_array($row)) {
+                    $onRow($row);
+                    $count++;
+                }
             }
         }
         if ($onPage !== null) {
@@ -3331,7 +3374,11 @@ function consus_each_entity_rows(
 ): array {
     global $baseUrl;
 
-    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled()) {
+    $mimirLive = function_exists('auth_mimir_live')
+        ? auth_mimir_live()
+        : (function_exists('odata_mimir_enabled') && odata_mimir_enabled()
+            && !(function_exists('odata_mimir_circuit_open') && odata_mimir_circuit_open()));
+    if ($mimirLive) {
         try {
             $environment = auth_get_environment_for_company($company);
         } catch (Throwable $ignored) {

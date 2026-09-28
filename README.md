@@ -182,9 +182,10 @@ Zet in `web/auth.php` of `~/Repositories/auth.php` (niet in git):
 $mimirApi  = 'mimir_…';
 // optioneel:
 $mimirBase = 'https://sleutels.kvt.nl/mimir/api';
+// $baseUrl, $environment, $auth en $auth_list blijven in dit bestand staan.
 ```
 
-Met `$mimirApi` gezet zijn `$auth_list`, `$environment`, `$baseUrl` en `$auth` ongebruikt voor Business Central — company-discovery en alle OData-fetches (nightly snapshot via `consus_each_url_live` / `odata_get_all`) lopen via Mímir. Zonder `$mimirApi` blijft het bestaande directe BC-pad ongewijzigd.
+Met `$mimirApi` gezet proberen company-discovery en alle OData-fetches (nightly snapshot via `consus_each_url_live` / `odata_get_all`, ook als CLI) eerst Mímir. Faalt die aanroep (verbinding/timeout, non-2xx, ongeldige JSON of een Mímir-foutpayload), dan haalt Consus dezelfde data op via het oude directe Business Central-pad (`$baseUrl`, `$auth` / `$auth_list`, `$environment`, lokale odata-filecache) en slaat Mímir voor de rest van dat PHP-verzoek over. Laat die BC-gegevens in `auth.php` naast `$mimirApi` staan; ontbreken ze, dan komt de oorspronkelijke Mímir-fout terug. Zonder `$mimirApi` blijft alleen het directe BC-pad actief.
 
 **max_age-beleid**
 
@@ -194,7 +195,7 @@ Met `$mimirApi` gezet zijn `$auth_list`, `$environment`, `$baseUrl` en `$auth` o
 | UI / on-demand / live | **86400** (`CONSUS_ODATA_TTL`) — `index.php` doet zelf geen OData |
 | `hourly.php` | niet aanwezig in Consus |
 
-Tim moet `$mimirApi` (en optioneel `$mimirBase`) lokaal/op de server zetten; `auth.php` wordt niet gecommit. Zie [Mímir Implementatie](https://wiki.kvt.nl/books/mimir/page/implementatie).
+Tim moet `$mimirApi` (en optioneel `$mimirBase`) lokaal/op de server zetten, en de BC-credentials (`$baseUrl`, `$environment`, `$auth` / `$auth_list`) in hetzelfde `auth.php` laten staan voor de automatische fallback. `auth.php` wordt niet gecommit. Zie [Mímir Implementatie](https://wiki.kvt.nl/books/mimir/page/implementatie).
 
 ## auth.php
 
@@ -203,4 +204,5 @@ Geen `auth.php` in deze repository. Lokaal wordt eerst
 Aequitas. Bestaat die niet, dan `web/auth.php` op de server. Die staat in
 `.gitignore` en wordt bij de FTP-deploy niet overschreven. Variabelen zijn
 dezelfde als bij de andere apps: `$baseUrl`, `$environment`, `$auth_list` en
-`$allowedUsers`.
+`$allowedUsers`. Die BC-gegevens blijven naast `$mimirApi` staan; ze zijn de
+fallback als Mímir niet bereikbaar is.

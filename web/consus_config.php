@@ -225,6 +225,7 @@ const CONSUS_ODATA_PAGE_SIZE = 20000;
 /**
  * Mímir max_age for UI / on-demand / live recheck when $mimirApi is set.
  * Consus index.php doet geen OData; deze TTL geldt als er toch live wordt gehaald.
+ * Valt Mímir uit, dan geldt deze max_age niet: de fetch gaat direct naar BC.
  */
 const CONSUS_ODATA_TTL = 86400;
 

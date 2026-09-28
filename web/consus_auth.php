@@ -45,17 +45,28 @@ function consus_load_auth(): void
     // logincheck.php doet dan array_any() op null en de pagina geeft HTTP 500.
     global $baseUrl, $allowedUsers, $auth_list, $environment, $auth, $primaryEnvironment, $mimirApi, $mimirBase;
 
-    $mimirReady = isset($mimirApi) && is_string($mimirApi) && trim($mimirApi) !== '';
-    $baseReady = isset($baseUrl) && is_string($baseUrl) && $baseUrl !== '';
-    if ($mimirReady || $baseReady) {
+    // $mimirApi alleen is niet genoeg: de BC-variabelen in hetzelfde bestand
+    // blijven nodig als Mímir uitvalt. Een synthetische mimir.invalid-base telt niet.
+    $baseReady = isset($baseUrl) && is_string($baseUrl) && trim($baseUrl) !== ''
+        && stripos($baseUrl, 'mimir.invalid') === false;
+    if ($baseReady) {
         return;
     }
 
+    $loaded = false;
     foreach (consus_auth_candidates() as $path) {
         if (is_file($path)) {
             require_once $path;
-            return;
+            $loaded = true;
+            break;
         }
+    }
+
+    $baseReady = isset($baseUrl) && is_string($baseUrl) && trim($baseUrl) !== ''
+        && stripos($baseUrl, 'mimir.invalid') === false;
+    $mimirReady = isset($mimirApi) && is_string($mimirApi) && trim($mimirApi) !== '';
+    if ($loaded || $baseReady || $mimirReady) {
+        return;
     }
 
     $message = 'auth.php niet gevonden. Lokaal: ~/Repositories/auth.php naast de repo. Op de server: web/auth.php (niet in git).';
