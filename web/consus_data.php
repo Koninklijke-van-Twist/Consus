@@ -3164,7 +3164,12 @@ function consus_each_url_live(string $url, array $auth, callable $onRow, ?callab
             static function () use ($url, $auth, $onRow, $onPage): int {
                 $directUrl = function_exists('odata_bc_url_from_odata_url') ? odata_bc_url_from_odata_url($url) : $url;
                 $directAuth = $auth;
-                if (function_exists('odata_bc_auth_for_fallback')) {
+                if (function_exists('odata_bc_resolve_environment_from_url') && function_exists('odata_bc_auth_for_resolved')) {
+                    $matched = odata_bc_auth_for_resolved(odata_bc_resolve_environment_from_url($url), $auth);
+                    if (is_array($matched)) {
+                        $directAuth = $matched;
+                    }
+                } elseif (function_exists('odata_bc_auth_for_fallback')) {
                     $resolved = odata_bc_auth_for_fallback($auth);
                     if (is_array($resolved)) {
                         $directAuth = $resolved;
