@@ -7,14 +7,27 @@ function consus_normalize_email(string $email): string
     return strtolower(trim($email));
 }
 
+function consus_normalize_page_size($value): int
+{
+    $size = (int) $value;
+    foreach (CONSUS_PAGE_SIZES as $allowed) {
+        if ($size === (int) $allowed) {
+            return $size;
+        }
+    }
+
+    return CONSUS_DEFAULT_PAGE_SIZE;
+}
+
 /**
- * @return array{customers:array<int, string>,items:array<int, string>}
+ * @return array{customers:array<int, string>,items:array<int, string>,page_size:int}
  */
 function consus_empty_prefs(): array
 {
     return [
         'customers' => [],
         'items' => [],
+        'page_size' => CONSUS_DEFAULT_PAGE_SIZE,
     ];
 }
 
@@ -68,7 +81,39 @@ function consus_prefs_normalize_list($value, int $limit = 500): array
 }
 
 /**
- * @return array{customers:array<int, string>,items:array<int, string>}
+ * Alleen meegestuurde velden. Een paginagrootte-opslag wist zo de
+ * uitsluitingen niet, en een filteropslag de paginagrootte niet.
+ *
+ * @param array<string, mixed> $post
+ * @return array<string, mixed>
+ */
+function consus_prefs_input_from_request(array $post): array
+{
+    $input = [];
+    foreach (['customers', 'items', 'page_size'] as $key) {
+        if (array_key_exists($key, $post)) {
+            $input[$key] = $post[$key];
+        }
+    }
+
+    return $input;
+}
+
+/**
+ * @param array<string, mixed> $decoded
+ * @return array{customers:array<int, string>,items:array<int, string>,page_size:int}
+ */
+function consus_prefs_from_array(array $decoded): array
+{
+    return [
+        'customers' => consus_prefs_normalize_list($decoded['customers'] ?? []),
+        'items' => consus_prefs_normalize_list($decoded['items'] ?? []),
+        'page_size' => consus_normalize_page_size($decoded['page_size'] ?? CONSUS_DEFAULT_PAGE_SIZE),
+    ];
+}
+
+/**
+ * @return array{customers:array<int, string>,items:array<int, string>,page_size:int}
  */
 function consus_prefs_read(string $email): array
 {
@@ -86,49 +131,53 @@ function consus_prefs_read(string $email): array
         return consus_empty_prefs();
     }
 
-    return [
-        'customers' => consus_prefs_normalize_list($decoded['customers'] ?? []),
-        'items' => consus_prefs_normalize_list($decoded['items'] ?? []),
-    ];
+    return consus_prefs_from_array($decoded);
 }
 
 /**
  * @param array<string, mixed> $input
- * @return array{customers:array<int, string>,items:array<int, string>}
+ * @return array{customers:array<int, string>,items:array<int, string>,page_size:int}
  */
 function consus_prefs_write(string $email, array $input): array
 {
     $email = consus_normalize_email($email);
-    $prefs = [
-        'email' => $email,
-        'customers' => consus_prefs_normalize_list($input['customers'] ?? []),
-        'items' => consus_prefs_normalize_list($input['items'] ?? []),
-    ];
     $path = consus_prefs_file_for_email($email);
-    consus_write_json_locked($path, $prefs);
+    $stored = consus_update_json_locked($path, static function (array $previous) use ($email, $input): array {
+        $current = consus_prefs_from_array($previous);
+        if (array_key_exists('customers', $input)) {
+            $current['customers'] = consus_prefs_normalize_list($input['customers']);
+        }
+        if (array_key_exists('items', $input)) {
+            $current['items'] = consus_prefs_normalize_list($input['items']);
+        }
+        if (array_key_exists('page_size', $input)) {
+            $current['page_size'] = consus_normalize_page_size($input['page_size']);
+        }
 
-    return [
-        'customers' => $prefs['customers'],
-        'items' => $prefs['items'],
-    ];
+        return [
+            'email' => $email,
+            'customers' => $current['customers'],
+            'items' => $current['items'],
+            'page_size' => $current['page_size'],
+        ];
+    });
+
+    return consus_prefs_from_array($stored);
 }
 
 /**
- * Atomair schrijven met een aparte lock, zoals de snapshot.
+ * Leest en schrijft onder één lock, zodat paginagrootte en uitsluitingen
+ * elkaar niet overschrijven.
  *
- * @param array<string, mixed> $payload
+ * @param callable(array<string, mixed>):array<string, mixed> $update
+ * @return array<string, mixed>
  */
-function consus_write_json_locked(string $path, array $payload): void
+function consus_update_json_locked(string $path, callable $update): array
 {
     $directory = dirname($path);
     if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
         throw new RuntimeException('Map voor voorkeuren kon niet worden aangemaakt.');
     }
-    $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
-    if (!is_string($json)) {
-        throw new RuntimeException('Voorkeuren konden niet als JSON worden gecodeerd.');
-    }
-    $json .= "\n";
 
     $lockPath = $path . '.lock';
     $lock = @fopen($lockPath, 'c+');
@@ -141,6 +190,20 @@ function consus_write_json_locked(string $path, array $payload): void
         if (!flock($lock, LOCK_EX)) {
             throw new RuntimeException('Voorkeuren-lock kon niet worden verkregen.');
         }
+        $previous = [];
+        if (is_file($path)) {
+            $raw = @file_get_contents($path);
+            $decoded = is_string($raw) ? json_decode($raw, true) : null;
+            if (is_array($decoded)) {
+                $previous = $decoded;
+            }
+        }
+        $payload = $update($previous);
+        $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if (!is_string($json)) {
+            throw new RuntimeException('Voorkeuren konden niet als JSON worden gecodeerd.');
+        }
+        $json .= "\n";
         if (@file_put_contents($temporary, $json, LOCK_EX) === false) {
             throw new RuntimeException('Tijdelijke voorkeuren konden niet worden geschreven.');
         }
@@ -148,10 +211,24 @@ function consus_write_json_locked(string $path, array $payload): void
             @unlink($temporary);
             throw new RuntimeException('Voorkeuren konden niet atomair worden vervangen.');
         }
+
+        return $payload;
     } finally {
         flock($lock, LOCK_UN);
         fclose($lock);
     }
+}
+
+/**
+ * Atomair schrijven met een aparte lock, zoals de snapshot.
+ *
+ * @param array<string, mixed> $payload
+ */
+function consus_write_json_locked(string $path, array $payload): void
+{
+    consus_update_json_locked($path, static function () use ($payload): array {
+        return $payload;
+    });
 }
 
 function consus_csrf_token(): string

@@ -113,6 +113,15 @@ $ungenerated['generated_at'] = '';
 $ungeneratedSheets = consus_xlsx_sheets($ungenerated, ['customers' => [], 'items' => []], ['company' => 'kvt']);
 xlsx_assert(count($ungeneratedSheets[0]['rows']) === 1, 'lege generated_at exporteert alleen de header');
 
+$sorted = consus_xlsx_sheets($snapshot, ['customers' => [], 'items' => [], 'page_size' => 10], [
+    'company' => 'kvt',
+    'sort' => '2',
+    'dir' => 'desc',
+]);
+xlsx_assert(count($sorted[0]['rows']) === 3, 'export bevat alle rijen, niet één pagina');
+xlsx_assert((string) $sorted[0]['rows'][1][0] === 'ART-1', 'aflopend jaartotaal zet het grootste artikel eerst');
+xlsx_assert((float) $sorted[0]['rows'][1][2] > (float) $sorted[0]['rows'][2][2], 'eerste totaal is groter dan het tweede');
+
 $binary = consus_xlsx_binary($sheets);
 $path = sys_get_temp_dir() . '/consus-xlsx-test-' . getmypid() . '.xlsx';
 file_put_contents($path, $binary);

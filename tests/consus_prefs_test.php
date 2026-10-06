@@ -28,7 +28,18 @@ try {
     prefs_assert($written['customers'] === ['C1', 'C2'], 'klanten worden uniek en getrimd');
     prefs_assert($written['items'] === ['ART-1', 'ART-2'], 'artikelen worden uniek, hoofdletters van de eerste blijven');
     $again = consus_prefs_read('tim@kvt.nl');
+    prefs_assert($written['page_size'] === 20, 'paginagrootte valt terug op 20');
     prefs_assert($again === $written, 'lezen geeft dezelfde lijsten terug');
+    $sized = consus_prefs_write('tim@kvt.nl', ['page_size' => 150]);
+    prefs_assert($sized['page_size'] === 150, 'geldige paginagrootte blijft staan');
+    prefs_assert($sized['customers'] === ['C1', 'C2'], 'paginagrootte wist de klanten niet');
+    prefs_assert($sized['items'] === ['ART-1', 'ART-2'], 'paginagrootte wist de artikelen niet');
+    $kept = consus_prefs_write('tim@kvt.nl', ['customers' => 'C9']);
+    prefs_assert($kept['page_size'] === 150, 'filteropslag houdt de paginagrootte');
+    prefs_assert($kept['items'] === ['ART-1', 'ART-2'], 'alleen meegestuurde klanten wijzigen');
+    $invalid = consus_prefs_write('tim@kvt.nl', ['page_size' => 15]);
+    prefs_assert($invalid['page_size'] === 20, 'ongeldige paginagrootte wordt 20');
+    prefs_assert(consus_prefs_input_from_request(['page_size' => '50', 'extra' => 'nee']) === ['page_size' => '50'], 'request houdt alleen bekende velden');
     prefs_assert(is_file($path), 'json-bestand staat op schijf');
     prefs_assert(!is_file($path . '.tmp.' . getmypid()), 'tijdelijk bestand is hernoemd');
 

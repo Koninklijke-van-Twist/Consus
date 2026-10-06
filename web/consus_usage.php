@@ -532,6 +532,45 @@ function consus_usage_row_values(array $row): array
 }
 
 /**
+ * Zelfde kolom en richting als de tabel, op de volledige set. Ongelijke
+ * waarden bepalen de volgorde; bij gelijkheid artikelnummer en daarna bedrijf.
+ * Een onbekende kolom laat de bestaande volgorde staan.
+ *
+ * @param array<int, array<string, mixed>> $rows
+ * @return array<int, array<string, mixed>>
+ */
+function consus_sort_usage_rows(array $rows, $column, string $direction): array
+{
+    $labels = consus_usage_column_labels();
+    $index = (int) $column;
+    if ($column === null || $column === '' || $index < 0 || $index >= count($labels)) {
+        return $rows;
+    }
+    $descending = $direction === 'desc';
+    usort($rows, static function (array $left, array $right) use ($index, $descending): int {
+        $leftValues = consus_usage_row_values($left);
+        $rightValues = consus_usage_row_values($right);
+        if ($index === 0) {
+            $result = strnatcasecmp((string) $leftValues[0], (string) $rightValues[0]);
+        } else {
+            $leftNumber = (float) ($leftValues[$index] ?? 0);
+            $rightNumber = (float) ($rightValues[$index] ?? 0);
+            $result = $leftNumber < $rightNumber ? -1 : ($leftNumber > $rightNumber ? 1 : 0);
+        }
+        if ($result === 0) {
+            $result = strnatcasecmp((string) ($left['item_no'] ?? ''), (string) ($right['item_no'] ?? ''));
+        }
+        if ($result === 0) {
+            $result = strnatcasecmp((string) ($left['company_label'] ?? ''), (string) ($right['company_label'] ?? ''));
+        }
+
+        return $descending ? -$result : $result;
+    });
+
+    return $rows;
+}
+
+/**
  * @param array<string, mixed> $snapshot
  * @return array<int, array{no:string,name:string,company_key:string,label:string}>
  */

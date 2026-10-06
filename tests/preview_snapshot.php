@@ -104,5 +104,39 @@ function preview_snapshot(): array
         ];
     }
 
+    for ($index = 1; $index <= 3000; $index++) {
+        $item = sprintf('A-%04d', $index);
+        $low = $index === 1;
+        $amount = $low ? 100 : ($index % 90);
+        $snapshot['articles'][] = [
+            'company_key' => 'kvt',
+            'company_name' => 'Koninklijke van Twist',
+            'item_no' => $item,
+            'description' => 'Voorraadregel ' . $item,
+            'vendor_no' => 'PERK',
+            'vendor_name' => 'Perkins',
+            'cost_center' => '5',
+            'location' => 'KVT',
+            'inventory' => $low ? 1 : 80,
+            'safety_stock' => $low ? 25 : 4,
+            'reorder_point' => 0,
+            'consumption' => ['months' => [], 'days' => [], 'm' => 0, 'q' => 0, 'y' => 0],
+        ];
+        $months = [];
+        foreach ([2023, 2024, 2025, 2026] as $year) {
+            $months[sprintf('%04d-01', $year)] = [
+                'internal' => $year === 2026 ? round($amount * 0.4, 1) : (float) $amount,
+                'customers' => [],
+            ];
+        }
+        $snapshot['item_usage'][] = [
+            'company_key' => 'kvt',
+            'item_no' => $item,
+            'cost_center' => '5',
+            'months' => $months,
+            'days' => [],
+        ];
+    }
+
     return $snapshot;
 }

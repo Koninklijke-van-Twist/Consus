@@ -69,14 +69,16 @@ if ($path === '/prefs.php') {
         echo 'De filters zijn niet opgeslagen.';
         return true;
     }
-    $saved = consus_prefs_write($email, [
-        'customers' => $_POST['customers'] ?? [],
-        'items' => $_POST['items'] ?? [],
-    ]);
+    $saved = consus_prefs_write($email, consus_prefs_input_from_request($_POST));
     $accept = (string) ($_SERVER['HTTP_ACCEPT'] ?? '');
     if (strpos($accept, 'application/json') !== false) {
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['ok' => true, 'customers' => $saved['customers'], 'items' => $saved['items']], JSON_UNESCAPED_UNICODE);
+        echo json_encode([
+            'ok' => true,
+            'customers' => $saved['customers'],
+            'items' => $saved['items'],
+            'page_size' => $saved['page_size'],
+        ], JSON_UNESCAPED_UNICODE);
         return true;
     }
     $company = trim((string) ($_POST['company'] ?? ''));
