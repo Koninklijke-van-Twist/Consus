@@ -6,7 +6,38 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 12;
+const CONSUS_SNAPSHOT_VERSION = 13;
+
+/**
+ * Jaartabs op de pagina: het huidige kalenderjaar plus dit aantal
+ * voorgaande jaren. Het grootboekvenster begint daardoor op 1 januari
+ * van (huidig jaar − dit aantal). Een andere waarde dwingt de eerstvolgende
+ * nightly koud, omdat de snapshotversie meestijgt als het venster anders
+ * moet — pas dan ook CONSUS_SNAPSHOT_VERSION aan.
+ */
+const CONSUS_HISTORY_PREVIOUS_YEARS = 3;
+
+/**
+ * Verbruik in maand, kwartaal en totaal.
+ * Sale is de klantafname (BC-teken omgedraaid, retouren trekken af).
+ * Intern is Negative Adjmt. met Document_No WO… plus Assembly Consumption.
+ * Zet een vlag op false om die bron uit de maandkolommen te laten; de kolom
+ * Intern Verbruik blijft altijd het interne jaartotaal.
+ */
+const CONSUS_USAGE_INCLUDES_SALE = true;
+const CONSUS_USAGE_INCLUDES_INTERNAL = true;
+
+/**
+ * Te weinig voorraad: huidige voorraad is strikt lager dan het verwachte
+ * resterende verbruik van dit jaar. Het artikelnummer wordt dan geel.
+ */
+const CONSUS_LOW_STOCK_WHEN_INVENTORY_BELOW_EXPECTED = true;
+
+/**
+ * Resterend deel van het jaar telt de peildatum mee, tot en met 31 december.
+ * 1 januari is dan het hele jaar; 31 december is één dag.
+ */
+const CONSUS_REMAINING_DAYS_INCLUDE_TODAY = true;
 
 /**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
@@ -181,6 +212,38 @@ const CONSUS_LEDGER_OPTIONAL_FIELDS = [
     'Buy_from_Vendor_No',
     'Global_Dimension_1_Code',
     'LVS_Global_Dimension_1_Code',
+];
+
+/**
+ * Klant op een verkooppost. Source_No is het klantnummer als Source_Type
+ * Customer is. Beide zijn optioneel: weigert BC een veld, dan blijft de
+ * verkoopquery staan en valt de klantuitsplitsing terug op wat er wél is.
+ */
+const CONSUS_LEDGER_SOURCE_NO_FIELD = 'Source_No';
+const CONSUS_LEDGER_SOURCE_TYPE_FIELD = 'Source_Type';
+const CONSUS_CUSTOMER_SOURCE_TYPES = [
+    'Customer',
+];
+
+/**
+ * Klantcatalogus voor de suggesties (nummer + naam). De eerste entiteit die
+ * BC accepteert wint. Lukt geen van alle, dan tonen de suggesties alleen
+ * nummers uit de artikelposten.
+ */
+const CONSUS_CUSTOMER_ENTITIES = [
+    'Customer',
+    'Customer_Card',
+    'Customers',
+];
+const CONSUS_CUSTOMER_NO_FIELDS = [
+    'No',
+    'Customer_No',
+    'Number',
+];
+const CONSUS_CUSTOMER_NAME_FIELDS = [
+    'Name',
+    'DisplayName',
+    'Customer_Name',
 ];
 
 /**

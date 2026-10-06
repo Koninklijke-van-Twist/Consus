@@ -33,7 +33,9 @@ $windows = test_windows();
 test_assert($windows['month_start'] === '2026-09-01', 'maandvenster');
 test_assert($windows['quarter_start'] === '2026-07-01', 'kwartaalvenster');
 test_assert($windows['year_start'] === '2026-01-01', 'jaarvenster');
-test_assert($windows['history_start'] === '2025-10-01', 'twaalf maanden historie');
+$historyYear = (int) substr($windows['as_of'], 0, 4) - (int) CONSUS_HISTORY_PREVIOUS_YEARS;
+test_assert($windows['history_start'] === $historyYear . '-01-01', 'historie start op 1 januari van huidig jaar min N');
+test_assert(CONSUS_HISTORY_PREVIOUS_YEARS === 3, 'jaartabs zijn het huidige jaar plus drie voorgaande jaren');
 
 test_assert(CONSUS_EIGEN_LOCATION_HINTS === ['KVT', 'HVT'], 'eigen-magazijnhint is KVT en HVT');
 test_assert(CONSUS_DROPSHIP_PURCHASING_CODE === 'DROP_SHIP', 'dropship-inkoopcode');
@@ -50,9 +52,14 @@ test_assert(consus_procurement_bucket('', '') === 'eigen' && consus_procurement_
 test_assert(CONSUS_SALES_ENTRY_TYPES === ['Sale'], 'verkoop is de Engelse optienaam Sale');
 test_assert(CONSUS_ODATA_PAGE_SIZE === 20000, 'pagina is groot genoeg om round-trips te beperken');
 $chunks = consus_ledger_date_chunks($windows);
-test_assert(count($chunks) === 12, 'artikelposten lopen per maand door het twaalfmaandsvenster');
-test_assert($chunks[0] === ['from' => '2025-10-01', 'to' => '2025-11-01'], 'eerste maand start op history_start');
-test_assert($chunks[11] === ['from' => '2026-09-01', 'to' => '2026-09-25'], 'lopende maand stopt de dag na as_of');
+$historyDate = new DateTimeImmutable($windows['history_start'] . ' 00:00:00', new DateTimeZone('Europe/Amsterdam'));
+$asOfDate = new DateTimeImmutable($windows['as_of'] . ' 00:00:00', new DateTimeZone('Europe/Amsterdam'));
+$expectedMonths = ((int) $asOfDate->format('Y') - (int) $historyDate->format('Y')) * 12
+    + ((int) $asOfDate->format('n') - (int) $historyDate->format('n'))
+    + 1;
+test_assert(count($chunks) === $expectedMonths, 'artikelposten lopen per maand door het historievenster');
+test_assert($chunks[0] === ['from' => '2023-01-01', 'to' => '2023-02-01'], 'eerste maand start op history_start');
+test_assert($chunks[count($chunks) - 1] === ['from' => '2026-09-01', 'to' => '2026-09-25'], 'lopende maand stopt de dag na as_of');
 $previousChunkEnd = $windows['history_start'];
 foreach ($chunks as $chunk) {
     test_assert($chunk['from'] === $previousChunkEnd, 'maanden sluiten op elkaar aan');
@@ -62,7 +69,7 @@ test_assert($previousChunkEnd === '2026-09-25', 'laatste grens is de dag na as_o
 $salesFilters = consus_ledger_filters(CONSUS_SALES_ENTRY_TYPES, $chunks[0]['from'], $chunks[0]['to'], '', true, false);
 test_assert(count($salesFilters) === 1, 'verkoop is één Entry_Type-query');
 test_assert(
-    $salesFilters[0]['$filter'] === "Entry_Type eq 'Sale' and Posting_Date ge 2025-10-01 and Posting_Date lt 2025-11-01",
+    $salesFilters[0]['$filter'] === "Entry_Type eq 'Sale' and Posting_Date ge 2023-01-01 and Posting_Date lt 2023-02-01",
     'verkoopfilter gebruikt de Engelse optienaam en een maandgrens'
 );
 test_assert(!str_contains($salesFilters[0]['$filter'], 'Verkoop'), 'Nederlands bijschrift Verkoop is geen optie op ItemLedgerEntries');
@@ -1776,16 +1783,18 @@ if ($savedProgressEnv === false) {
 }
 
 $index = (string) file_get_contents(__DIR__ . '/../web/index.php');
+$page = (string) file_get_contents(__DIR__ . '/../web/consus_page.php');
 test_assert(!str_contains($index, 'odata_get'), 'index.php doet geen OData-call');
 test_assert(!str_contains($index, 'curl_'), 'index.php gebruikt geen cURL');
 test_assert(!str_contains($index, 'consus_run_nightly'), 'index.php start geen BC-refresh');
 test_assert(!str_contains($index, 'Perkins'), 'index.php zet Perkins niet vast');
-test_assert(str_contains($index, 'consus_warning_lines'), 'index toont snapshotwaarschuwingen');
-test_assert(str_contains($index, 'De nachtrun is afgerond, met opmerkingen.'), 'opmerkingen hebben een zichtbare kop');
-test_assert(str_contains($index, '(geen afdeling)'), 'lege afdeling blijft kiesbaar');
-test_assert(str_contains($index, 'Geen leverancier'), 'lege leverancier blijft kiesbaar');
-test_assert(str_contains($index, "\$number === '' ? '__none__' : \$number"), 'lege leverancier gebruikt dezelfde sentinel als afdeling');
-test_assert(!str_contains($index, "if (\$number === '') { continue; }"), 'lege leverancier wordt niet uit de dropdown gelaten');
+test_assert(str_contains($index, 'consus_page_render'), 'index.php toont de jaartabel');
+test_assert(str_contains($page, 'consus_warning_lines'), 'pagina toont snapshotwaarschuwingen');
+test_assert(str_contains($page, 'De nachtrun is afgerond, met opmerkingen.'), 'opmerkingen hebben een zichtbare kop');
+test_assert(str_contains($page, '(geen afdeling)'), 'lege afdeling blijft kiesbaar');
+test_assert(!str_contains($page, 'Geen leverancier'), 'leverancier- en locatiefilter zijn van de pagina');
+test_assert(!str_contains($page, 'Omloopsnelheid'), 'omloopsnelheid is van de pagina');
+test_assert(str_contains($page, 'consus_usage_column_labels'), 'pagina gebruikt de afgesproken kolommen');
 test_assert(str_contains((string) file_get_contents(__DIR__ . '/../web/nightly.php'), 'consus_run_nightly'), 'nightly.php is de refresh');
 
 $lockProbeDir = sys_get_temp_dir() . '/consus-lock-probe-' . getmypid();
@@ -1810,8 +1819,12 @@ rmdir($badLock);
 putenv('CONSUS_SNAPSHOT_FILE');
 rmdir($lockProbeDir);
 
-$stepIds = array_column(consus_ledger_steps(), 'id');
+$ledgerSteps = consus_ledger_steps();
+$stepIds = array_column($ledgerSteps, 'id');
 test_assert($stepIds === ['verkoop', 'verbruik-wo', 'verbruik-assemblage'], 'checkpoints per verkoop, WO en assemblage');
+test_assert(!empty($ledgerSteps[0]['include_customer']), 'alleen verkoop vraagt Source_No en Source_Type mee');
+test_assert(empty($ledgerSteps[1]['include_customer']) && empty($ledgerSteps[2]['include_customer']), 'werkorderverbruik vraagt geen klant');
+test_assert(consus_ledger_customer_fields() === ['Source_No', 'Source_Type'], 'klantvelden op de verkooppost');
 test_assert(consus_shift_date('2026-09-24', -1) === '2026-09-23', 'dag terug blijft een kalenderdag');
 
 $warmQuery = consus_ledger_query(['Sale'], '2026-09-23', '2026-09-25', '', true, false);
@@ -1831,15 +1844,15 @@ test_assert(consus_warm_ledger_from($warmStat, $windows, true, true) === '', 'fu
 test_assert(consus_warm_ledger_from($warmStat, $windows, false, false) === '', 'zonder vorige rijen geen warm');
 test_assert(consus_warm_ledger_from([], $windows, true, false) === '', 'zonder watermerk koud');
 $staleMarker = $warmStat;
-$staleMarker['ledger_through'] = '2024-01-01';
-$staleMarker['ledger_overlap_from'] = '2024-01-01';
+$staleMarker['ledger_through'] = '2022-06-01';
+$staleMarker['ledger_overlap_from'] = '2022-06-01';
 test_assert(consus_warm_ledger_from($staleMarker, $windows, true, false) === '', 'watermerk buiten het venster is koud');
 
 $warmPlan = consus_ledger_plan($warmStat, $windows, true, false);
 test_assert($warmPlan['mode'] === 'warm', 'plan met watermerk is warm');
 test_assert($warmPlan['chunks'] === [['from' => '2026-09-23', 'to' => '2026-09-25']], 'warm haalt de overlapdag en de nieuwe dag');
 $coldPlan = consus_ledger_plan($warmStat, $windows, true, true);
-test_assert($coldPlan['mode'] === 'cold' && count($coldPlan['chunks']) === 12, 'full haalt twaalf maanden');
+test_assert($coldPlan['mode'] === 'cold' && count($coldPlan['chunks']) === count($chunks), 'full haalt elke maand van het historievenster');
 
 $failedKeep = consus_failed_company_stat('Koninklijke van Twist', 'kvt', 4, $warmStat, true);
 test_assert(($failedKeep['ledger_through'] ?? '') === '2026-09-23', 'stale houdt het watermerk als de vorige rijen blijven');
@@ -2096,7 +2109,7 @@ $octoberMerged = consus_merge_warm_company_rows(
         'item_nos' => ['A1' => true],
         'sales' => ['eigen' => [
             'months' => [
-                '2025-10' => ['qty' => 10, 'amount' => 10],
+                '2022-10' => ['qty' => 10, 'amount' => 10],
                 '2026-09' => ['qty' => 30, 'amount' => 30],
             ],
             'days' => ['2026-09-30' => ['qty' => 3, 'amount' => 3]],
@@ -2136,7 +2149,7 @@ $octoberMerged = consus_merge_warm_company_rows(
 $octoberRow = $octoberMerged[0];
 test_assert(abs((float) $octoberRow['sales']['eigen']['months']['2026-09']['qty'] - 31) < 0.0001, 'september blijft volledig na de maandgrens');
 test_assert(abs((float) $octoberRow['sales']['eigen']['m']['qty'] - 1) < 0.0001, 'nieuwe maand telt alleen oktober');
-test_assert(!isset($octoberRow['sales']['eigen']['months']['2025-10']), 'maand die uit het venster valt verdwijnt');
+test_assert(!isset($octoberRow['sales']['eigen']['months']['2022-10']), 'maand die uit het venster valt verdwijnt');
 test_assert(abs((float) $octoberRow['sales']['eigen']['days']['2026-10-01']['qty'] - 1) < 0.0001, 'overlapdag schuift mee naar de nieuwe peildatum');
 
 $checkpointRoot = sys_get_temp_dir() . '/consus-checkpoint-' . getmypid() . '.json';

@@ -7,10 +7,9 @@ require_once __DIR__ . '/consus_auth.php';
 consus_load_auth();
 require_once __DIR__ . '/logincheck.php';
 require_once __DIR__ . '/consus_data.php';
-require_once __DIR__ . '/consus_usage.php';
 require_once __DIR__ . '/consus_prefs.php';
-require_once __DIR__ . '/consus_page.php';
+require_once __DIR__ . '/consus_xlsx.php';
 
 $email = consus_session_email();
 $prefs = $email !== '' ? consus_prefs_read($email) : consus_empty_prefs();
-consus_page_render(consus_read_snapshot(), $prefs, $_GET, consus_csrf_token());
+consus_xlsx_download(consus_read_snapshot(), $prefs, $_GET);

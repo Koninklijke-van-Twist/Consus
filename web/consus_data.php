@@ -543,6 +543,7 @@ function consus_ledger_steps(): array
         'entry_types' => CONSUS_SALES_ENTRY_TYPES,
         'document_prefix' => '',
         'include_amount' => true,
+        'include_customer' => true,
         'progress_step' => 'verkoop',
     ]];
     foreach (consus_wo_ledger_parts() as $part) {
@@ -553,6 +554,7 @@ function consus_ledger_steps(): array
             'entry_types' => is_array($part['entry_types'] ?? null) ? $part['entry_types'] : [],
             'document_prefix' => $prefix,
             'include_amount' => false,
+            'include_customer' => false,
             'progress_step' => 'verbruik',
         ];
     }
@@ -886,8 +888,9 @@ function consus_entity_query(array $fields, string $filter = '', ?int $top = nul
 
 /**
  * Maandgrenzen van history_start t/m de dag na as_of. Elke chunk is
- * Posting_Date ge from and lt to, zodat BC geen twaalf maanden in één
+ * Posting_Date ge from and lt to, zodat BC het venster niet in één
  * skip-keten hoeft te lopen. De totalen blijven hetzelfde venster.
+ * Een koude run hervat per afgeronde maand via de checkpoint.
  *
  * @param array{as_of:string,history_start:string} $windows
  * @return array<int, array{from:string,to:string}>
@@ -950,7 +953,11 @@ function consus_period_windows(?DateTimeImmutable $asOf = null): array
     $quarterMonth = (int) (floor(((int) $asOf->format('n') - 1) / 3) * 3 + 1);
     $quarterStart = $asOf->setDate((int) $asOf->format('Y'), $quarterMonth, 1)->setTime(0, 0);
     $yearStart = $asOf->setDate((int) $asOf->format('Y'), 1, 1)->setTime(0, 0);
-    $historyStart = $monthStart->modify('-11 months');
+    $previousYears = (int) CONSUS_HISTORY_PREVIOUS_YEARS;
+    if ($previousYears < 0) {
+        $previousYears = 0;
+    }
+    $historyStart = $asOf->setDate((int) $asOf->format('Y') - $previousYears, 1, 1)->setTime(0, 0);
 
     return [
         'as_of' => $asOf->format('Y-m-d'),
@@ -1642,7 +1649,7 @@ function consus_ledger_marker_from_stat(array $stat): array
 }
 
 /**
- * Lege string = koude run over twaalf maanden. Anders Posting_Date ge die dag.
+ * Lege string = koude run over het hele historievenster. Anders Posting_Date ge die dag.
  * Eén dag overlap: ledger_overlap_from is de laatste succesvolle peildatum,
  * die opnieuw wordt opgehaald voor late postings.
  */
@@ -2207,6 +2214,461 @@ function consus_apply_ledger_row(array &$items, array $row, string $companyKey, 
     $qty = consus_outbound_quantity($row['Quantity'] ?? 0);
     $amount = $kind === 'sales' ? consus_scalar_float($row['Sales_Amount_Actual'] ?? 0) : 0.0;
     consus_add_to_period_stats($items[$key]['by_location'][$location][$kind][$bucket], $date, $qty, $amount, $windows);
+    if ($kind === 'sales') {
+        consus_add_item_usage($items[$key], $date, $qty, 'sale', consus_ledger_customer_no($row), $windows);
+    } else {
+        consus_add_item_usage($items[$key], $date, $qty, 'internal', '', $windows);
+    }
+}
+
+/**
+ * Velden voor de klantuitsplitsing. Alleen de verkoopquery vraagt ze mee.
+ *
+ * @return array<int, string>
+ */
+function consus_ledger_customer_fields(): array
+{
+    return [
+        CONSUS_LEDGER_SOURCE_NO_FIELD,
+        CONSUS_LEDGER_SOURCE_TYPE_FIELD,
+    ];
+}
+
+/**
+ * Klantnummer bij een verkooppost. Leeg Source_Type (veld ontbreekt) houdt
+ * Source_No. Een ander type, bijvoorbeeld Vendor, telt niet als klant; de
+ * hoeveelheid blijft wel in het verbruik, zonder klantnummer.
+ */
+function consus_ledger_customer_no(array $row): string
+{
+    $sourceNo = consus_scalar_string($row[CONSUS_LEDGER_SOURCE_NO_FIELD] ?? $row['SourceNo'] ?? '');
+    if ($sourceNo === '') {
+        return '';
+    }
+
+    $sourceType = consus_scalar_string($row[CONSUS_LEDGER_SOURCE_TYPE_FIELD] ?? $row['SourceType'] ?? '');
+    if ($sourceType === '') {
+        return $sourceNo;
+    }
+
+    foreach (CONSUS_CUSTOMER_SOURCE_TYPES as $allowed) {
+        if (strcasecmp($sourceType, $allowed) === 0) {
+            return $sourceNo;
+        }
+    }
+
+    return '';
+}
+
+/**
+ * @return array{internal:float,customers:array<string, float>}
+ */
+function consus_empty_usage_month(): array
+{
+    return [
+        'internal' => 0.0,
+        'customers' => [],
+    ];
+}
+
+/**
+ * @param array<string, mixed> $month
+ * @return array{internal:float,customers:array<string, float>}
+ */
+function consus_copy_usage_month(array $month): array
+{
+    $copy = consus_empty_usage_month();
+    $copy['internal'] = (float) ($month['internal'] ?? 0);
+    $customers = is_array($month['customers'] ?? null) ? $month['customers'] : [];
+    foreach ($customers as $customerNo => $qty) {
+        $copy['customers'][(string) $customerNo] = (float) $qty;
+    }
+
+    return $copy;
+}
+
+/**
+ * Compact verbruik per artikel: maanden over het hele venster, dagen alleen
+ * de overlapdag voor de warme merge. customers is gesparseerd (alleen
+ * klanten met een hoeveelheid, plus een lege sleutel voor verkoop zonder klant).
+ *
+ * @return array{months:array<string, array{internal:float,customers:array<string, float>}>,days:array<string, array{internal:float,customers:array<string, float>}>}
+ */
+function consus_empty_item_usage(): array
+{
+    return [
+        'months' => [],
+        'days' => [],
+    ];
+}
+
+/**
+ * @param array<string, mixed> $usage
+ * @return array{months:array<string, array{internal:float,customers:array<string, float>}>,days:array<string, array{internal:float,customers:array<string, float>}>}
+ */
+function consus_copy_item_usage(array $usage): array
+{
+    $copy = consus_empty_item_usage();
+    foreach ($usage['months'] ?? [] as $month => $values) {
+        if (!is_array($values)) {
+            continue;
+        }
+        $copy['months'][(string) $month] = consus_copy_usage_month($values);
+    }
+    foreach ($usage['days'] ?? [] as $date => $values) {
+        if (!is_array($values)) {
+            continue;
+        }
+        $parsed = consus_parse_date($date);
+        if ($parsed === '') {
+            continue;
+        }
+        $copy['days'][$parsed] = consus_copy_usage_month($values);
+    }
+
+    return $copy;
+}
+
+/**
+ * @param array{internal:float,customers:array<string, float>} $month
+ */
+function consus_usage_month_add(array &$month, string $kind, string $customerNo, float $qty): void
+{
+    if ($kind === 'internal') {
+        $month['internal'] += $qty;
+
+        return;
+    }
+
+    $customerNo = (string) $customerNo;
+    $month['customers'][$customerNo] = ($month['customers'][$customerNo] ?? 0.0) + $qty;
+}
+
+/**
+ * @param array{internal:float,customers:array<string, float>} $target
+ * @param array{internal:float,customers:array<string, float>} $source
+ * @param int $sign
+ */
+function consus_usage_month_apply(array &$target, array $source, int $sign): void
+{
+    $factor = $sign < 0 ? -1.0 : 1.0;
+    $target['internal'] += $factor * (float) ($source['internal'] ?? 0);
+    foreach ($source['customers'] ?? [] as $customerNo => $qty) {
+        $customerNo = (string) $customerNo;
+        $target['customers'][$customerNo] = ($target['customers'][$customerNo] ?? 0.0) + ($factor * (float) $qty);
+    }
+}
+
+/**
+ * @param array<string, mixed> $item
+ * @param array{as_of:string,history_start:string,retain_days_from?:string} $windows
+ */
+function consus_add_item_usage(array &$item, string $date, float $qty, string $kind, string $customerNo, array $windows): void
+{
+    $date = consus_parse_date($date);
+    if ($date === '' || $date < (string) ($windows['history_start'] ?? '') || $date > (string) ($windows['as_of'] ?? '')) {
+        return;
+    }
+    if (abs($qty) < 0.0000001) {
+        return;
+    }
+    if (!isset($item['usage']) || !is_array($item['usage'])) {
+        $item['usage'] = consus_empty_item_usage();
+    }
+
+    $month = substr($date, 0, 7);
+    if (!isset($item['usage']['months'][$month]) || !is_array($item['usage']['months'][$month])) {
+        $item['usage']['months'][$month] = consus_empty_usage_month();
+    }
+    consus_usage_month_add($item['usage']['months'][$month], $kind, $customerNo, $qty);
+
+    $retainFrom = consus_parse_date($windows['retain_days_from'] ?? '');
+    if ($retainFrom === '' || $date < $retainFrom) {
+        return;
+    }
+    if (!isset($item['usage']['days'][$date]) || !is_array($item['usage']['days'][$date])) {
+        $item['usage']['days'][$date] = consus_empty_usage_month();
+    }
+    consus_usage_month_add($item['usage']['days'][$date], $kind, $customerNo, $qty);
+}
+
+/**
+ * @param array{internal:float,customers:array<string, float>} $month
+ */
+function consus_usage_month_is_empty(array $month): bool
+{
+    if (abs((float) ($month['internal'] ?? 0)) >= 0.0000001) {
+        return false;
+    }
+    foreach ($month['customers'] ?? [] as $qty) {
+        if (abs((float) $qty) >= 0.0000001) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * @param array{months:array<string, mixed>,days:array<string, mixed>} $usage
+ * @param array{as_of?:string,history_start?:string,retain_days_from?:string} $windows
+ */
+function consus_finalize_item_usage(array &$usage, array $windows): void
+{
+    $history = consus_parse_date($windows['history_start'] ?? '');
+    $asOf = consus_parse_date($windows['as_of'] ?? '');
+    $retain = consus_parse_date($windows['retain_days_from'] ?? '');
+    $months = [];
+    foreach ($usage['months'] ?? [] as $month => $values) {
+        if (!is_string($month) || preg_match('/^\d{4}-\d{2}$/', $month) !== 1 || !is_array($values)) {
+            continue;
+        }
+        $monthStart = $month . '-01';
+        if ($history !== '' && $monthStart < $history) {
+            continue;
+        }
+        if ($asOf !== '' && $monthStart > $asOf) {
+            continue;
+        }
+        $clean = consus_copy_usage_month($values);
+        $keptCustomers = [];
+        foreach ($clean['customers'] as $customerNo => $qty) {
+            if (abs($qty) < 0.0000001) {
+                continue;
+            }
+            $keptCustomers[(string) $customerNo] = $qty;
+        }
+        ksort($keptCustomers);
+        $clean['customers'] = $keptCustomers;
+        if (abs($clean['internal']) < 0.0000001) {
+            $clean['internal'] = 0.0;
+        }
+        if (consus_usage_month_is_empty($clean)) {
+            continue;
+        }
+        $months[$month] = $clean;
+    }
+    ksort($months);
+    $usage['months'] = $months;
+
+    $days = [];
+    foreach ($usage['days'] ?? [] as $date => $values) {
+        if (!is_array($values)) {
+            continue;
+        }
+        $parsed = consus_parse_date($date);
+        if ($parsed === '') {
+            continue;
+        }
+        if ($retain !== '' && $parsed < $retain) {
+            continue;
+        }
+        if ($asOf !== '' && $parsed > $asOf) {
+            continue;
+        }
+        $clean = consus_copy_usage_month($values);
+        $keptCustomers = [];
+        foreach ($clean['customers'] as $customerNo => $qty) {
+            if (abs($qty) < 0.0000001) {
+                continue;
+            }
+            $keptCustomers[(string) $customerNo] = $qty;
+        }
+        ksort($keptCustomers);
+        $clean['customers'] = $keptCustomers;
+        if (abs($clean['internal']) < 0.0000001) {
+            $clean['internal'] = 0.0;
+        }
+        if (consus_usage_month_is_empty($clean)) {
+            continue;
+        }
+        $days[$parsed] = $clean;
+    }
+    ksort($days);
+    $usage['days'] = $days;
+}
+
+/**
+ * @param array{months?:array<string, mixed>,days?:array<string, mixed>} $usage
+ */
+function consus_item_usage_has_movement(array $usage): bool
+{
+    return ($usage['months'] ?? []) !== [] || ($usage['days'] ?? []) !== [];
+}
+
+/**
+ * @param array<string, mixed> $item
+ * @param array{as_of:string,history_start:string,retain_days_from?:string} $windows
+ * @return array{company_key:string,item_no:string,cost_center:string,months:array<string, mixed>,days:array<string, mixed>}|null
+ */
+function consus_item_usage_record(array $item, array $windows): ?array
+{
+    $itemNo = trim((string) ($item['item_no'] ?? ''));
+    if ($itemNo === '') {
+        return null;
+    }
+    $usage = consus_copy_item_usage(is_array($item['usage'] ?? null) ? $item['usage'] : []);
+    consus_finalize_item_usage($usage, $windows);
+    if (!consus_item_usage_has_movement($usage)) {
+        return null;
+    }
+
+    return [
+        'company_key' => (string) ($item['company_key'] ?? ''),
+        'item_no' => $itemNo,
+        'cost_center' => trim((string) ($item['cost_center'] ?? '')),
+        'months' => $usage['months'],
+        'days' => $usage['days'],
+    ];
+}
+
+/**
+ * @param array{months:array<string, mixed>,days:array<string, mixed>} $usage
+ */
+function consus_subtract_usage_days(array &$usage, string $fromDate, string $throughDate): void
+{
+    $fromDate = consus_parse_date($fromDate);
+    $throughDate = consus_parse_date($throughDate);
+    if ($fromDate === '' || $throughDate === '' || $fromDate > $throughDate) {
+        return;
+    }
+
+    foreach ($usage['days'] as $date => $day) {
+        $parsed = consus_parse_date($date);
+        if ($parsed === '' || $parsed < $fromDate || $parsed > $throughDate || !is_array($day)) {
+            continue;
+        }
+        $month = substr($parsed, 0, 7);
+        if (isset($usage['months'][$month]) && is_array($usage['months'][$month])) {
+            $monthValues = consus_copy_usage_month($usage['months'][$month]);
+            consus_usage_month_apply($monthValues, consus_copy_usage_month($day), -1);
+            $usage['months'][$month] = $monthValues;
+        }
+        unset($usage['days'][$date]);
+    }
+}
+
+/**
+ * @param array{months:array<string, mixed>,days:array<string, mixed>} $target
+ * @param array<string, mixed> $source
+ */
+function consus_add_usage_periods(array &$target, array $source): void
+{
+    foreach ($source['months'] ?? [] as $month => $values) {
+        if (!is_array($values)) {
+            continue;
+        }
+        $month = (string) $month;
+        if (!isset($target['months'][$month]) || !is_array($target['months'][$month])) {
+            $target['months'][$month] = consus_empty_usage_month();
+        }
+        $monthValues = consus_copy_usage_month($target['months'][$month]);
+        consus_usage_month_apply($monthValues, consus_copy_usage_month($values), 1);
+        $target['months'][$month] = $monthValues;
+    }
+    foreach ($source['days'] ?? [] as $date => $values) {
+        if (!is_array($values)) {
+            continue;
+        }
+        $parsed = consus_parse_date($date);
+        if ($parsed === '') {
+            continue;
+        }
+        if (!isset($target['days'][$parsed]) || !is_array($target['days'][$parsed])) {
+            $target['days'][$parsed] = consus_empty_usage_month();
+        }
+        $dayValues = consus_copy_usage_month($target['days'][$parsed]);
+        consus_usage_month_apply($dayValues, consus_copy_usage_month($values), 1);
+        $target['days'][$parsed] = $dayValues;
+    }
+}
+
+/**
+ * @param array<int, array<string, mixed>> $previousUsage
+ * @param array<int, array<string, mixed>> $freshUsage
+ * @param array{as_of:string,history_start:string,retain_days_from?:string} $windows
+ * @return array<int, array<string, mixed>>
+ */
+function consus_merge_warm_item_usage(
+    array $previousUsage,
+    array $freshUsage,
+    array $windows,
+    string $overlapFrom,
+    string $overlapThrough
+): array {
+    $previous = [];
+    foreach ($previousUsage as $record) {
+        if (!is_array($record)) {
+            continue;
+        }
+        $key = (string) ($record['company_key'] ?? '') . '|' . trim((string) ($record['item_no'] ?? ''));
+        if ($key === '|') {
+            continue;
+        }
+        $previous[$key] = $record;
+    }
+    $fresh = [];
+    foreach ($freshUsage as $record) {
+        if (!is_array($record)) {
+            continue;
+        }
+        $key = (string) ($record['company_key'] ?? '') . '|' . trim((string) ($record['item_no'] ?? ''));
+        if ($key === '|') {
+            continue;
+        }
+        $fresh[$key] = $record;
+    }
+
+    $merged = [];
+    $keys = array_keys($previous);
+    foreach (array_keys($fresh) as $key) {
+        if (!isset($previous[$key])) {
+            $keys[] = $key;
+        }
+    }
+    foreach ($keys as $key) {
+        $prev = $previous[$key] ?? null;
+        $new = $fresh[$key] ?? null;
+        $base = is_array($new) ? $new : (is_array($prev) ? $prev : null);
+        if (!is_array($base)) {
+            continue;
+        }
+        $usage = is_array($prev) ? consus_copy_item_usage($prev) : consus_empty_item_usage();
+        if (is_array($prev)) {
+            consus_subtract_usage_days($usage, $overlapFrom, $overlapThrough);
+        }
+        if (is_array($new)) {
+            consus_add_usage_periods($usage, $new);
+        }
+        consus_finalize_item_usage($usage, $windows);
+        if (!consus_item_usage_has_movement($usage)) {
+            continue;
+        }
+        $costCenter = trim((string) ($base['cost_center'] ?? ''));
+        if (is_array($new) && trim((string) ($new['cost_center'] ?? '')) !== '') {
+            $costCenter = trim((string) $new['cost_center']);
+        } elseif (is_array($prev) && trim((string) ($prev['cost_center'] ?? '')) !== '') {
+            $costCenter = trim((string) $prev['cost_center']);
+        }
+        $merged[] = [
+            'company_key' => (string) ($base['company_key'] ?? ''),
+            'item_no' => trim((string) ($base['item_no'] ?? '')),
+            'cost_center' => $costCenter,
+            'months' => $usage['months'],
+            'days' => $usage['days'],
+        ];
+    }
+
+    usort($merged, static function (array $left, array $right): int {
+        $byItem = strnatcasecmp((string) ($left['item_no'] ?? ''), (string) ($right['item_no'] ?? ''));
+        if ($byItem !== 0) {
+            return $byItem;
+        }
+
+        return strnatcasecmp((string) ($left['company_key'] ?? ''), (string) ($right['company_key'] ?? ''));
+    });
+
+    return $merged;
 }
 
 /**
@@ -2495,13 +2957,15 @@ function consus_compare_snapshot_rows(array $left, array $right): int
  * @param array<string, array<string, mixed>> $items
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
  * @param array<int, string> $unmappedLocations
- * @return array{rows:array<int, array<string, mixed>>,articles:array<int, array<string, mixed>>,vendors:array<int, array{vendor_no:string,vendor_name:string}>,cost_centers:array<int, string>,locations:array<int, string>}
+ * @return array{rows:array<int, array<string, mixed>>,articles:array<int, array<string, mixed>>,item_usage:array<int, array<string, mixed>>,vendors:array<int, array{vendor_no:string,vendor_name:string}>,cost_centers:array<int, string>,locations:array<int, string>}
  */
 function consus_rollup_items(array $items, array $windows, array $unmappedLocations = []): array
 {
     unset($unmappedLocations);
     $grouped = [];
     $articles = [];
+    $itemUsage = [];
+    $usageSeen = [];
     foreach ($items as $item) {
         if (!is_array($item)) {
             continue;
@@ -2509,6 +2973,16 @@ function consus_rollup_items(array $items, array $windows, array $unmappedLocati
         $companyKey = (string) ($item['company_key'] ?? '');
         if (!isset(CONSUS_COMPANIES[$companyKey])) {
             continue;
+        }
+
+        $usageItemNo = trim((string) ($item['item_no'] ?? ''));
+        $usageKey = $companyKey . '|' . $usageItemNo;
+        if ($usageItemNo !== '' && !isset($usageSeen[$usageKey])) {
+            $usageSeen[$usageKey] = true;
+            $usageRecord = consus_item_usage_record($item, $windows);
+            if ($usageRecord !== null) {
+                $itemUsage[] = $usageRecord;
+            }
         }
 
         $vendorNo = trim((string) ($item['vendor_no'] ?? ''));
@@ -2607,9 +3081,19 @@ function consus_rollup_items(array $items, array $windows, array $unmappedLocati
     $locationList = array_values($locations);
     natcasesort($locationList);
 
+    usort($itemUsage, static function (array $left, array $right): int {
+        $byItem = strnatcasecmp((string) ($left['item_no'] ?? ''), (string) ($right['item_no'] ?? ''));
+        if ($byItem !== 0) {
+            return $byItem;
+        }
+
+        return strnatcasecmp((string) ($left['company_key'] ?? ''), (string) ($right['company_key'] ?? ''));
+    });
+
     return [
         'rows' => $rows,
         'articles' => $articles,
+        'item_usage' => $itemUsage,
         'vendors' => $vendorList,
         'cost_centers' => array_values($costCenterList),
         'locations' => array_values($locationList),
@@ -2985,6 +3469,8 @@ function consus_empty_snapshot(): array
         'locations' => [],
         'rows' => [],
         'articles' => [],
+        'item_usage' => [],
+        'customers' => [],
     ];
 }
 
@@ -3580,7 +4066,8 @@ function consus_fetch_ledger_query(
     bool $includeDocument,
     callable $onRow,
     ?callable $onPage = null,
-    ?callable $fetchRows = null
+    ?callable $fetchRows = null,
+    bool $includeCustomer = false
 ): array {
     $query = consus_ledger_query(
         [$entryType],
@@ -3590,12 +4077,16 @@ function consus_fetch_ledger_query(
         $includeAmount,
         $includeDocument
     );
+    $optional = CONSUS_LEDGER_OPTIONAL_FIELDS;
+    if ($includeCustomer) {
+        $optional = array_merge($optional, consus_ledger_customer_fields());
+    }
 
     return consus_each_entity_rows(
         $company,
         CONSUS_LEDGER_ENTITY,
         consus_ledger_required_fields($includeAmount, $includeDocument || trim($documentPrefix) !== ''),
-        CONSUS_LEDGER_OPTIONAL_FIELDS,
+        $optional,
         (string) ($query['$filter'] ?? ''),
         $onRow,
         $fetchRows,
@@ -3621,7 +4112,8 @@ function consus_each_ledger_entry_type(
     bool $includeDocument,
     callable $onRow,
     ?callable $onPage = null,
-    ?callable $fetchRows = null
+    ?callable $fetchRows = null,
+    bool $includeCustomer = false
 ): array {
     $lastError = null;
     $documentPrefix = trim($documentPrefix);
@@ -3641,7 +4133,8 @@ function consus_each_ledger_entry_type(
                 $includeDocument || $documentPrefix !== '',
                 $onRow,
                 $onPage,
-                $fetchRows
+                $fetchRows,
+                $includeCustomer
             );
             $result['document_filter_rejected'] = false;
 
@@ -3659,7 +4152,8 @@ function consus_each_ledger_entry_type(
                         true,
                         $onRow,
                         $onPage,
-                        $fetchRows
+                        $fetchRows,
+                        $includeCustomer
                     );
                     $result['document_filter_rejected'] = true;
 
@@ -4950,7 +5444,8 @@ function consus_collect_ledger(
     ?array &$stepState = null,
     ?callable $saveState = null,
     string $stepId = '',
-    string $mode = ''
+    string $mode = '',
+    bool $includeCustomer = false
 ): array {
     $chunks ??= consus_ledger_date_chunks($windows);
     $persist = $stepState !== null && $saveState !== null && $stepId !== '';
@@ -5047,7 +5542,8 @@ function consus_collect_ledger(
                     }
                 },
                 consus_page_progress($onProgress, $context),
-                $fetchRows
+                $fetchRows,
+                $includeCustomer
             );
             if ($writer !== null && $stepState !== null && $saveState !== null) {
                 $storedRows = consus_checkpoint_commit_file($writer);
@@ -5097,8 +5593,82 @@ function consus_collect_ledger(
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
  * @param array{mode?:string,from?:string,chunks?:array<int, array{from:string,to:string}>}|null $plan
  * @param array<string, mixed>|null $checkpoint
- * @return array{warnings:array<int, string>,foreign_spills:array<string, string>,departments:array<int, array<string, mixed>>}
+ * @return array{warnings:array<int, string>,foreign_spills:array<string, string>,departments:array<int, array<string, mixed>>,customers:array<int, array<string, mixed>>|null}
  */
+function consus_apply_customer_row(array &$customers, array $row, string $companyKey): void
+{
+    $number = consus_first_filled_string($row, CONSUS_CUSTOMER_NO_FIELDS);
+    if ($number === '' || $companyKey === '') {
+        return;
+    }
+    $name = consus_first_filled_string($row, CONSUS_CUSTOMER_NAME_FIELDS);
+    if (!isset($customers[$number]) || ($name !== '' && strlen($name) > strlen((string) ($customers[$number]['name'] ?? '')))) {
+        $customers[$number] = [
+            'company_key' => $companyKey,
+            'no' => $number,
+            'name' => $name,
+        ];
+    }
+}
+
+/**
+ * Eerste klantentiteit die BC accepteert. Mislukt alles, dan ok=false en
+ * blijft de vorige catalogus bij de nightly staan.
+ *
+ * @param callable(string, array<string, mixed>, callable):int|null $fetchRows
+ * @return array{ok:bool,entity:string,customers:array<int, array{company_key:string,no:string,name:string}>}
+ */
+function consus_collect_customer_catalog(string $company, string $companyKey, ?callable $fetchRows = null): array
+{
+    $errors = [];
+    $required = [CONSUS_CUSTOMER_NO_FIELDS[0]];
+    $optional = [];
+    foreach (CONSUS_CUSTOMER_NO_FIELDS as $index => $field) {
+        if ($index > 0) {
+            $optional[] = $field;
+        }
+    }
+    foreach (CONSUS_CUSTOMER_NAME_FIELDS as $field) {
+        $optional[] = $field;
+    }
+
+    foreach (CONSUS_CUSTOMER_ENTITIES as $entity) {
+        $customers = [];
+        try {
+            consus_each_entity_rows(
+                $company,
+                $entity,
+                $required,
+                $optional,
+                '',
+                static function (array $row) use (&$customers, $companyKey): void {
+                    consus_apply_customer_row($customers, $row, $companyKey);
+                },
+                $fetchRows
+            );
+            $list = array_values($customers);
+            usort($list, static function (array $left, array $right): int {
+                return strnatcasecmp((string) ($left['no'] ?? ''), (string) ($right['no'] ?? ''));
+            });
+
+            return [
+                'ok' => true,
+                'entity' => $entity,
+                'customers' => $list,
+            ];
+        } catch (Throwable $error) {
+            $errors[] = $entity . ': ' . $error->getMessage();
+        }
+    }
+
+    return [
+        'ok' => false,
+        'entity' => '',
+        'customers' => [],
+        'errors' => $errors,
+    ];
+}
+
 function consus_collect_company(
     string $company,
     string $companyKey,
@@ -5270,13 +5840,28 @@ function consus_collect_company(
                 $checkpoint['companies'][$companyKey]['steps'][$stepId],
                 $saveCheckpoint,
                 $stepId,
-                $mode
+                $mode,
+                !empty($step['include_customer'])
             );
             if (!empty($ledgerResult['replayed_missing'])) {
                 $addWarning('Opgeslagen tussenstap ontbreekt en wordt opnieuw opgehaald.');
             }
             if (($ledgerResult['missing_optional'] ?? []) !== [] && $step['kind'] === 'sales') {
-                $addWarning('Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $ledgerResult['missing_optional']) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.');
+                $missingFields = [];
+                foreach ($ledgerResult['missing_optional'] as $field) {
+                    $field = (string) $field;
+                    if ($field !== '') {
+                        $missingFields[] = $field;
+                    }
+                }
+                $customerMissing = array_values(array_intersect($missingFields, consus_ledger_customer_fields()));
+                $otherMissing = array_values(array_diff($missingFields, consus_ledger_customer_fields()));
+                if ($customerMissing !== []) {
+                    $addWarning('Verkoop: klantvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $customerMissing) . '). Verbruik blijft staan; de klantuitsplitsing valt terug op wat BC wel meestuurt.');
+                }
+                if ($otherMissing !== []) {
+                    $addWarning('Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $otherMissing) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.');
+                }
             }
             if (!empty($ledgerResult['document_filter_rejected']) && $step['document_prefix'] !== '') {
                 $addWarning('Werkorderfilter op documentnummer wordt door BC geweigerd. Negatieve correcties worden volledig opgehaald en lokaal op prefix ' . $step['document_prefix'] . ' gefilterd.');
@@ -5527,10 +6112,19 @@ function consus_collect_company(
 
         $checkpoint['companies'][$companyKey]['warnings'] = $warnings;
 
+        $customerCatalog = consus_collect_customer_catalog($company, $companyKey, $fetchRows);
+        $customers = null;
+        if (!empty($customerCatalog['ok'])) {
+            $customers = $customerCatalog['customers'];
+        } else {
+            $addWarning('Klantcatalogus niet geladen. Suggesties gebruiken alleen klantnummers uit de artikelposten tot Business Central de klantentiteit levert.');
+        }
+
         return [
             'warnings' => array_values($warnings),
             'foreign_spills' => consus_foreign_spill_finish($foreignSpills, false),
             'departments' => $departmentCatalog,
+            'customers' => $customers,
         ];
     } catch (Throwable $error) {
         consus_foreign_spill_finish($foreignSpills, true);
@@ -5648,6 +6242,74 @@ function consus_previous_articles_for_company(array $snapshot, string $companyKe
     }
 
     return $articles;
+}
+
+/**
+ * @param array<string, mixed> $snapshot
+ * @return array<int, array<string, mixed>>
+ */
+function consus_previous_usage_for_company(array $snapshot, string $companyKey): array
+{
+    $records = [];
+    foreach ($snapshot['item_usage'] ?? [] as $record) {
+        if (is_array($record) && (string) ($record['company_key'] ?? '') === $companyKey) {
+            $records[] = $record;
+        }
+    }
+
+    return $records;
+}
+
+/**
+ * @param array<string, mixed> $snapshot
+ * @return array<int, array<string, mixed>>
+ */
+function consus_previous_customers_for_company(array $snapshot, string $companyKey): array
+{
+    $records = [];
+    foreach ($snapshot['customers'] ?? [] as $record) {
+        if (is_array($record) && (string) ($record['company_key'] ?? '') === $companyKey) {
+            $records[] = $record;
+        }
+    }
+
+    return $records;
+}
+
+/**
+ * Verse lijsten per bedrijf. Ontbreekt een sleutel, dan blijven de vorige
+ * rijen van dat bedrijf staan. Een aanwezige lege lijst vervangt ze.
+ *
+ * @param array<string, array<int, array<string, mixed>>> $fresh
+ * @param array<string, array<int, array<string, mixed>>> $previous
+ * @return array<int, array<string, mixed>>
+ */
+function consus_combine_company_lists(array $fresh, array $previous): array
+{
+    $merged = [];
+    $keys = [];
+    foreach (array_keys(CONSUS_COMPANIES) as $key) {
+        $keys[(string) $key] = true;
+    }
+    foreach (array_keys($previous) as $key) {
+        $keys[(string) $key] = true;
+    }
+    foreach (array_keys($fresh) as $key) {
+        $keys[(string) $key] = true;
+    }
+    foreach (array_keys($keys) as $key) {
+        $list = array_key_exists($key, $fresh) ? $fresh[$key] : ($previous[$key] ?? []);
+        if (!is_array($list)) {
+            continue;
+        }
+        foreach ($list as $row) {
+            if (is_array($row)) {
+                $merged[] = $row;
+            }
+        }
+    }
+
+    return $merged;
 }
 
 function consus_progress_file(): string
@@ -5864,7 +6526,11 @@ function consus_publish_nightly_snapshot(
     array $freshArticles = [],
     array $previousArticles = [],
     array $freshDepartments = [],
-    array $previousDepartments = []
+    array $previousDepartments = [],
+    array $freshUsage = [],
+    array $previousUsage = [],
+    array $freshCustomers = [],
+    array $previousCustomers = []
 ): array {
     if ($running) {
         $errors = consus_running_company_errors($companyStats, $freshRows, $errors);
@@ -5907,6 +6573,8 @@ function consus_publish_nightly_snapshot(
         'locations' => $catalog['locations'],
         'rows' => $rows,
         'articles' => $articles,
+        'item_usage' => consus_combine_company_lists($freshUsage, $previousUsage),
+        'customers' => consus_combine_company_lists($freshCustomers, $previousCustomers),
     ];
     consus_with_snapshot_lock(static function () use ($snapshot): void {
         consus_write_snapshot($snapshot);
@@ -5932,10 +6600,14 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
     $previousRows = [];
     $previousArticles = [];
     $previousDepartments = [];
+    $previousUsage = [];
+    $previousCustomers = [];
     foreach (array_keys(CONSUS_COMPANIES) as $key) {
         $previousRows[(string) $key] = consus_previous_rows_for_company($previous, (string) $key);
         $previousArticles[(string) $key] = consus_previous_articles_for_company($previous, (string) $key);
         $previousDepartments[(string) $key] = [];
+        $previousUsage[(string) $key] = consus_previous_usage_for_company($previous, (string) $key);
+        $previousCustomers[(string) $key] = consus_previous_customers_for_company($previous, (string) $key);
     }
     foreach ($previous['departments'] ?? [] as $departmentEntry) {
         if (!is_array($departmentEntry)) {
@@ -5959,6 +6631,8 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
     $freshRows = [];
     $freshArticles = [];
     $freshDepartments = [];
+    $freshUsage = [];
+    $freshCustomers = [];
     $foreignSpills = [];
     $companyStats = [];
     $errors = [];
@@ -5985,7 +6659,11 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         &$freshArticles,
         &$previousArticles,
         &$freshDepartments,
-        &$previousDepartments
+        &$previousDepartments,
+        &$freshUsage,
+        &$previousUsage,
+        &$freshCustomers,
+        &$previousCustomers
     ): array {
         return consus_publish_nightly_snapshot(
             $windows,
@@ -5999,13 +6677,18 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
             $freshArticles,
             $previousArticles,
             $freshDepartments,
-            $previousDepartments
+            $previousDepartments,
+            $freshUsage,
+            $previousUsage,
+            $freshCustomers,
+            $previousCustomers
         );
     };
 
     // Zelfde peildatum: eerst de tussenstand binnen het bedrijf. Die houdt cold of
     // warm vast. Zonder tussenstand beslist het watermerk. --force wist de
-    // tussenstand. --full negeert het watermerk en haalt twaalf maanden.
+    // tussenstand. --full negeert het watermerk en haalt het hele venster,
+    // maand voor maand, vanaf 1 januari van (huidig jaar − CONSUS_HISTORY_PREVIOUS_YEARS).
     if ($force) {
         consus_clear_checkpoint();
     }
@@ -6030,6 +6713,8 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
             $freshRows[$companyKey] = $previousRows[$companyKey] ?? [];
             $freshArticles[$companyKey] = $previousArticles[$companyKey] ?? [];
             $freshDepartments[$companyKey] = $previousDepartments[$companyKey] ?? [];
+            $freshUsage[$companyKey] = $previousUsage[$companyKey] ?? [];
+            $freshCustomers[$companyKey] = $previousCustomers[$companyKey] ?? [];
             if (!consus_rows_lack_inventory($freshRows[$companyKey])) {
                 foreach ($foreignSpills[$companyKey] ?? [] as $path) {
                     if (is_string($path)) {
@@ -6110,7 +6795,11 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
             $localItems = [];
             $freshRows[$companyKey] = $rolled['rows'];
             $freshArticles[$companyKey] = is_array($rolled['articles'] ?? null) ? $rolled['articles'] : [];
+            $freshUsage[$companyKey] = is_array($rolled['item_usage'] ?? null) ? $rolled['item_usage'] : [];
             $freshDepartments[$companyKey] = is_array($result['departments'] ?? null) ? $result['departments'] : [];
+            if (is_array($result['customers'] ?? null)) {
+                $freshCustomers[$companyKey] = $result['customers'];
+            }
             unset($rolled);
             if ($plan['mode'] === 'warm') {
                 $freshRows[$companyKey] = consus_merge_warm_company_rows(
@@ -6123,6 +6812,13 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
                 $freshArticles[$companyKey] = consus_merge_warm_company_articles(
                     $previousArticles[$companyKey] ?? [],
                     $freshArticles[$companyKey],
+                    $windows,
+                    $plan['from'],
+                    $plan['overlap_through']
+                );
+                $freshUsage[$companyKey] = consus_merge_warm_item_usage(
+                    $previousUsage[$companyKey] ?? [],
+                    $freshUsage[$companyKey],
                     $windows,
                     $plan['from'],
                     $plan['overlap_through']
