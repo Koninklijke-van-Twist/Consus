@@ -41,7 +41,9 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   parallel.
 - **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 13, of
   `full`) haalt nightly per kalendermaand het hele venster. Een oudere
-  snapshotversie is ook koud, net als een bedrijf waarvan elke rij nog een
+  snapshotversie is ook koud, net als een ontbrekend of later
+  `windows.history_start` (het venster is groter geworden zonder
+  versiewissel) en een bedrijf waarvan elke rij nog een
   lege leverancier heeft: anders blijft de historie op die lege groep staan.
   Na een geslaagde
   run staat op het bedrijf `ledger_through` (de peildatum) en

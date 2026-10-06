@@ -3497,9 +3497,11 @@ function consus_company_rows_need_full_ledger(array $rows): bool
 }
 
 /**
- * Warm grootboek alleen als de snapshot deze versie is, er rijen zijn, en
- * minstens één leverancier bekend is. Anders is de eerste nacht na een
- * versiewissel of een mislukte artikelkaart koud.
+ * Warm grootboek alleen als de snapshot deze versie is, het historievenster
+ * niet later begint dan nu, er rijen zijn, en minstens één leverancier
+ * bekend is. Een groter venster (history_start eerder) zonder versiewissel
+ * is anders warm en haalt de nieuwe jaren nooit op. Ontbreekt of is het
+ * oude venster ongeldig, dan is de run koud.
  *
  * @param array<string, mixed> $snapshot
  * @param array<int, mixed> $companyRows
@@ -3512,8 +3514,18 @@ function consus_snapshot_can_warm_ledger(array $snapshot, array $companyRows): b
     if ((int) ($snapshot['version'] ?? 0) !== CONSUS_SNAPSHOT_VERSION) {
         return false;
     }
+    if (consus_company_rows_need_full_ledger($companyRows)) {
+        return false;
+    }
 
-    return !consus_company_rows_need_full_ledger($companyRows);
+    $previousWindows = is_array($snapshot['windows'] ?? null) ? $snapshot['windows'] : [];
+    $previousHistory = consus_parse_date($previousWindows['history_start'] ?? '');
+    $currentHistory = consus_period_windows()['history_start'];
+    if ($previousHistory === '' || $previousHistory > $currentHistory) {
+        return false;
+    }
+
+    return true;
 }
 
 function consus_read_snapshot(): array
@@ -5589,11 +5601,7 @@ function consus_collect_ledger(
 }
 
 /**
- * @param array<string, array<string, mixed>> $items
- * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
- * @param array{mode?:string,from?:string,chunks?:array<int, array{from:string,to:string}>}|null $plan
- * @param array<string, mixed>|null $checkpoint
- * @return array{warnings:array<int, string>,foreign_spills:array<string, string>,departments:array<int, array<string, mixed>>,customers:array<int, array<string, mixed>>|null}
+ * @param array<string, array{company_key:string,no:string,name:string}> $customers
  */
 function consus_apply_customer_row(array &$customers, array $row, string $companyKey): void
 {
@@ -5669,6 +5677,13 @@ function consus_collect_customer_catalog(string $company, string $companyKey, ?c
     ];
 }
 
+/**
+ * @param array<string, array<string, mixed>> $items
+ * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
+ * @param array{mode?:string,from?:string,chunks?:array<int, array{from:string,to:string}>}|null $plan
+ * @param array<string, mixed>|null $checkpoint
+ * @return array{warnings:array<int, string>,foreign_spills:array<string, string>,departments:array<int, array<string, mixed>>,customers:array<int, array<string, mixed>>|null}
+ */
 function consus_collect_company(
     string $company,
     string $companyKey,

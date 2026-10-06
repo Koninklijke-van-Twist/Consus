@@ -185,13 +185,24 @@ function consus_xlsx_sheets(array $snapshot, array $prefs, array $query): array
     $costCenter = trim((string) ($query['cost_center'] ?? ''));
     $excludedCustomers = consus_prefs_normalize_list($prefs['customers'] ?? []);
     $excludedItems = consus_prefs_normalize_list($prefs['items'] ?? []);
-    $facts = consus_usage_facts($snapshot, $companyKey, $costCenter, $excludedItems);
+    $ready = (int) ($snapshot['version'] ?? 0) === CONSUS_SNAPSHOT_VERSION
+        && trim((string) ($snapshot['generated_at'] ?? '')) !== '';
+    $facts = $ready
+        ? consus_usage_facts($snapshot, $companyKey, $costCenter, $excludedItems)
+        : [];
     $headers = consus_usage_column_labels();
     $sheets = [];
     foreach (consus_history_years((string) ($windows['as_of'] ?? '')) as $year) {
         $rows = [$headers];
         foreach (consus_usage_year_rows($facts, $year, $windows, $excludedCustomers) as $row) {
-            $rows[] = consus_usage_row_values($row);
+            $values = consus_usage_row_values($row);
+            if ($companyKey === '') {
+                $label = trim((string) ($row['company_label'] ?? ''));
+                if ($label !== '') {
+                    $values[0] .= ' (' . $label . ')';
+                }
+            }
+            $rows[] = $values;
         }
         $sheets[] = [
             'name' => (string) $year,

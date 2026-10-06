@@ -188,6 +188,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         .notice p { margin: 0 0 8px; }
         .notice div + div { margin-top: 6px; }
         .notice.error { background: #fff0f0; border-color: #efb3b3; color: #8b2020; }
+        .save-status { grid-column: 1 / -1; margin: 0; color: #8b2020; font-size: .84rem; }
         .chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 8px; }
         .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; background: #e8f6fb; color: #00529b; font-size: .82rem; }
         .chip button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 2px; }
@@ -326,6 +327,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                 <input type="hidden" name="items" value="<?= consus_h(implode(', ', $excludedItems)) ?>">
                 <span class="muted">Uitgesloten artikelen verdwijnen uit de tabel en de export.</span>
             </div>
+            <p class="save-status" data-save-status hidden></p>
             <button class="filter-button" type="submit">Filters opslaan</button>
         </form>
     </section>
@@ -528,10 +530,15 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     }
 
     var saving = false;
+    var pending = false;
     function save() {
-        if (!form || saving) { return; }
+        if (!form) { return; }
+        if (saving) { pending = true; return; }
         if (!window.fetch) { return; }
         saving = true;
+        pending = false;
+        var status = document.querySelector('[data-save-status]');
+        if (status) { status.hidden = true; status.textContent = ''; }
         var body = new FormData(form);
         fetch(form.action, {
             method: 'POST',
@@ -540,6 +547,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             headers: { 'Accept': 'application/json' }
         }).then(function (response) {
             if (!response.ok) { throw new Error('opslaan mislukt'); }
+            if (pending) { pending = false; saving = false; save(); return; }
             var params = new URLSearchParams();
             params.set('company', (form.querySelector('[name="company"]') || {}).value || '');
             params.set('cost_center', (form.querySelector('[name="cost_center"]') || {}).value || '');
@@ -547,6 +555,11 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             window.location.href = 'index.php?' + params.toString();
         }).catch(function () {
             saving = false;
+            pending = false;
+            if (status) {
+                status.hidden = false;
+                status.textContent = 'Opslaan mislukt. Probeer het nog eens.';
+            }
         });
     }
 

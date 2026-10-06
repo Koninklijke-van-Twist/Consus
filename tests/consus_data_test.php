@@ -1231,8 +1231,16 @@ test_assert(count($noneArticles) === 1 && $noneArticles[0]['item_no'] === 'U1', 
 test_assert(consus_department_options([], '') === [], 'geen rijen betekent geen afdelingen');
 test_assert(consus_vendor_options([], '', '') === [], 'geen rijen betekent geen leveranciers');
 test_assert(consus_default_vendor_no($blankVendors) === '', 'alleen Geen leverancier wordt niet de standaard');
-test_assert(!consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION - 1], [['vendor_no' => 'PERK']]), 'oude snapshotversie is koud');
-test_assert(consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION], [['vendor_no' => 'PERK']]), 'huidige versie met leverancier mag warm');
+$warmWindows = consus_period_windows();
+test_assert(!consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION - 1, 'windows' => $warmWindows], [['vendor_no' => 'PERK']]), 'oude snapshotversie is koud');
+test_assert(consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION, 'windows' => $warmWindows], [['vendor_no' => 'PERK']]), 'huidige versie met hetzelfde venster mag warm');
+test_assert(!consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION], [['vendor_no' => 'PERK']]), 'ontbrekend historievenster is koud');
+$shorterWindows = $warmWindows;
+$shorterWindows['history_start'] = '2099-01-01';
+test_assert(!consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION, 'windows' => $shorterWindows], [['vendor_no' => 'PERK']]), 'later history_start is koud');
+$longerWindows = $warmWindows;
+$longerWindows['history_start'] = '2000-01-01';
+test_assert(consus_snapshot_can_warm_ledger(['version' => CONSUS_SNAPSHOT_VERSION, 'windows' => $longerWindows], [['vendor_no' => 'PERK']]), 'eerder history_start mag warm');
 
 $low = consus_new_item_fact('kvt', 'L1', 'Koninklijke van Twist');
 $low['vendor_no'] = 'A';

@@ -86,6 +86,33 @@ xlsx_assert($filter[0] === ['Gefilterde klanten', 'Gefilterde artikels'], 'filte
 xlsx_assert($filter[1][0] === 'C1 — Acme', 'klant toont nummer en naam');
 xlsx_assert($filter[1][1] === 'ART-9', 'uitgesloten artikel staat op het filterblad');
 
+$snapshot['articles'][] = [
+    'company_key' => 'hvt',
+    'item_no' => 'ART-1',
+    'description' => 'Filter HVT',
+    'cost_center' => '5',
+    'location' => 'HVT',
+    'inventory' => 2,
+    'safety_stock' => 4,
+    'reorder_point' => 0,
+    'consumption' => ['months' => [], 'days' => [], 'm' => 0, 'q' => 0, 'y' => 0],
+];
+$alle = consus_xlsx_sheets($snapshot, ['customers' => [], 'items' => []], ['company' => '']);
+$alleItems = [];
+foreach (array_slice($alle[0]['rows'], 1) as $alleRow) {
+    $alleItems[] = (string) $alleRow[0];
+}
+xlsx_assert(in_array('ART-1 (KVT)', $alleItems, true) && in_array('ART-1 (HVT)', $alleItems, true), 'Alle toont het bedrijf bij het artikelnummer');
+
+$stale = $snapshot;
+$stale['version'] = CONSUS_SNAPSHOT_VERSION - 1;
+$staleSheets = consus_xlsx_sheets($stale, ['customers' => [], 'items' => []], ['company' => 'kvt']);
+xlsx_assert(count($staleSheets[0]['rows']) === 1, 'oude snapshotversie exporteert alleen de header');
+$ungenerated = $snapshot;
+$ungenerated['generated_at'] = '';
+$ungeneratedSheets = consus_xlsx_sheets($ungenerated, ['customers' => [], 'items' => []], ['company' => 'kvt']);
+xlsx_assert(count($ungeneratedSheets[0]['rows']) === 1, 'lege generated_at exporteert alleen de header');
+
 $binary = consus_xlsx_binary($sheets);
 $path = sys_get_temp_dir() . '/consus-xlsx-test-' . getmypid() . '.xlsx';
 file_put_contents($path, $binary);
