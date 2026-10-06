@@ -79,8 +79,55 @@ function consus_page_filters(array $query, string $asOf): array
 }
 
 /**
+ * Compacte rijen voor de browser. Alleen de huidige pagina komt in de tabel;
+ * de andere jaren blijven in deze lijst en worden niet als extra DOM gezet.
+ *
+ * @param array<int, array<string, mixed>> $facts
+ * @param array<int, int> $years
+ * @param array{as_of?:string,history_start?:string} $windows
+ * @param array<int, string> $excludedCustomers
+ * @return array<int, array{item:string,company:string,low:bool,modal:array<string, mixed>,values:array<int, array<int, float>>}>
+ */
+function consus_page_client_rows(array $facts, array $years, array $windows, array $excludedCustomers, bool $showCompany): array
+{
+    $articles = [];
+    foreach ($facts as $fact) {
+        if (!is_array($fact) || $years === []) {
+            continue;
+        }
+        $sample = null;
+        $values = [];
+        foreach ($years as $year) {
+            $row = consus_usage_year_row($fact, (int) $year, $windows, $excludedCustomers);
+            if ($sample === null) {
+                $sample = $row;
+            }
+            $flat = consus_usage_row_values($row);
+            array_shift($flat);
+            $numbers = [];
+            foreach ($flat as $number) {
+                $numbers[] = (float) $number;
+            }
+            $values[(int) $year] = $numbers;
+        }
+        if ($sample === null) {
+            continue;
+        }
+        $articles[] = [
+            'item' => (string) ($sample['item_no'] ?? ''),
+            'company' => $showCompany ? (string) ($sample['company_label'] ?? '') : '',
+            'low' => !empty($sample['low_stock']),
+            'modal' => consus_modal_payload($sample),
+            'values' => $values,
+        ];
+    }
+
+    return $articles;
+}
+
+/**
  * @param array<string, mixed> $snapshot
- * @param array{customers?:array<int, string>,items?:array<int, string>} $prefs
+ * @param array{customers?:array<int, string>,items?:array<int, string>,page_size?:int} $prefs
  * @param array<string, mixed> $query
  */
 function consus_page_render(array $snapshot, array $prefs, array $query, string $csrf): void
@@ -116,13 +163,17 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
 
     $excludedCustomers = consus_prefs_normalize_list($prefs['customers'] ?? []);
     $excludedItems = consus_prefs_normalize_list($prefs['items'] ?? []);
+    $pageSize = consus_normalize_page_size($prefs['page_size'] ?? CONSUS_DEFAULT_PAGE_SIZE);
     $facts = ($hasCache && $ready)
         ? consus_usage_facts($snapshot, $companyFilter, $costFilter, $excludedItems)
         : [];
-    $tables = [];
-    foreach ($years as $year) {
-        $tables[$year] = consus_usage_year_rows($facts, $year, $windows, $excludedCustomers);
-    }
+    $clientRows = consus_page_client_rows($facts, $years, $windows, $excludedCustomers, $companyFilter === '');
+    $tablePayload = [
+        'pageSize' => $pageSize,
+        'activeYear' => $activeYear,
+        'legend' => consus_low_stock_legend(),
+        'articles' => $clientRows,
+    ];
     $customerSuggestions = consus_customer_suggestions($snapshot, $companyFilter);
     $itemSuggestions = consus_item_suggestions($snapshot, $companyFilter, $costFilter);
     $warningLines = consus_warning_lines(is_array($snapshot['warnings'] ?? null) ? $snapshot['warnings'] : []);
@@ -198,7 +249,16 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         .tabs { display: flex; gap: 8px; padding: 16px 16px 0; }
         .tabs button { border: 1px solid var(--kvt-line); background: #fff; border-radius: 999px; padding: 8px 14px; cursor: pointer; color: #34445a; }
         .tabs button[aria-selected="true"] { background: #00529b; border-color: #00529b; color: #fff; }
+        .page-size { min-width: 148px; }
+        .page-size select { min-width: 120px; }
         .legend { margin: 0 16px 12px; color: var(--kvt-muted); font-size: .82rem; }
+        .pager { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; padding: 12px 16px; }
+        .pager-pages { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+        .pager button { min-width: 36px; min-height: 36px; padding: 0 10px; border: 1px solid var(--kvt-line); background: #fff; border-radius: 8px; cursor: pointer; color: #34445a; }
+        .pager button[aria-current="page"] { background: #00529b; color: #fff; border-color: #00529b; }
+        .pager button:disabled { opacity: .45; cursor: default; }
+        .pager-range { color: var(--kvt-muted); font-size: .84rem; }
+        .pager-gap { min-width: 16px; text-align: center; color: var(--kvt-muted); }
         .legend mark { background: #ffe08a; color: inherit; padding: 0 4px; border-radius: 4px; }
         .table-wrap { overflow: auto; }
         table { width: 100%; border-collapse: collapse; font-size: .84rem; }
@@ -300,7 +360,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             </div>
             <input type="hidden" name="year" value="<?= consus_h((string) $activeYear) ?>">
             <button class="filter-button" type="submit">Filteren</button>
-            <a class="export-link" href="export.php?<?= consus_h($exportQuery) ?>">Exporteer xlsx</a>
+            <a class="export-link" id="export-link" href="export.php?<?= consus_h($exportQuery) ?>">Exporteer xlsx</a>
         </form>
     </section>
 
@@ -338,10 +398,18 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                 <h2>Verbruik per jaar</h2>
                 <p><?= count($facts) ?> artikelen. Klik een artikelnummer voor de voorraadberekening. Klik een kolomkop om te sorteren.</p>
             </div>
+            <div class="field page-size">
+                <label for="page-size">Regels per pagina</label>
+                <select id="page-size">
+                    <?php foreach (CONSUS_PAGE_SIZES as $size): ?>
+                        <option value="<?= (int) $size ?>"<?= $pageSize === (int) $size ? ' selected' : '' ?>><?= (int) $size ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
         </div>
         <div class="tabs" role="tablist" aria-label="Jaren">
             <?php foreach ($years as $year): ?>
-                <button type="button" role="tab" id="tab-<?= consus_h((string) $year) ?>" data-year="<?= consus_h((string) $year) ?>" aria-selected="<?= $year === $activeYear ? 'true' : 'false' ?>" aria-controls="panel-<?= consus_h((string) $year) ?>"><?= consus_h((string) $year) ?></button>
+                <button type="button" role="tab" id="tab-<?= consus_h((string) $year) ?>" data-year="<?= consus_h((string) $year) ?>" aria-selected="<?= $year === $activeYear ? 'true' : 'false' ?>" aria-controls="year-table"><?= consus_h((string) $year) ?></button>
             <?php endforeach; ?>
         </div>
         <p class="legend"><mark>Geel</mark> <?= consus_h(consus_low_stock_legend()) ?></p>
@@ -352,44 +420,20 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         <?php elseif ($facts === []): ?>
             <div class="empty">Geen artikelen voor deze filters.</div>
         <?php else: ?>
-            <?php foreach ($years as $year): ?>
-                <div class="year-panel" id="panel-<?= consus_h((string) $year) ?>" role="tabpanel" aria-labelledby="tab-<?= consus_h((string) $year) ?>"<?= $year === $activeYear ? '' : ' hidden' ?>>
-                    <div class="table-wrap">
-                        <table data-year-table="<?= consus_h((string) $year) ?>">
-                            <thead>
-                                <tr>
-                                    <?php foreach ($columnLabels as $index => $label): ?>
-                                        <th scope="col" data-col="<?= (int) $index ?>" data-type="<?= $index === 0 ? 'text' : 'number' ?>" class="<?= $index === 0 ? 'item' : 'numeric' ?>"><?= consus_h($label) ?></th>
-                                    <?php endforeach; ?>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($tables[$year] as $row): ?>
-                                    <?php
-                                    $values = consus_usage_row_values($row);
-                                    $payload = consus_modal_payload($row);
-                                    $payloadJson = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
-                                    ?>
-                                    <tr>
-                                        <?php foreach ($values as $index => $value): ?>
-                                            <?php if ($index === 0): ?>
-                                                <td class="item<?= !empty($row['low_stock']) ? ' low-stock' : '' ?>" data-sort="<?= consus_h((string) $value) ?>">
-                                                    <button type="button" class="item-button" data-article="<?= consus_h((string) $payloadJson) ?>" title="<?= consus_h(consus_low_stock_legend()) ?>"><?= consus_h((string) $value) ?></button>
-                                                    <?php if ($companyFilter === ''): ?>
-                                                        <span class="company-tag"><?= consus_h((string) ($row['company_label'] ?? '')) ?></span>
-                                                    <?php endif; ?>
-                                                </td>
-                                            <?php else: ?>
-                                                <td class="numeric" data-sort="<?= consus_h((string) $value) ?>"><?= consus_h(consus_format_qty((float) $value)) ?></td>
-                                            <?php endif; ?>
-                                        <?php endforeach; ?>
-                                    </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            <?php endforeach; ?>
+            <nav class="pager" data-pager="top" aria-label="Paginering"></nav>
+            <div class="table-wrap">
+                <table id="year-table">
+                    <thead>
+                        <tr>
+                            <?php foreach ($columnLabels as $index => $label): ?>
+                                <th scope="col" data-col="<?= (int) $index ?>" data-type="<?= $index === 0 ? 'text' : 'number' ?>" class="<?= $index === 0 ? 'item' : 'numeric' ?>"><?= consus_h($label) ?></th>
+                            <?php endforeach; ?>
+                        </tr>
+                    </thead>
+                    <tbody id="year-rows"></tbody>
+                </table>
+            </div>
+            <nav class="pager" data-pager="bottom" aria-label="Paginering"></nav>
         <?php endif; ?>
     </section>
 
@@ -420,6 +464,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
 
 <script id="customer-suggestions" type="application/json"><?= json_encode($customerSuggestions, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?></script>
 <script id="item-suggestions" type="application/json"><?= json_encode($itemSuggestions, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?></script>
+<script id="year-data" type="application/json"><?= json_encode($tablePayload, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?></script>
 <script>
 (function () {
     var form = document.getElementById('prefs-form');
@@ -578,13 +623,177 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         });
     }
 
+    var yearNode = document.getElementById('year-data');
+    var tableData = yearNode ? JSON.parse(yearNode.textContent || '{}') : { articles: [] };
+    var articles = tableData.articles || [];
+    var year = String(tableData.activeYear || '');
+    var pageSize = Number(tableData.pageSize) || 20;
+    var page = 1;
+    var sortCol = null;
+    var sortDir = 1;
+    var body = document.getElementById('year-rows');
+    var table = document.getElementById('year-table');
+    var pageSizeSelect = document.getElementById('page-size');
+    var exportLink = document.getElementById('export-link');
     var tabs = document.querySelectorAll('[role="tab"][data-year]');
-    function showYear(year) {
+
+    function formatQty(value) {
+        var number = Number(value) || 0;
+        var decimals = Math.abs(number - Math.round(number)) < 0.00001 ? 0 : 1;
+        return new Intl.NumberFormat('nl-NL', {
+            minimumFractionDigits: decimals,
+            maximumFractionDigits: decimals
+        }).format(number);
+    }
+
+    function compareText(left, right) {
+        return String(left || '').localeCompare(String(right || ''), 'nl', { numeric: true, sensitivity: 'base' });
+    }
+
+    function sortedIndexes() {
+        var indexes = articles.map(function (_, index) { return index; });
+        indexes.sort(function (leftIndex, rightIndex) {
+            var left = articles[leftIndex];
+            var right = articles[rightIndex];
+            var result = 0;
+            if (sortCol === null) {
+                result = compareText(left.item, right.item);
+                if (result === 0) { result = compareText(left.company, right.company); }
+                return result;
+            }
+            if (sortCol === 0) {
+                result = compareText(left.item, right.item);
+            } else {
+                var leftValues = (left.values && left.values[year]) || [];
+                var rightValues = (right.values && right.values[year]) || [];
+                var leftNumber = Number(leftValues[sortCol - 1]) || 0;
+                var rightNumber = Number(rightValues[sortCol - 1]) || 0;
+                result = leftNumber < rightNumber ? -1 : (leftNumber > rightNumber ? 1 : 0);
+            }
+            if (result === 0) { result = compareText(left.item, right.item); }
+            if (result === 0) { result = compareText(left.company, right.company); }
+            return sortDir < 0 ? -result : result;
+        });
+        return indexes;
+    }
+
+    function pageWindow(current, pages) {
+        if (pages <= 7) {
+            var all = [];
+            for (var number = 1; number <= pages; number++) { all.push(number); }
+            return all;
+        }
+        var items = [1];
+        var start = Math.max(2, current - 1);
+        var end = Math.min(pages - 1, current + 1);
+        if (start > 2) { items.push(null); }
+        for (var pageNumber = start; pageNumber <= end; pageNumber++) { items.push(pageNumber); }
+        if (end < pages - 1) { items.push(null); }
+        items.push(pages);
+        return items;
+    }
+
+    function renderPager(nav, total, from, to, pages) {
+        nav.innerHTML = '';
+        var range = document.createElement('span');
+        range.className = 'pager-range';
+        range.textContent = from + '\u2013' + to + ' van ' + total + ' artikelen';
+        var controls = document.createElement('div');
+        controls.className = 'pager-pages';
+        function addButton(label, target, options) {
+            var button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = label;
+            if (options && options.current) { button.setAttribute('aria-current', 'page'); }
+            if (options && options.disabled) { button.disabled = true; }
+            if (target) {
+                button.addEventListener('click', function () {
+                    page = target;
+                    renderTable();
+                });
+            }
+            controls.appendChild(button);
+        }
+        addButton('Vorige', page - 1, { disabled: page <= 1 });
+        pageWindow(page, pages).forEach(function (entry) {
+            if (entry === null) {
+                var gap = document.createElement('span');
+                gap.className = 'pager-gap';
+                gap.textContent = '\u2026';
+                controls.appendChild(gap);
+                return;
+            }
+            addButton(String(entry), entry, { current: entry === page });
+        });
+        addButton('Volgende', page + 1, { disabled: page >= pages });
+        nav.appendChild(range);
+        nav.appendChild(controls);
+    }
+
+    function renderTable() {
+        if (!body) { return; }
+        var indexes = sortedIndexes();
+        var total = indexes.length;
+        var pages = Math.max(1, Math.ceil(total / pageSize));
+        if (page > pages) { page = pages; }
+        if (page < 1) { page = 1; }
+        var start = (page - 1) * pageSize;
+        var slice = indexes.slice(start, start + pageSize);
+        body.innerHTML = '';
+        slice.forEach(function (index) {
+            var article = articles[index];
+            var row = document.createElement('tr');
+            var itemCell = document.createElement('td');
+            itemCell.className = 'item' + (article.low ? ' low-stock' : '');
+            var button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'item-button';
+            button.textContent = article.item || '';
+            button.title = tableData.legend || '';
+            button.addEventListener('click', function () { openModal(article.modal || {}); });
+            itemCell.appendChild(button);
+            if (article.company) {
+                var tag = document.createElement('span');
+                tag.className = 'company-tag';
+                tag.textContent = article.company;
+                itemCell.appendChild(tag);
+            }
+            row.appendChild(itemCell);
+            var numbers = (article.values && article.values[year]) || [];
+            numbers.forEach(function (number) {
+                var cell = document.createElement('td');
+                cell.className = 'numeric';
+                cell.textContent = formatQty(number);
+                row.appendChild(cell);
+            });
+            body.appendChild(row);
+        });
+        var from = total === 0 ? 0 : start + 1;
+        var to = start + slice.length;
+        document.querySelectorAll('[data-pager]').forEach(function (nav) {
+            renderPager(nav, total, from, to, pages);
+        });
+    }
+
+    function updateExport() {
+        if (!exportLink) { return; }
+        var url = new URL(exportLink.getAttribute('href'), window.location.href);
+        if (sortCol === null) {
+            url.searchParams.delete('sort');
+            url.searchParams.delete('dir');
+        } else {
+            url.searchParams.set('sort', String(sortCol));
+            url.searchParams.set('dir', sortDir < 0 ? 'desc' : 'asc');
+        }
+        exportLink.setAttribute('href', 'export.php' + url.search);
+    }
+
+    function showYear(nextYear) {
+        year = String(nextYear);
+        page = 1;
         tabs.forEach(function (tab) {
             var selected = tab.getAttribute('data-year') === year;
             tab.setAttribute('aria-selected', selected ? 'true' : 'false');
-            var panel = document.getElementById(tab.getAttribute('aria-controls'));
-            if (panel) { panel.hidden = !selected; }
         });
         document.querySelectorAll('input[name="year"]').forEach(function (input) { input.value = year; });
         if (window.history && window.history.replaceState) {
@@ -592,64 +801,101 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             url.searchParams.set('year', year);
             window.history.replaceState({}, '', url.toString());
         }
+        renderTable();
     }
+
     tabs.forEach(function (tab) {
         tab.addEventListener('click', function () { showYear(tab.getAttribute('data-year')); });
     });
 
-    document.querySelectorAll('table[data-year-table]').forEach(function (table) {
-        var headers = table.querySelectorAll('thead th');
-        headers.forEach(function (header) {
+    if (table) {
+        table.querySelectorAll('thead th').forEach(function (header) {
             header.addEventListener('click', function () {
                 var index = Number(header.getAttribute('data-col'));
-                var type = header.getAttribute('data-type');
-                var body = table.querySelector('tbody');
-                var rows = Array.prototype.slice.call(body.querySelectorAll('tr'));
                 var descending = header.getAttribute('aria-sort') === 'ascending';
-                headers.forEach(function (other) { other.removeAttribute('aria-sort'); });
+                table.querySelectorAll('thead th').forEach(function (other) { other.removeAttribute('aria-sort'); });
                 header.setAttribute('aria-sort', descending ? 'descending' : 'ascending');
-                rows.sort(function (left, right) {
-                    var a = left.cells[index];
-                    var b = right.cells[index];
-                    var result;
-                    if (type === 'number') {
-                        result = Number(a.getAttribute('data-sort')) - Number(b.getAttribute('data-sort'));
-                    } else {
-                        result = a.getAttribute('data-sort').localeCompare(b.getAttribute('data-sort'), 'nl', { numeric: true, sensitivity: 'base' });
-                    }
-                    return descending ? -result : result;
-                });
-                rows.forEach(function (row) { body.appendChild(row); });
+                sortCol = index;
+                sortDir = descending ? -1 : 1;
+                page = 1;
+                renderTable();
+                updateExport();
             });
         });
-    });
+    }
+
+    if (pageSizeSelect) {
+        // Opslaan gaat één verzoek tegelijk, zodat een oudere keuze op de server
+        // nooit een nieuwere overschrijft. Alleen de laatste keuze mag de select
+        // terugzetten, en dan naar de waarde die de server het laatst bewaarde.
+        var savedPageSize = pageSize;
+        var pageSizeSeq = 0;
+        var pageSizeQueue = Promise.resolve();
+        var sendPageSize = function (size, seq) {
+            if (seq !== pageSizeSeq) { return Promise.resolve(); }
+            var payload = new FormData();
+            payload.set('csrf', (form.querySelector('[name="csrf"]') || {}).value || '');
+            payload.set('page_size', String(size));
+            return fetch(form.action, {
+                method: 'POST',
+                body: payload,
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' }
+            }).then(function (response) {
+                if (!response.ok) { throw new Error('opslaan mislukt'); }
+                savedPageSize = size;
+                var done = document.querySelector('[data-save-status]');
+                if (done && seq === pageSizeSeq) { done.hidden = true; done.textContent = ''; }
+            }).catch(function () {
+                if (seq !== pageSizeSeq) { return; }
+                pageSize = savedPageSize;
+                pageSizeSelect.value = String(savedPageSize);
+                page = 1;
+                renderTable();
+                var status = document.querySelector('[data-save-status]');
+                if (status) {
+                    status.hidden = false;
+                    status.textContent = 'Opslaan mislukt. Probeer het nog eens.';
+                }
+            });
+        };
+        pageSizeSelect.addEventListener('change', function () {
+            var next = Number(pageSizeSelect.value);
+            if (!next || next === pageSize) { return; }
+            pageSize = next;
+            page = 1;
+            renderTable();
+            if (!form || !window.fetch) { return; }
+            var seq = ++pageSizeSeq;
+            pageSizeQueue = pageSizeQueue.then(function () { return sendPageSize(next, seq); });
+        });
+    }
 
     var dialog = document.getElementById('article-modal');
     function fill(id, text) {
         var node = document.getElementById(id);
         if (node) { node.textContent = text; }
     }
-    document.querySelectorAll('[data-article]').forEach(function (button) {
-        button.addEventListener('click', function () {
-            var data = JSON.parse(button.getAttribute('data-article') || '{}');
-            fill('modal-title', data.item_no || 'Artikel');
-            fill('modal-description', data.description || data.company || '');
-            fill('modal-safety', data.safety || '');
-            fill('modal-inventory', data.inventory || '');
-            fill('modal-average', data.average || '');
-            fill('modal-years', data.years || '');
-            fill('modal-ytd', data.ytd || '');
-            fill('modal-expected', data.expected || '');
-            fill('modal-low', data.low ? 'Ja' : 'Nee');
-            fill('modal-calculation', (data.as_of ? data.as_of + ': ' : '') + (data.calculation || ''));
-            if (dialog && dialog.showModal) { dialog.showModal(); }
-        });
-    });
+    function openModal(data) {
+        fill('modal-title', data.item_no || 'Artikel');
+        fill('modal-description', data.description || data.company || '');
+        fill('modal-safety', data.safety || '');
+        fill('modal-inventory', data.inventory || '');
+        fill('modal-average', data.average || '');
+        fill('modal-years', data.years || '');
+        fill('modal-ytd', data.ytd || '');
+        fill('modal-expected', data.expected || '');
+        fill('modal-low', data.low ? 'Ja' : 'Nee');
+        fill('modal-calculation', (data.as_of ? data.as_of + ': ' : '') + (data.calculation || ''));
+        if (dialog && dialog.showModal) { dialog.showModal(); }
+    }
     document.querySelectorAll('[data-close]').forEach(function (button) {
         button.addEventListener('click', function () {
             if (dialog && dialog.close) { dialog.close(); }
         });
     });
+
+    if (body) { renderTable(); }
 })();
 </script>
 </body>

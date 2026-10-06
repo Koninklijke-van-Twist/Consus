@@ -193,17 +193,27 @@ Bovenaan staan twee uitsluitingen, per ingelogde gebruiker:
 Uitgesloten klanten vallen uit het verbruik van de tabel, de modal, de gele
 markering en de export. Uitgesloten artikelen verdwijnen uit tabel en export.
 Opslag: `web/data/prefs/<sha1 van het e-mailadres in lowercase>.json`, atomair
-via een tijdelijk bestand en een file lock. `POST prefs.php` eist een
-ingelogde sessie, een CSRF-token en dezelfde host in `Origin` of `Referer`.
-Die map gaat niet mee in git en niet mee in de FTP-deploy (`data/` blijft
-staan).
+via een tijdelijk bestand en een file lock. In hetzelfde bestand staat
+`page_size` (10, 20, 50, 100, 150, 200, 300 of 500; standaard 20). Een
+opslag van alleen de paginagrootte laat de uitsluitingen staan, en omgekeerd.
+`POST prefs.php` eist een ingelogde sessie, een CSRF-token en dezelfde host
+in `Origin` of `Referer`. Die map gaat niet mee in git en niet mee in de
+FTP-deploy (`data/` blijft staan).
+
+De tabel toont alleen de rijen van de huidige pagina. De volledige, al
+gefilterde set staat als JSON in de pagina; sorteren en de jaartabs lopen
+daarover en springen terug naar pagina 1. Er staat één tabel in de DOM, niet
+een gevulde tabel per jaar. Rechtsboven staat “Regels per pagina”. Onder en
+boven de tabel: vorige, volgende, paginanummers en “x–y van N artikelen”.
 
 **xlsx.** `export.php` schrijft een echt werkboek met `ZipArchive` en
 SpreadsheetML, zonder Composer. Ontbreekt de extensie, dan komt een
 Nederlandse foutmelding. Eén werkblad per jaar (zelfde kolommen, header met
 autofilter, getallen als numerieke cellen) en als laatste blad `Filters` met
 de kolommen Gefilterde klanten en Gefilterde artikels. Sheetnamen blijven
-binnen 31 tekens. De export volgt bedrijf, afdeling en beide uitsluitingen.
+binnen 31 tekens. De export volgt bedrijf, afdeling, beide uitsluitingen en
+de gekozen sortering (`sort` is de kolomindex, `dir` is `asc` of `desc`).
+Hij bevat alle gefilterde rijen, niet alleen de zichtbare pagina.
 
 **Modal.** Een klik op het artikelnummer toont veiligheidsvoorraad, het
 gemiddelde jaarverbruik, dit jaar al verbruikt en het verwachte resterende
@@ -247,6 +257,7 @@ php tests/consus_data_test.php
 php tests/consus_usage_test.php
 php tests/consus_prefs_test.php
 php tests/consus_xlsx_test.php
+php tests/consus_page_test.php
 php tests/nightly_debug_test.php
 ```
 

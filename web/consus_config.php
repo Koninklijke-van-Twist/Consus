@@ -40,6 +40,13 @@ const CONSUS_LOW_STOCK_WHEN_INVENTORY_BELOW_EXPECTED = true;
 const CONSUS_REMAINING_DAYS_INCLUDE_TODAY = true;
 
 /**
+ * Regels per pagina in de jaartabel. Alleen deze waarden worden opgeslagen.
+ * De standaard geldt als de voorkeur ontbreekt of ongeldig is.
+ */
+const CONSUS_PAGE_SIZES = [10, 20, 50, 100, 150, 200, 300, 500];
+const CONSUS_DEFAULT_PAGE_SIZE = 20;
+
+/**
  * Bedrijven in scope. Nachtelijke refresh slaat andere BC-bedrijven over.
  * `names` zijn de BC-bedrijfsnamen (en Company_Name op VoorraadPerBedrijf).
  */

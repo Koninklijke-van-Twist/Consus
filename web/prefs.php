@@ -33,10 +33,7 @@ if ($email === '' || !consus_csrf_matches($token) || !consus_request_is_same_ori
 }
 
 try {
-    $saved = consus_prefs_write($email, [
-        'customers' => $_POST['customers'] ?? [],
-        'items' => $_POST['items'] ?? [],
-    ]);
+    $saved = consus_prefs_write($email, consus_prefs_input_from_request($_POST));
 } catch (Throwable $error) {
     http_response_code(400);
     header('Content-Type: text/plain; charset=utf-8');
@@ -46,7 +43,12 @@ try {
 
 if ($wantsJson) {
     header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(['ok' => true, 'customers' => $saved['customers'], 'items' => $saved['items']], JSON_UNESCAPED_UNICODE);
+    echo json_encode([
+        'ok' => true,
+        'customers' => $saved['customers'],
+        'items' => $saved['items'],
+        'page_size' => $saved['page_size'],
+    ], JSON_UNESCAPED_UNICODE);
     exit;
 }
 

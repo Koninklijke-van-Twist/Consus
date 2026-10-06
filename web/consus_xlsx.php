@@ -191,10 +191,17 @@ function consus_xlsx_sheets(array $snapshot, array $prefs, array $query): array
         ? consus_usage_facts($snapshot, $companyKey, $costCenter, $excludedItems)
         : [];
     $headers = consus_usage_column_labels();
+    $sortColumn = array_key_exists('sort', $query) ? $query['sort'] : null;
+    $sortDirection = (string) ($query['dir'] ?? 'asc') === 'desc' ? 'desc' : 'asc';
     $sheets = [];
     foreach (consus_history_years((string) ($windows['as_of'] ?? '')) as $year) {
         $rows = [$headers];
-        foreach (consus_usage_year_rows($facts, $year, $windows, $excludedCustomers) as $row) {
+        $yearRows = consus_sort_usage_rows(
+            consus_usage_year_rows($facts, $year, $windows, $excludedCustomers),
+            $sortColumn,
+            $sortDirection
+        );
+        foreach ($yearRows as $row) {
             $values = consus_usage_row_values($row);
             if ($companyKey === '') {
                 $label = trim((string) ($row['company_label'] ?? ''));
