@@ -1,7 +1,7 @@
 # Consus
 
-Dashboard voor veiligheidsvoorraad, verkopen, werkorderverbruik en omloopsnelheid
-van KVT en HVT (sleutels.kvt.nl, Asclepius #1032).
+Dashboard voor verbruik per artikel en per jaar van KVT en HVT
+(sleutels.kvt.nl, Asclepius #1032).
 
 De pagina draait vanuit `web/`. `index.php` leest alleen de nachtelijke snapshot
 en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh.
@@ -22,20 +22,28 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   Alleen als het stale blijft én de vorige snapshot geen rijen voor dat
   bedrijf heeft, gebruikt nightly die voorraad. Zijn er wel vorige rijen,
   dan blijven die staan en worden de tijdelijke bestanden verwijderd.
-- Artikelposten blijven het rolling venster van twaalf maanden (maand, kwartaal,
-  jaar en de maandreeks). De snapshot bewaart totalen per leverancier/locatie
-  en daarnaast compacte artikelregels (nummer, omschrijving als AppItemCard die
-  heeft, voorraad, veiligheidsvoorraad, bestelpunt en WO-verbruik per maand).
-  Geen ruwe artikelposten en geen verkoopmatrix per artikel. `$select` laat `Entry_Type` weg en haalt omzet alleen bij
-  verkoop en `Document_No` alleen bij negatieve correctie. Die correctie vraagt
+- Artikelposten lopen van 1 januari van (huidig jaar − `CONSUS_HISTORY_PREVIOUS_YEARS`)
+  tot de peildatum. Standaard is dat het huidige jaar plus drie voorgaande
+  jaren (`CONSUS_HISTORY_PREVIOUS_YEARS = 3`). De snapshot bewaart nog steeds
+  totalen per leverancier/locatie (voor de warme merge en de voorraadlogica)
+  en compacte artikelregels. Daarnaast staat `item_usage`: per bedrijf en
+  artikelnummer, per maand, het interne verbruik en de verkoop per klant
+  (`customers`, alleen klanten met een hoeveelheid; een lege sleutel is
+  verkoop zonder klant). `days` bewaart alleen de overlapdag. Geen ruwe
+  artikelposten. `$select` laat `Entry_Type` weg, haalt omzet alleen bij
+  verkoop, `Source_No` en `Source_Type` alleen bij verkoop (optioneel; weigert
+  BC ze, dan blijft de query staan) en `Document_No` alleen bij negatieve
+  correctie. Die correctie vraagt
   `Document_No` van `WO` tot vóór `WP` (BC weigert `startswith`); PHP controleert
   het prefix daarna nog. Weigert BC het bereik, dan komt de volle set binnen en
   filtert PHP als voorheen. Elke query gebruikt `$top` 20000; een geweigerde
   paginagrootte valt terug op de BC-standaard. Bedrijven blijven na elkaar, niet
   parallel.
-- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 12, of
+- **Koud of warm.** Zonder geldig watermerk (eerste run, snapshotversie 13, of
   `full`) haalt nightly per kalendermaand het hele venster. Een oudere
-  snapshotversie is ook koud, net als een bedrijf waarvan elke rij nog een
+  snapshotversie is ook koud, net als een ontbrekend of later
+  `windows.history_start` (het venster is groter geworden zonder
+  versiewissel) en een bedrijf waarvan elke rij nog een
   lege leverancier heeft: anders blijft de historie op die lege groep staan.
   Na een geslaagde
   run staat op het bedrijf `ledger_through` (de peildatum) en
@@ -74,15 +82,15 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   (geen vorige rijen, wel voorraad uit een ander bedrijf) wist het watermerk.
 - Omloopsnelheid (maand, kwartaal, jaar) = verkoophoeveelheid ÷ voorraad van
   de gekozen locaties. Eigen en EGT delen die noemer. Dropship telt niet mee.
-- De pagina filtert eerst op afdeling, daarna op leverancier en locatie uit
-  die cache. Perkins kan de eerste leverancierskeuze zijn en is te wissen.
-  Een rij zonder kostenplaats of leverancier blijft kiesbaar als
-  `(geen afdeling)` en `Geen leverancier`. Alleen een lege `rows`-lijst laat
-  beide dropdowns op Alle staan. De catalogus `cost_centers` laat lege
-  waarden weg; de keuzes komen uit `rows`.
-  Onder de totalen staat een artikeltabel op artikelnummer, met
-  veiligheidsvoorraad, voorraad van de gekozen locaties en WO-verbruik
-  (maand, kwartaal, jaar).
+  De pagina toont die snelheid niet meer; de snapshot bewaart de onderliggende
+  totalen per leverancier en locatie voor de warme merge.
+- De pagina filtert op bedrijf (KVT, HVT of Alle) en daarna op afdeling.
+  Een rij zonder kostenplaats blijft kiesbaar als `(geen afdeling)`.
+  Er is geen leverancier- of locatiefilter meer. Van de pagina zijn ook
+  verdwenen: de totalen per leverancier en locatie, de omloopsnelheid, de
+  verkopen per maand per inkooppad, het werkorderverbruik per periode en de
+  oude artikeltabel (omschrijving, voorraadkolom, WO maand/kwartaal/jaar).
+  In plaats daarvan staat één tabel met een tab per kalenderjaar.
 - VoorraadPerBedrijf mag hetzelfde artikel op dezelfde locatie twee keer
   sturen. De eerste niet-nul van voorraad, veiligheidsvoorraad en bestelpunt
   wint; een eerdere nulregel blokkeert die waarde niet en een tweede niet-nul
@@ -150,6 +158,72 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   `Assembly Consumption`) en bij negatieve correctie op documentnummers
   vanaf `WO` tot vóór `WP`. Consus controleert dat prefix daarna nog eens.
 
+## Jaartabel
+
+De pagina toont één tabel. Tab 1 is het huidige kalenderjaar, daarna de
+voorgaande jaren uit `CONSUS_HISTORY_PREVIOUS_YEARS` (nu 3, dus vier tabs).
+Kolommen, in deze volgorde: Artikelnummer, Veiligheidsvoorraad, Totaal
+verbruik Jaar, Januari tot en met December, Kwartaal 1 tot en met 4, Intern
+Verbruik. Elke kolomkop sorteert (tekst met artikelnummer, getallen numeriek).
+
+**Verbruik** in een maand, een kwartaal of het jaar is `Sale` plus intern
+verbruik. `Sale` komt uit `ItemLedgerEntries` (`Entry_Type eq 'Sale'`), velden
+`Item_No`, `Quantity`, `Posting_Date`. BC zet uitgaand negatief; Consus draait
+het teken om, zodat een retour aftrekt. Intern verbruik telt in die kolommen
+mee zolang `CONSUS_USAGE_INCLUDES_INTERNAL` aan staat, verkoop zolang
+`CONSUS_USAGE_INCLUDES_SALE` aan staat. Het totaal is de som van de twaalf
+maanden en daardoor ook de som van de vier kwartalen.
+
+**Intern verbruik** (eigen kolom, altijd het jaartotaal) is `Negative Adjmt.`
+met `Document_No` dat met `WO` begint, plus `Assembly Consumption`. Zelfde
+queries als de nachtrun. Velden: `Item_No`, `Quantity`, `Posting_Date`, en bij
+de negatieve correctie `Document_No`.
+
+Verkoop bewaart `Source_No` per maand als `Source_Type` `Customer` is (of als
+dat veld ontbreekt). Een ander brontype telt wel in het verbruik, maar niet
+bij een klant. De klantcatalogus probeert `Customer`, dan `Customer_Card`,
+dan `Customers`, met `No` en `Name`. Lukt geen entiteit, dan blijven de
+nummers uit de posten over en komt er een opmerking in de snapshot.
+
+Bovenaan staan twee uitsluitingen, per ingelogde gebruiker:
+
+- klanten (combobox, nummer of naam, meerdere waarden kommagescheiden);
+- artikelnummers (zelfde soort combobox).
+
+Uitgesloten klanten vallen uit het verbruik van de tabel, de modal, de gele
+markering en de export. Uitgesloten artikelen verdwijnen uit tabel en export.
+Opslag: `web/data/prefs/<sha1 van het e-mailadres in lowercase>.json`, atomair
+via een tijdelijk bestand en een file lock. `POST prefs.php` eist een
+ingelogde sessie, een CSRF-token en dezelfde host in `Origin` of `Referer`.
+Die map gaat niet mee in git en niet mee in de FTP-deploy (`data/` blijft
+staan).
+
+**xlsx.** `export.php` schrijft een echt werkboek met `ZipArchive` en
+SpreadsheetML, zonder Composer. Ontbreekt de extensie, dan komt een
+Nederlandse foutmelding. Eén werkblad per jaar (zelfde kolommen, header met
+autofilter, getallen als numerieke cellen) en als laatste blad `Filters` met
+de kolommen Gefilterde klanten en Gefilterde artikels. Sheetnamen blijven
+binnen 31 tekens. De export volgt bedrijf, afdeling en beide uitsluitingen.
+
+**Modal.** Een klik op het artikelnummer toont veiligheidsvoorraad, het
+gemiddelde jaarverbruik, dit jaar al verbruikt en het verwachte resterende
+verbruik. Het gemiddelde loopt over de volledige voorgaande kalenderjaren die
+in het venster liggen (nu 3 jaren; het lopende jaar telt niet mee, ook niet
+op 31 december). Zonder zo'n jaar staat er “geen historie”: geen gemiddelde,
+geen restant, en het nummer wordt niet geel. Verwacht resterend = gemiddelde
+× (dagen tot en met 31 december / dagen in het jaar). 1 januari is het hele
+jaar, 31 december is één dag (`CONSUS_REMAINING_DAYS_INCLUDE_TODAY`).
+
+**Te weinig voorraad** (`CONSUS_LOW_STOCK_WHEN_INVENTORY_BELOW_EXPECTED`):
+huidige voorraad is strikt lager dan dat restant. Het artikelnummer krijgt
+dan een gele achtergrond. De legenda onder de tabs zegt hetzelfde. Gelijke
+voorraad is niet geel.
+
+Een wijziging van `CONSUS_HISTORY_PREVIOUS_YEARS` hoort samen met een hogere
+`CONSUS_SNAPSHOT_VERSION`. Versie 13 maakt de eerstvolgende nachtrun koud:
+het watermerk van versie 12 geldt niet, checkpoints per maand lopen het
+venster vanaf 1 januari opnieuw, en pas daarna is de jaartabel gevuld.
+
 Lokaal gebruikt Consus `~/Repositories/auth.php` (naast de repo). Op de server
 blijft dat `web/auth.php`.
 
@@ -170,6 +244,9 @@ Classificatietests, zonder Business Central:
 
 ```sh
 php tests/consus_data_test.php
+php tests/consus_usage_test.php
+php tests/consus_prefs_test.php
+php tests/consus_xlsx_test.php
 php tests/nightly_debug_test.php
 ```
 
