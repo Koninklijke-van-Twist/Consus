@@ -2,6 +2,9 @@
 
 require_once __DIR__ . '/../web/consus_page.php';
 
+/**
+ * Stopt de test met een melding als de voorwaarde niet klopt.
+ */
 function page_assert(bool $condition, string $message): void
 {
     if (!$condition) {
@@ -54,6 +57,12 @@ function page_snapshot(int $count): array
     return $snapshot;
 }
 
+/**
+ * Rendert de pagina en geeft de HTML terug.
+ *
+ * @param array<string, mixed> $snapshot
+ * @param array<string, mixed> $prefs
+ */
 function page_html(array $snapshot, array $prefs): string
 {
     ob_start();
@@ -62,6 +71,11 @@ function page_html(array $snapshot, array $prefs): string
     return (string) ob_get_clean();
 }
 
+/**
+ * Haalt de jaardata-JSON uit de HTML.
+ *
+ * @return array<string, mixed>
+ */
 function page_payload(string $html): array
 {
     $marker = '<script id="year-data" type="application/json">';

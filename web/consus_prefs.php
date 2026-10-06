@@ -7,6 +7,12 @@ function consus_normalize_email(string $email): string
     return strtolower(trim($email));
 }
 
+/**
+ * Geeft een toegestane paginagrootte terug; alles buiten CONSUS_PAGE_SIZES
+ * valt terug op CONSUS_DEFAULT_PAGE_SIZE.
+ *
+ * @param mixed $value
+ */
 function consus_normalize_page_size($value): int
 {
     $size = (int) $value;

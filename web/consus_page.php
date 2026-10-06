@@ -86,7 +86,7 @@ function consus_page_filters(array $query, string $asOf): array
  * @param array<int, int> $years
  * @param array{as_of?:string,history_start?:string} $windows
  * @param array<int, string> $excludedCustomers
- * @return array<int, array{item:string,company:string,low:bool,modal:array<string, mixed>,values:array<string, array<int, float>>}>
+ * @return array<int, array{item:string,company:string,low:bool,modal:array<string, mixed>,values:array<int, array<int, float>>}>
  */
 function consus_page_client_rows(array $facts, array $years, array $windows, array $excludedCustomers, bool $showCompany): array
 {
@@ -108,7 +108,7 @@ function consus_page_client_rows(array $facts, array $years, array $windows, arr
             foreach ($flat as $number) {
                 $numbers[] = (float) $number;
             }
-            $values[(string) $year] = $numbers;
+            $values[(int) $year] = $numbers;
         }
         if ($sample === null) {
             continue;
@@ -825,27 +825,31 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     }
 
     if (pageSizeSelect) {
-        pageSizeSelect.addEventListener('change', function () {
-            var next = Number(pageSizeSelect.value);
-            if (!next || next === pageSize) { return; }
-            var previous = pageSize;
-            pageSize = next;
-            page = 1;
-            renderTable();
-            if (!form || !window.fetch) { return; }
+        // Opslaan gaat één verzoek tegelijk, zodat een oudere keuze op de server
+        // nooit een nieuwere overschrijft. Alleen de laatste keuze mag de select
+        // terugzetten, en dan naar de waarde die de server het laatst bewaarde.
+        var savedPageSize = pageSize;
+        var pageSizeSeq = 0;
+        var pageSizeQueue = Promise.resolve();
+        var sendPageSize = function (size, seq) {
+            if (seq !== pageSizeSeq) { return Promise.resolve(); }
             var payload = new FormData();
             payload.set('csrf', (form.querySelector('[name="csrf"]') || {}).value || '');
-            payload.set('page_size', String(next));
-            fetch(form.action, {
+            payload.set('page_size', String(size));
+            return fetch(form.action, {
                 method: 'POST',
                 body: payload,
                 credentials: 'same-origin',
                 headers: { 'Accept': 'application/json' }
             }).then(function (response) {
                 if (!response.ok) { throw new Error('opslaan mislukt'); }
+                savedPageSize = size;
+                var done = document.querySelector('[data-save-status]');
+                if (done && seq === pageSizeSeq) { done.hidden = true; done.textContent = ''; }
             }).catch(function () {
-                pageSize = previous;
-                pageSizeSelect.value = String(previous);
+                if (seq !== pageSizeSeq) { return; }
+                pageSize = savedPageSize;
+                pageSizeSelect.value = String(savedPageSize);
                 page = 1;
                 renderTable();
                 var status = document.querySelector('[data-save-status]');
@@ -854,6 +858,16 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                     status.textContent = 'Opslaan mislukt. Probeer het nog eens.';
                 }
             });
+        };
+        pageSizeSelect.addEventListener('change', function () {
+            var next = Number(pageSizeSelect.value);
+            if (!next || next === pageSize) { return; }
+            pageSize = next;
+            page = 1;
+            renderTable();
+            if (!form || !window.fetch) { return; }
+            var seq = ++pageSizeSeq;
+            pageSizeQueue = pageSizeQueue.then(function () { return sendPageSize(next, seq); });
         });
     }
 
