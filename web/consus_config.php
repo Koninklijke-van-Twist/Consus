@@ -284,6 +284,8 @@ const CONSUS_DIMENSION_OPTIONAL_FIELDS = [
     'Value_Code',
 ];
 const CONSUS_DIMENSION_TABLE_ID = 27;
+/** Terugval voor de afdeling als een artikel geen waarde op Globale dimensie 1 heeft. */
+const CONSUS_DEPARTMENT_FALLBACK_DIMENSION = 'COST_CENTER';
 
 /**
  * Aantal rijen per OData-pagina ($top). 20000 is de gebruikelijke BC-bovengrens,
