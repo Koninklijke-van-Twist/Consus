@@ -3816,9 +3816,9 @@ function consus_collect_rows_via_spill(callable $fetchInto, callable $onRow): ar
     $sample = null;
     try {
         $count = $fetchInto(static function (array $row) use ($handle, &$sample): void {
-            if ($sample === null) {
-                $sample = $row;
-            }
+            // Vereniging van alle sleutels: Mímir kan rijen uit een smallere
+            // cache meegeven, dus de eerste rij zegt niet welke velden bestaan.
+            $sample = $sample === null ? $row : $sample + $row;
             $encoded = json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             if (!is_string($encoded)) {
                 throw new RuntimeException('OData-regel kon niet als JSON worden weggeschreven.');
@@ -4009,6 +4009,43 @@ function consus_each_entity_rows(
     throw new RuntimeException(
         $entitySet . ' voor ' . $company . ' mislukt: ' . ($lastError ? $lastError->getMessage() : 'onbekend')
     );
+}
+
+/**
+ * Velden voor een melding over ontbrekende kolommen. Een alternatieve naam
+ * telt niet als ontbrekend als een andere naam uit dezelfde groep wel kwam;
+ * van een groep die helemaal ontbreekt blijft alleen de eerste naam staan.
+ *
+ * @param array<int, string> $missing
+ * @param array<int, string> $requested
+ * @return array<int, string>
+ */
+function consus_missing_field_report(array $missing, array $requested): array
+{
+    $missing = array_values(array_unique(array_map('strval', $missing)));
+    $present = array_values(array_diff(array_map('strval', $requested), $missing));
+    $report = [];
+    $handled = [];
+    foreach (CONSUS_FIELD_ALIAS_GROUPS as $group) {
+        $inGroup = array_values(array_intersect($missing, $group));
+        if ($inGroup === []) {
+            continue;
+        }
+        foreach ($inGroup as $field) {
+            $handled[$field] = true;
+        }
+        if (array_intersect($present, $group) !== []) {
+            continue;
+        }
+        $report[] = $inGroup[0];
+    }
+    foreach ($missing as $field) {
+        if (!isset($handled[$field])) {
+            $report[] = $field;
+        }
+    }
+
+    return array_values(array_unique($report));
 }
 
 function consus_odata_error_allows_entry_type_fallback(Throwable $error): bool
@@ -5825,7 +5862,10 @@ function consus_collect_company(
                 $addWarning(CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $locationMissing) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.');
             }
             if ($stockCount > 0 && $otherStockMissing !== []) {
-                $addWarning(CONSUS_STOCK_ENTITY . ': velden niet beschikbaar (' . implode(', ', $otherStockMissing) . ').');
+                $otherStockMissing = consus_missing_field_report($otherStockMissing, array_merge(CONSUS_STOCK_FIELDS, CONSUS_STOCK_OPTIONAL_FIELDS));
+                if ($otherStockMissing !== []) {
+                    $addWarning(CONSUS_STOCK_ENTITY . ': velden niet beschikbaar (' . implode(', ', $otherStockMissing) . ').');
+                }
             }
             if (!empty($stockResult['page_size_fallback'])) {
                 $addWarning(consus_page_size_warning(CONSUS_STOCK_ENTITY));
@@ -5874,6 +5914,7 @@ function consus_collect_company(
                 if ($customerMissing !== []) {
                     $addWarning('Verkoop: klantvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $customerMissing) . '). Verbruik blijft staan; de klantuitsplitsing valt terug op wat BC wel meestuurt.');
                 }
+                $otherMissing = consus_missing_field_report($otherMissing, array_merge(CONSUS_LEDGER_FIELDS, CONSUS_LEDGER_OPTIONAL_FIELDS));
                 if ($otherMissing !== []) {
                     $addWarning('Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $otherMissing) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.');
                 }
@@ -5938,6 +5979,7 @@ function consus_collect_company(
                         $missingVendorFields[] = $field;
                     }
                 }
+                $missingVendorFields = consus_missing_field_report($missingVendorFields, array_merge(CONSUS_ITEM_FIELDS, CONSUS_ITEM_OPTIONAL_FIELDS));
                 if ($missingVendorFields !== []) {
                     $addWarning(CONSUS_ITEM_ENTITY . ': velden niet beschikbaar (' . implode(', ', $missingVendorFields) . '). Nummer en leverancier blijven staan als die query wel lukte.');
                 }
@@ -6093,6 +6135,7 @@ function consus_collect_company(
                             $dimensionMissing[] = $field;
                         }
                     }
+                    $dimensionMissing = consus_missing_field_report($dimensionMissing, array_merge(CONSUS_DIMENSION_FIELDS, CONSUS_DIMENSION_OPTIONAL_FIELDS));
                     if ((int) ($dimensionResult['count'] ?? 0) > 0 && $dimensionMissing !== []) {
                         $addWarning(CONSUS_DIMENSION_ENTITY . ': velden niet beschikbaar (' . implode(', ', $dimensionMissing) . ').');
                     }
