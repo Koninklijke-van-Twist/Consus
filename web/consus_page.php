@@ -178,6 +178,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     $customerSuggestions = consus_customer_suggestions($snapshot, $companyFilter);
     $itemSuggestions = consus_item_suggestions($snapshot, $companyFilter, $costFilter);
     $warningLines = consus_warning_lines(is_array($snapshot['warnings'] ?? null) ? $snapshot['warnings'] : []);
+    $infoLines = consus_info_lines(is_array($snapshot['warnings'] ?? null) ? $snapshot['warnings'] : []);
     $queryString = http_build_query([
         'company' => $companyFilter,
         'cost_center' => $costFilter,
@@ -331,6 +332,14 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             <p><strong>De nachtrun is afgerond, met opmerkingen.</strong> De cijfers zijn bijgewerkt. Hieronder staat wat Business Central niet meegaf.</p>
             <?php foreach ($warningLines as $warningLine): ?>
                 <div><?= consus_h($warningLine) ?></div>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
+
+    <?php if ($infoLines !== []): ?>
+        <div class="notice info">
+            <?php foreach ($infoLines as $infoLine): ?>
+                <div>Ter info: <?= consus_h($infoLine) ?></div>
             <?php endforeach; ?>
         </div>
     <?php endif; ?>

@@ -6,7 +6,7 @@
  * worden niet in de OData-filters vastgezet.
  */
 
-const CONSUS_SNAPSHOT_VERSION = 13;
+const CONSUS_SNAPSHOT_VERSION = 14;
 
 /**
  * Jaartabs op de pagina: het huidige kalenderjaar plus dit aantal
@@ -83,8 +83,9 @@ const CONSUS_EIGEN_LOCATION_HINTS = ['KVT', 'HVT'];
  * - dropship = inkoopcode DROP_SHIP en/of leverancier 90052
  * - EGT = leverancier 90101
  *
- * Tabel 32 publiceert standaard geen inkoopcode en geen leveranciersnr.
- * Nightly vraagt de namen hieronder mee en laat ze weg als BC ze weigert.
+ * Tabel 32 publiceert geen inkoopcode en geen leveranciersnr. Dropship komt
+ * uit Drop_Shipment op PageItemLedgerEntries; de namen hieronder blijven voor
+ * regels die ze wel meegeven (tests, oude snapshots).
  * AppItemCard.Vendor_No blijft de artikelleverancier voor het filter.
  */
 const CONSUS_ILE_PURCHASING_CODE_FIELD = 'Purchasing_Code';
@@ -143,64 +144,35 @@ const CONSUS_STOCK_FIELDS = [
     'Reorder_Point',
 ];
 /**
- * Meenemen als de pagina het veld heeft. Location_Code ontbreekt op
- * VoorraadPerBedrijf; een andere locatienaam vult die dan. Bestelpunt komt
- * soms niet in Reorder_Point maar in een tweede kolom.
+ * Geen optionele namen meer: VoorraadPerBedrijf publiceert alleen Item_No,
+ * Company_Name, Inventory, Quantity_Available, Quantity_on_Purchase_Orders,
+ * Quantity_in_Reservation, Safety_Stock_Quantity en Reorder_Point
+ * ($metadata kvtmdlive_aad, 8 okt 2026). Er is geen locatieveld; voorraad
+ * staat zonder locatie en dat is geen melding.
  */
-const CONSUS_STOCK_OPTIONAL_FIELDS = [
-    'Location_Code',
-    'LocationCode',
-    'Locatiecode',
-    'Locatie',
-    'Location_No',
-    'Bestelpunt',
-    'ReorderPoint',
-    'Veiligheidsvoorraad',
-    'SafetyStockQuantity',
-    'Global_Dimension_1_Code',
-    'LVS_Global_Dimension_1_Code',
-    'CompanyName',
-    'Bedrijfsnaam',
-    'Bedrijf',
-    'Firma',
-    'Company',
-    'Voorraad',
-    'Quantity_on_Hand',
-    'Qty_on_Hand',
-    'In_voorraad',
-];
+const CONSUS_STOCK_OPTIONAL_FIELDS = [];
 
 const CONSUS_ITEM_ENTITY = 'AppItemCard';
 /**
- * Verplicht zijn alleen nummer en leverancier. LVS_Vendor_Name is een
- * maatwerkveld: als BC het weigert, mag dat de leveranciersdropdown niet
- * leeg trekken. Omschrijving komt mee als de pagina het veld heeft.
+ * Exacte veldnamen uit $metadata (kvtmdlive_aad). AppItemCard heeft geen
+ * kostenplaatsveld; de afdeling komt uit DefaultDimensions.
  */
 const CONSUS_ITEM_FIELDS = [
     'No',
     'Vendor_No',
-];
-/** Optioneel; een geweigerd veld wordt uit $select gehaald en de query opnieuw gedaan. */
-const CONSUS_ITEM_OPTIONAL_FIELDS = [
     'LVS_Vendor_Name',
-    'COST_CENTER',
-    'Cost_Center',
-    'Kostenplaats',
-    'Afdeling',
-    'Global_Dimension_1_Code',
-    'LVS_Global_Dimension_1_Code',
-    'Shortcut_Dimension_1_Code',
-    'Safety_Stock_Quantity',
-    'Veiligheidsvoorraad',
-    'SafetyStockQuantity',
-    'Reorder_Point',
-    'Bestelpunt',
-    'ReorderPoint',
-    'Vendor_Name',
     'Description',
+    'Safety_Stock_Quantity',
+    'Reorder_Point',
 ];
+const CONSUS_ITEM_OPTIONAL_FIELDS = [];
 
-const CONSUS_LEDGER_ENTITY = 'ItemLedgerEntries';
+/**
+ * PageItemLedgerEntries is dezelfde tabel 32 als ItemLedgerEntries, maar
+ * publiceert ook Source_Type, Source_No, Global_Dimension_1_Code en
+ * Drop_Shipment. ItemLedgerEntries heeft die velden niet.
+ */
+const CONSUS_LEDGER_ENTITY = 'PageItemLedgerEntries';
 /**
  * Velden die elke artikelpost nodig heeft. Entry_Type zit al in $filter.
  * Omzet en documentnummer komen er alleen bij voor de query die ze gebruikt.
@@ -210,48 +182,35 @@ const CONSUS_LEDGER_FIELDS = [
     'Quantity',
     'Posting_Date',
     'Location_Code',
-];
-/** Inkooppad op de artikelpost. Beperkt de opgehaalde set niet. */
-const CONSUS_LEDGER_OPTIONAL_FIELDS = [
-    CONSUS_ILE_PURCHASING_CODE_FIELD,
-    'PurchasingCode',
-    CONSUS_ILE_VENDOR_NO_FIELD,
-    'Buy_from_Vendor_No',
     'Global_Dimension_1_Code',
-    'LVS_Global_Dimension_1_Code',
+    'Drop_Shipment',
 ];
+/** Inkoopcode en leveranciersnr. staan niet op de artikelpost; Drop_Shipment wel. */
+const CONSUS_LEDGER_OPTIONAL_FIELDS = [];
 
 /**
  * Klant op een verkooppost. Source_No is het klantnummer als Source_Type
- * Customer is. Beide zijn optioneel: weigert BC een veld, dan blijft de
- * verkoopquery staan en valt de klantuitsplitsing terug op wat er wél is.
+ * Customer (of Klant) is. Beide staan op PageItemLedgerEntries.
  */
 const CONSUS_LEDGER_SOURCE_NO_FIELD = 'Source_No';
 const CONSUS_LEDGER_SOURCE_TYPE_FIELD = 'Source_Type';
 const CONSUS_CUSTOMER_SOURCE_TYPES = [
     'Customer',
+    'Klant',
 ];
 
 /**
- * Klantcatalogus voor de suggesties (nummer + naam). De eerste entiteit die
- * BC accepteert wint. Lukt geen van alle, dan tonen de suggesties alleen
- * nummers uit de artikelposten.
+ * Klantcatalogus voor de suggesties (nummer + naam). AppCustomerCard levert
+ * No en Name; Customer, Customer_Card en Customers bestaan niet.
  */
 const CONSUS_CUSTOMER_ENTITIES = [
     'AppCustomerCard',
-    'Customer',
-    'Customer_Card',
-    'Customers',
 ];
 const CONSUS_CUSTOMER_NO_FIELDS = [
     'No',
-    'Customer_No',
-    'Number',
 ];
 const CONSUS_CUSTOMER_NAME_FIELDS = [
     'Name',
-    'DisplayName',
-    'Customer_Name',
 ];
 
 /**
@@ -277,12 +236,7 @@ const CONSUS_DIMENSION_FIELDS = [
     'Dimension_Code',
     'Dimension_Value_Code',
 ];
-/** Andere namen voor het artikelnummer en de dimensiewaarde. Een geweigerd veld valt uit $select. */
-const CONSUS_DIMENSION_OPTIONAL_FIELDS = [
-    'Item_No',
-    'Dimension_Value',
-    'Value_Code',
-];
+const CONSUS_DIMENSION_OPTIONAL_FIELDS = [];
 const CONSUS_DIMENSION_TABLE_ID = 27;
 /** Terugval voor de afdeling als een artikel geen waarde op Globale dimensie 1 heeft. */
 const CONSUS_DEPARTMENT_FALLBACK_DIMENSION = 'COST_CENTER';
@@ -295,26 +249,6 @@ const CONSUS_DEPARTMENT_FALLBACK_DIMENSION = 'COST_CENTER';
  */
 const CONSUS_ODATA_PAGE_SIZE = 20000;
 
-/**
- * Alternatieve namen voor hetzelfde gegeven. Een melding over ontbrekende
- * velden noemt een naam alleen als geen enkele naam uit de groep kwam.
- * Live metadata (kvtmdlive_aad): VoorraadPerBedrijf heeft Company_Name,
- * Inventory, Safety_Stock_Quantity en Reorder_Point maar geen locatie;
- * DefaultDimensions heeft No en Dimension_Value_Code.
- */
-const CONSUS_FIELD_ALIAS_GROUPS = [
-    ['Location_Code', 'LocationCode', 'Locatiecode', 'Locatie', 'Location_No'],
-    ['Reorder_Point', 'Bestelpunt', 'ReorderPoint'],
-    ['Safety_Stock_Quantity', 'Veiligheidsvoorraad', 'SafetyStockQuantity'],
-    ['Global_Dimension_1_Code', 'LVS_Global_Dimension_1_Code', 'Shortcut_Dimension_1_Code', 'COST_CENTER', 'Cost_Center', 'Kostenplaats', 'Afdeling'],
-    ['Company_Name', 'CompanyName', 'Bedrijfsnaam', 'Bedrijf', 'Firma', 'Company'],
-    ['Inventory', 'Voorraad', 'Quantity_on_Hand', 'Qty_on_Hand', 'In_voorraad'],
-    ['LVS_Vendor_Name', 'Vendor_Name'],
-    ['Purchasing_Code', 'PurchasingCode'],
-    ['Vendor_No', 'Buy_from_Vendor_No'],
-    ['No', 'Item_No'],
-    ['Dimension_Value_Code', 'Dimension_Value', 'Value_Code'],
-];
 
 /**
  * Mímir max_age for UI / on-demand / live recheck when $mimirApi is set.

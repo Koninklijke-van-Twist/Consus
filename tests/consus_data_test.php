@@ -903,7 +903,7 @@ consus_apply_vendor_row($blankLocation, [
 test_assert((float) $blankLocation['kvt|S1']['safety_stock'] === 6.0, 'Nederlandse veiligheidsvoorraad op de kaart vult de voorraadregel');
 test_assert((float) $blankLocation['kvt|S1']['reorder_point'] === 3.0, 'Nederlands bestelpunt op de kaart vult de voorraadregel');
 test_assert((string) $blankLocation['kvt|S1']['cost_center'] === 'WERK', 'afdeling van de kaart blijft staan zonder COST_CENTER');
-test_assert(consus_location_code(['LocationCode' => 'mag']) === 'MAG', 'LocationCode vult de locatie');
+test_assert(consus_location_code(['Location_Code' => 'mag']) === 'MAG', 'Location_Code vult de locatie');
 $gapWarnings = consus_planning_gap_warnings($blankLocation, 'kvt');
 test_assert(count($gapWarnings) === 1 && str_contains($gapWarnings[0], 'zonder locatie'), 'locatie-opmerking noemt (zonder locatie)');
 $openGaps = [];
@@ -1479,7 +1479,7 @@ try {
         'Koninklijke van Twist',
         CONSUS_LEDGER_ENTITY,
         CONSUS_LEDGER_FIELDS,
-        CONSUS_LEDGER_OPTIONAL_FIELDS,
+        ['Purchasing_Code', 'Vendor_No'],
         "Entry_Type eq 'Sale' and Posting_Date ge 2025-10-01",
         static function (array $row) use (&$seenItems): void {
             $seenItems[] = (string) ($row['Item_No'] ?? '');
@@ -1506,7 +1506,7 @@ try {
         'Koninklijke van Twist',
         CONSUS_LEDGER_ENTITY,
         CONSUS_LEDGER_FIELDS,
-        CONSUS_LEDGER_OPTIONAL_FIELDS,
+        ['Purchasing_Code', 'Vendor_No'],
         "Entry_Type eq 'Sale' and Posting_Date ge 2025-10-01",
         static function (array $row) use (&$emptyThenRow): void {
             $emptyThenRow[] = (string) ($row['Item_No'] ?? '');
@@ -1657,7 +1657,7 @@ try {
             return 1;
         }
     );
-    test_assert($dimensionTableCalls === 2, 'tabelfilter wordt op optionele en verplichte velden geprobeerd');
+    test_assert($dimensionTableCalls === 1, 'tabelfilter wordt één keer op de exacte velden geprobeerd');
     test_assert($dimensionCodeCalls === 1, 'zonder Table_ID lukt de setupcode in één keer');
     test_assert($dimensionResult['filter_fallback'] === true, 'geweigerd tabelfilter valt terug');
     test_assert($dimensionResult['dimension_code'] === 'SALES_DEPARTMENT', 'de gebruikte dimensie is de setupcode');
@@ -1680,7 +1680,7 @@ try {
     } catch (RuntimeException $dimensionNetwork) {
         test_assert(str_contains($dimensionNetwork->getMessage(), 'cURL error'), 'dimensie-netwerkfout wordt niet als filterfout behandeld');
     }
-    test_assert($dimensionNetworkCalls === 2, 'netwerkfout probeert het dimensiefilter niet opnieuw');
+    test_assert($dimensionNetworkCalls === 1, 'netwerkfout probeert het dimensiefilter niet opnieuw');
 
     $fixedDimensionCalls = [];
     $fixedDimensionResult = consus_each_dimension_rows(
@@ -1743,7 +1743,7 @@ try {
     } catch (RuntimeException $ledgerNetwork) {
         test_assert(str_contains($ledgerNetwork->getMessage(), 'cURL error'), 'netwerkfout wordt niet als filterfout behandeld');
     }
-    test_assert($fatalCalls === 2, 'netwerkfout laat het documentfilter niet vallen');
+    test_assert($fatalCalls === 1, 'netwerkfout laat het documentfilter niet vallen');
 } finally {
     foreach ($savedGlobals as $globalName => $globalValue) {
         $GLOBALS[$globalName] = $globalValue;
@@ -2526,11 +2526,21 @@ consus_apply_dimension_row($deptItems, ['No' => 'A2', 'Dimension_Code' => 'COST_
 test_assert($deptItems['kvt|A1']['cost_center'] === '45', 'SALES_DEPARTMENT wint van COST_CENTER');
 test_assert($deptItems['kvt|A2']['cost_center'] === '15', 'COST_CENTER vult een lege afdeling');
 
-// Ontbrekende velden: aliassen zijn geen melding als de echte naam kwam.
-$report = consus_missing_field_report(['Item_No', 'Dimension_Value', 'Value_Code'], array_merge(CONSUS_DIMENSION_FIELDS, CONSUS_DIMENSION_OPTIONAL_FIELDS));
-test_assert($report === [], 'DefaultDimensions-aliassen geven geen melding');
-$report = consus_missing_field_report(['Bestelpunt', 'ReorderPoint', 'Global_Dimension_1_Code', 'LVS_Global_Dimension_1_Code'], array_merge(CONSUS_STOCK_FIELDS, CONSUS_STOCK_OPTIONAL_FIELDS));
-test_assert($report === ['Global_Dimension_1_Code'], 'alleen een groep die helemaal ontbreekt');
+// Verplaatste voorraad is info, geen opmerking; exacte veldnamen zonder gokken.
+$mixed = [
+    ['company' => 'HVT', 'warning' => 'Voorraad van 102 stond op een ander bedrijf en is verplaatst naar dit bedrijf, omdat ...', 'level' => 'info'],
+    ['company' => 'KVT', 'warning' => 'Voorraad van 3 stond op een ander bedrijf en is verplaatst naar dit bedrijf, oud snapshot'],
+    ['company' => 'KVT', 'warning' => 'AppCustomerCard niet geladen'],
+];
+test_assert(consus_warning_lines($mixed) === ['KVT: AppCustomerCard niet geladen'], 'verplaatste voorraad telt niet als opmerking');
+test_assert(count(consus_info_lines($mixed)) === 2, 'verplaatste voorraad blijft als info zichtbaar');
+test_assert(CONSUS_LEDGER_ENTITY === 'PageItemLedgerEntries', 'klant en dimensie staan op PageItemLedgerEntries');
+test_assert(CONSUS_STOCK_OPTIONAL_FIELDS === [] && CONSUS_ITEM_OPTIONAL_FIELDS === [] && CONSUS_DIMENSION_OPTIONAL_FIELDS === [] && CONSUS_LEDGER_OPTIONAL_FIELDS === [], 'geen gegokte veldnamen meer');
+test_assert(in_array('Description', CONSUS_ITEM_FIELDS, true) && in_array('Reorder_Point', CONSUS_ITEM_FIELDS, true), 'artikelkaart vraagt omschrijving en bestelpunt');
+test_assert(CONSUS_CUSTOMER_ENTITIES === ['AppCustomerCard'], 'klantcatalogus uit AppCustomerCard');
+test_assert(consus_procurement_bucket_from_row(['Drop_Shipment' => true]) === 'dropship', 'Drop_Shipment is dropship');
+test_assert(consus_procurement_bucket_from_row(['Drop_Shipment' => false]) === 'eigen', 'geen Drop_Shipment is eigen');
+test_assert(consus_ledger_customer_no(['Source_No' => 'C1', 'Source_Type' => 'Klant']) === 'C1', 'Nederlands bronsoort Klant telt');
 $spill = consus_collect_rows_via_spill(static function (callable $onRow): int {
     $onRow(['No' => '1']);
     $onRow(['No' => '2', 'Description' => 'x']);
