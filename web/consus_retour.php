@@ -27,7 +27,8 @@
 
 require_once __DIR__ . '/consus_prefs.php';
 
-const CONSUS_RETOUR_COMPANY_KEY = 'HVT';
+/** Sleutel uit CONSUS_COMPANIES (kleine letters), dezelfde als de rest van de nightly. */
+const CONSUS_RETOUR_COMPANY_KEY = 'hvt';
 const CONSUS_RETOUR_ACCOUNT_SPOED = '57401';
 const CONSUS_RETOUR_ACCOUNT_VOORRAAD = '57420';
 /** Leverancier waarvoor de type-provider 57401/57420 uit de PO-vlaggen afleidt. */

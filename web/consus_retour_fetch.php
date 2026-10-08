@@ -294,6 +294,23 @@ function consus_retour_collect_bins(callable $each, string $company, string $ent
 }
 
 /**
+ * BC-bedrijfsnaam (Name, niet de weergavenaam) voor de retourlijst, via
+ * dezelfde bedrijfssleutel als de rest van de nightly. Hoofdletterongevoelig.
+ *
+ * @param array<int, array{company:string,company_key:string}> $scope
+ */
+function consus_retour_company_from_scope(array $scope): string
+{
+    foreach ($scope as $entry) {
+        if (strtolower((string) ($entry['company_key'] ?? '')) === strtolower(CONSUS_RETOUR_COMPANY_KEY)) {
+            return (string) ($entry['company'] ?? '');
+        }
+    }
+
+    return '';
+}
+
+/**
  * Wordt na de snapshot vanuit nightly.php aangeroepen. Een fout hier laat de
  * vorige retourdata staan en raakt de snapshot niet.
  */
@@ -307,14 +324,9 @@ function consus_retour_refresh(): array
     $GLOBALS['consus_odata_max_age'] = CONSUS_NIGHTLY_MAX_AGE;
     $discovered = auth_discover_companies_across_active_environments();
     $names = is_array($discovered['companies'] ?? null) ? $discovered['companies'] : [];
-    $company = '';
-    foreach (consus_companies_in_scope($names) as $entry) {
-        if (($entry['company_key'] ?? '') === CONSUS_RETOUR_COMPANY_KEY) {
-            $company = (string) $entry['company'];
-        }
-    }
+    $company = consus_retour_company_from_scope(consus_companies_in_scope($names));
     if ($company === '') {
-        throw new RuntimeException('Hunter van Twist niet gevonden voor de Retourlijst.');
+        throw new RuntimeException(consus_company_display_name(CONSUS_RETOUR_COMPANY_KEY) . ' niet gevonden bij discovery voor de Retourlijst.');
     }
     $data = consus_retour_build($company, $settings);
     consus_write_json_locked(consus_retour_data_file(), $data);

@@ -6467,6 +6467,26 @@ function consus_write_progress(array $progress): void
  * @param array<string, mixed> $snapshot
  * @param array{as_of:string,history_start:string} $windows
  */
+/**
+ * Vorige run van dezelfde peildatum is af: elk bedrijf in scope is ververst en
+ * er staan geen fouten in de snapshot. Dan is er niets te hervatten.
+ *
+ * @param array<int, array{company:string,company_key:string}> $companies
+ */
+function consus_previous_run_completed(array $snapshot, array $companies, array $windows): bool
+{
+    if ($companies === [] || (is_array($snapshot['errors'] ?? null) && $snapshot['errors'] !== [])) {
+        return false;
+    }
+    foreach ($companies as $company) {
+        if (!consus_company_refresh_is_current($snapshot, (string) ($company['company_key'] ?? ''), $windows)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 function consus_company_refresh_is_current(array $snapshot, string $companyKey, array $windows): bool
 {
     if ((int) ($snapshot['version'] ?? 0) !== CONSUS_SNAPSHOT_VERSION) {
@@ -6727,8 +6747,13 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         'as_of' => $previous['as_of'] ?? '',
         'windows' => is_array($previous['windows'] ?? null) ? $previous['windows'] : [],
         'companies' => $previousStats,
+        'errors' => is_array($previous['errors'] ?? null) ? $previous['errors'] : [],
     ];
     unset($previous);
+    // Overslaan van al ververste bedrijven is alleen voor het hervatten van een
+    // onderbroken of deels mislukte run. Was de vorige run van vandaag compleet,
+    // dan is een nieuwe run bewust en haalt alles opnieuw (Mímir max_age 4 uur).
+    $resumeCompanies = !$force && !consus_previous_run_completed($resumeSnapshot, $companies, $windows);
 
     $freshRows = [];
     $freshArticles = [];
@@ -6811,7 +6836,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         $startedAt = hrtime(true);
         $company = (string) $companyInfo['company'];
         $companyKey = (string) $companyInfo['company_key'];
-        if (!$force && consus_company_refresh_is_current($resumeSnapshot, $companyKey, $windows)) {
+        if ($resumeCompanies && consus_company_refresh_is_current($resumeSnapshot, $companyKey, $windows)) {
             $freshRows[$companyKey] = $previousRows[$companyKey] ?? [];
             $freshArticles[$companyKey] = $previousArticles[$companyKey] ?? [];
             $freshDepartments[$companyKey] = $previousDepartments[$companyKey] ?? [];
