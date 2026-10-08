@@ -209,6 +209,17 @@ opslag van alleen de paginagrootte laat de uitsluitingen staan, en omgekeerd.
 in `Origin` of `Referer`. Die map gaat niet mee in git en niet mee in de
 FTP-deploy (`data/` blijft staan).
 
+Bedrijf en afdeling bovenaan worden ook per gebruiker onthouden. Een keuze is
+één navigatie: een gewone `POST prefs.php` met `filter=1` slaat bedrijf en
+afdeling samen op en stuurt (303) door naar `index.php` met precies die keuze.
+Tot de nieuwe pagina er is, staan beide keuzes op slot met een laadmelding;
+een bedrijfswissel stuurt nooit de afdeling van het vorige bedrijf mee. Bij
+“Alle” is de afdelingskeuze uitgeschakeld. Na vernieuwen of de terug-knop zet
+de pagina de selects terug op de keuze die de server toonde. (Vroeger ging
+eerst een fetch en daarna de navigatie; een afdelingskeuze terwijl de pagina
+van een bedrijfswissel nog laadde, ging dan verloren: “Kies bovenaan een
+afdeling” bleef staan.)
+
 De tabel toont alleen de rijen van de huidige pagina. De volledige, al
 gefilterde set staat als JSON in de pagina; sorteren en de jaartabs lopen
 daarover en springen terug naar pagina 1. Er staat één tabel in de DOM, niet

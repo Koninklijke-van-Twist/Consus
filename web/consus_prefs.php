@@ -125,6 +125,43 @@ function consus_prefs_input_from_request(array $post): array
 }
 
 /**
+ * Doel na een keuze bovenaan (bedrijf/afdeling): de Consus-pagina met precies
+ * die keuze. Bij "Alle" (geen bedrijf) hoort geen afdeling: afdelingen
+ * verschillen per bedrijf.
+ *
+ * @param array<string, mixed> $post
+ */
+function consus_prefs_filter_redirect(array $post): string
+{
+    $company = (string) (consus_prefs_normalize_choice($post['company'] ?? '') ?? '');
+    $costCenter = $company === '' ? '' : (string) (consus_prefs_normalize_choice($post['cost_center'] ?? '') ?? '');
+    $year = (int) ($post['year'] ?? 0);
+
+    return 'index.php?' . http_build_query([
+        'company' => $company,
+        'cost_center' => $costCenter,
+        'year' => $year > 0 ? (string) $year : '',
+    ], '', '&', PHP_QUERY_RFC3986);
+}
+
+/**
+ * Een keuze bovenaan slaat bedrijf en afdeling altijd samen op, zodat een
+ * onthouden afdeling nooit bij een ander bedrijf terechtkomt.
+ *
+ * @param array<string, mixed> $post
+ * @return array{company:string,cost_center:string}
+ */
+function consus_prefs_filter_input(array $post): array
+{
+    $company = (string) (consus_prefs_normalize_choice($post['company'] ?? '') ?? '');
+
+    return [
+        'company' => $company,
+        'cost_center' => $company === '' ? '' : (string) (consus_prefs_normalize_choice($post['cost_center'] ?? '') ?? ''),
+    ];
+}
+
+/**
  * @param array<string, mixed> $decoded
  * @return array{customers:array<int, string>,items:array<int, string>,page_size:int}
  */

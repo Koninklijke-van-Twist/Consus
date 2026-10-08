@@ -24,8 +24,17 @@ if ($token === '') {
 }
 $accept = (string) ($_SERVER['HTTP_ACCEPT'] ?? '');
 $wantsJson = strpos($accept, 'application/json') !== false;
+// Keuze bovenaan (bedrijf/afdeling): opslaan en in dezelfde navigatie de
+// pagina met die keuze tonen. Geen losse fetch vooraf die een latere keuze
+// kan inhalen of door een lopende navigatie kan worden afgebroken.
+$filterChoice = !$wantsJson && (string) ($_POST['filter'] ?? '') === '1';
 
 if ($email === '' || !consus_csrf_matches($token) || !consus_request_is_same_origin()) {
+    if ($filterChoice) {
+        // Niet opgeslagen, maar de gekozen weergave wel tonen (een gewone GET).
+        header('Location: ' . consus_prefs_filter_redirect($_POST), true, 303);
+        exit;
+    }
     http_response_code(403);
     header('Content-Type: text/plain; charset=utf-8');
     echo 'De filters zijn niet opgeslagen. Vernieuw de pagina en probeer het opnieuw.';
@@ -33,8 +42,12 @@ if ($email === '' || !consus_csrf_matches($token) || !consus_request_is_same_ori
 }
 
 try {
-    $saved = consus_prefs_write($email, consus_prefs_input_from_request($_POST));
+    $saved = consus_prefs_write($email, $filterChoice ? consus_prefs_filter_input($_POST) : consus_prefs_input_from_request($_POST));
 } catch (Throwable $error) {
+    if ($filterChoice) {
+        header('Location: ' . consus_prefs_filter_redirect($_POST), true, 303);
+        exit;
+    }
     http_response_code(400);
     header('Content-Type: text/plain; charset=utf-8');
     echo 'De filters zijn niet opgeslagen.';
@@ -54,13 +67,5 @@ if ($wantsJson) {
     exit;
 }
 
-$company = (string) (consus_prefs_normalize_choice($_POST['company'] ?? '') ?? '');
-$costCenter = trim((string) ($_POST['cost_center'] ?? ''));
-$year = (int) ($_POST['year'] ?? 0);
-$target = 'index.php?' . http_build_query([
-    'company' => $company,
-    'cost_center' => $costCenter,
-    'year' => (string) $year,
-], '', '&', PHP_QUERY_RFC3986);
-header('Location: ' . $target, true, 303);
+header('Location: ' . consus_prefs_filter_redirect($_POST), true, 303);
 exit;

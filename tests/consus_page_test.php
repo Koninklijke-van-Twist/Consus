@@ -241,6 +241,27 @@ consus_page_render($deptSnapshot, consus_empty_prefs(), ['company' => 'KVT Germa
 $deHtml = (string) ob_get_clean();
 page_assert(str_contains($deHtml, '15 - Lager Deutschland') && !str_contains($deHtml, '15 - Perkins'), 'Germany-dropdown toont eigen namen');
 
+// Retourlijst/afdelingskeuze (Ariadne, 08-10-2026): de eerste afdelingskeuze moet direct laden.
+// Bij "Alle" is de afdelingskeuze uitgeschakeld; bij een bedrijf niet.
+page_assert(preg_match('/<select id="cost_center" name="cost_center" autocomplete="off" disabled data-company-required>/', $allHtml) === 1, 'Alle: afdelingskeuze uitgeschakeld');
+foreach (['Hunter' => $hvtHtml, 'KvT' => $kvtHtml, 'Germany' => $deHtml] as $label => $companyHtml) {
+    page_assert(str_contains($companyHtml, '<select id="cost_center" name="cost_center" autocomplete="off">'), $label . ': afdelingskeuze bruikbaar');
+    page_assert(str_contains($companyHtml, '<select id="company" name="company" autocomplete="off">'), $label . ': bedrijfskeuze zonder formulierherstel van de browser');
+}
+// Eén navigatie per keuze (POST naar prefs.php met filter=1), geen fetch die
+// pas daarna navigeert en door een lopende navigatie kan worden ingehaald.
+page_assert(str_contains($kvtHtml, "['filter', '1']") && str_contains($kvtHtml, 'post.submit()'), 'keuze bovenaan gaat als één POST-navigatie');
+page_assert(!str_contains($kvtHtml, '.then(done, done)'), 'geen fetch-dan-navigeren meer voor bedrijf/afdeling');
+page_assert(str_contains($kvtHtml, 'if (filterNavigating) { return; }') && str_contains($kvtHtml, 'select.disabled = true'), 'keuzes op slot zolang een keuze laadt');
+page_assert(str_contains($kvtHtml, 'chooseFilter(companySelect.value, \'\')'), 'bedrijfswissel stuurt de afdeling van het vorige bedrijf niet mee');
+page_assert(str_contains($kvtHtml, 'defaultSelected') && str_contains($kvtHtml, "addEventListener('pageshow', unlockFilters)"), 'select toont na terug/vernieuwen de keuze van de pagina');
+page_assert(str_contains($kvtHtml, 'data-filter-status'), 'laadmelding bij de keuze bovenaan');
+// Onthouden afdeling bij paginaload (zonder query): die van de voorkeuren, als hij bij het bedrijf hoort.
+ob_start();
+consus_page_render($deptSnapshot, ['company' => 'Koninklijke van Twist', 'cost_center' => '15'] + consus_empty_prefs(), [], 'tok', $catalog);
+$rememberedHtml = (string) ob_get_clean();
+page_assert(str_contains($rememberedHtml, '<option value="15" selected>15 - Perkins</option>') && !str_contains($rememberedHtml, 'Kies bovenaan een afdeling'), 'onthouden afdeling laadt direct bij paginaload');
+
 array_map('unlink', glob($pageTmp . '/*') ?: []);
 @rmdir($pageTmp);
 echo "OK\n";

@@ -266,6 +266,8 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         .notice div + div { margin-top: 6px; }
         .notice.error { background: #fff0f0; border-color: #efb3b3; color: #8b2020; }
         .save-status { grid-column: 1 / -1; margin: 0; color: #8b2020; font-size: .84rem; }
+        .filter-status { grid-column: 1 / -1; margin: 0; font-size: .84rem; }
+        .field select:disabled { background: #f4f7fb; color: var(--kvt-muted); cursor: not-allowed; }
         .chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 8px; }
         .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; background: #e8f6fb; color: #00529b; font-size: .82rem; }
         .chip button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 2px; }
@@ -372,7 +374,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         <form class="toolbar" method="get" action="index.php" id="filter-form">
             <div class="field">
                 <label for="cost_center">Afdeling</label>
-                <select id="cost_center" name="cost_center">
+                <select id="cost_center" name="cost_center" autocomplete="off"<?= $companyName === '' ? ' disabled data-company-required' : '' ?>>
                     <option value="">Alle afdelingen</option>
                     <?php if ($companyName === ''): ?>
                         <option value="" disabled>Kies eerst een bedrijf: afdelingen verschillen per bedrijf</option>
@@ -388,7 +390,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             </div>
             <div class="field">
                 <label for="company">Bedrijf</label>
-                <select id="company" name="company">
+                <select id="company" name="company" autocomplete="off">
                     <option value="">Alle (KVT en HVT)</option>
                     <?php foreach ($companyCatalog as $catalogCompany): ?>
                         <option value="<?= consus_h($catalogCompany['name']) ?>"<?= $companyName === $catalogCompany['name'] ? ' selected' : '' ?>><?= consus_h($catalogCompany['label']) ?></option>
@@ -397,6 +399,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             </div>
             <input type="hidden" name="year" value="<?= consus_h((string) $activeYear) ?>">
             <noscript><button class="filter-button" type="submit">Filteren</button></noscript>
+            <p class="filter-status muted" data-filter-status role="status" aria-live="polite" hidden></p>
             <?php if ($usageAvailable): ?>
                 <a class="export-link" id="export-link" href="export.php?<?= consus_h($exportQuery) ?>">Exporteer xlsx</a>
             <?php endif; ?>
@@ -629,6 +632,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
 
     var saving = false;
     var pending = false;
+    var filterNavigating = false;
     function save() {
         if (!form) { return; }
         if (saving) { pending = true; return; }
@@ -646,6 +650,8 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         }).then(function (response) {
             if (!response.ok) { throw new Error('opslaan mislukt'); }
             if (pending) { pending = false; saving = false; save(); return; }
+            // Een keuze bovenaan is al onderweg: die navigatie wint.
+            if (filterNavigating) { saving = false; return; }
             var params = new URLSearchParams();
             params.set('company', (form.querySelector('[name="company"]') || {}).value || '');
             params.set('cost_center', (form.querySelector('[name="cost_center"]') || {}).value || '');
@@ -669,28 +675,93 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     });
 
     // Bedrijf en afdeling: direct tonen, en per gebruiker op de server onthouden.
+    // Eén navigatie per keuze: een POST naar prefs.php slaat op en stuurt door
+    // naar de pagina met precies die keuze. Vroeger ging eerst een fetch en pas
+    // daarna de navigatie; een afdelingskeuze terwijl de pagina van een
+    // bedrijfswissel nog laadde, werd dan door die lopende navigatie
+    // (afdeling leeg) ingehaald, of nam een afdeling uit de lijst van het
+    // vorige bedrijf mee. Daarom gaan de keuzes op slot tot de nieuwe pagina er is.
     var filterForm = document.getElementById('filter-form');
     if (filterForm) {
-        filterForm.querySelectorAll('select[name="company"], select[name="cost_center"]').forEach(function (select) {
-            select.addEventListener('change', function () {
-                if (select.name === 'company') {
-                    var department = filterForm.querySelector('select[name="cost_center"]');
-                    if (department) { department.value = ''; }
-                }
-                var done = function () { filterForm.submit(); };
-                if (!form || !window.fetch) { done(); return; }
-                var payload = new FormData();
-                payload.set('csrf', (form.querySelector('[name="csrf"]') || {}).value || '');
-                payload.set('company', (filterForm.querySelector('[name="company"]') || {}).value || '');
-                payload.set('cost_center', (filterForm.querySelector('[name="cost_center"]') || {}).value || '');
-                fetch(form.action, {
-                    method: 'POST',
-                    body: payload,
-                    credentials: 'same-origin',
-                    headers: { 'Accept': 'application/json' }
-                }).then(done, done);
+        var companySelect = filterForm.querySelector('select[name="company"]');
+        var departmentSelect = filterForm.querySelector('select[name="cost_center"]');
+        var filterStatus = filterForm.querySelector('[data-filter-status]');
+        var retourEmpty = document.querySelector('#retour > .empty');
+        var retourEmptyText = retourEmpty ? retourEmpty.textContent : '';
+        // De keuze die de server heeft getoond (selected in de HTML). De browser
+        // kan bij vernieuwen of de terug-knop een eerdere keuze in de select
+        // terugzetten; dan staat er een afdeling in beeld die niet bij de
+        // getoonde lijst hoort, en geeft dezelfde keuze nog eens geen change.
+        var renderedValue = function (select) {
+            if (!select) { return ''; }
+            for (var index = 0; index < select.options.length; index++) {
+                if (select.options[index].defaultSelected) { return select.options[index].value; }
+            }
+            return select.options.length ? select.options[0].value : '';
+        };
+        var shownCompany = renderedValue(companySelect);
+        var shownDepartment = renderedValue(departmentSelect);
+        var lockFilters = function (company, department) {
+            filterNavigating = true;
+            [companySelect, departmentSelect].forEach(function (select) { if (select) { select.disabled = true; } });
+            var text = company === '' ? 'Alle bedrijven laden…' : (company !== shownCompany ? 'Ander bedrijf: afdelingen laden…' : 'Retourlijst en verbruik laden…');
+            if (filterStatus) { filterStatus.hidden = false; filterStatus.textContent = text; }
+            if (retourEmpty) { retourEmpty.textContent = text; }
+        };
+        var unlockFilters = function () {
+            filterNavigating = false;
+            if (companySelect) { companySelect.disabled = false; companySelect.value = shownCompany; }
+            if (departmentSelect) {
+                departmentSelect.value = shownDepartment;
+                departmentSelect.disabled = departmentSelect.hasAttribute('data-company-required');
+            }
+            if (filterStatus) { filterStatus.hidden = true; filterStatus.textContent = ''; }
+            if (retourEmpty) { retourEmpty.textContent = retourEmptyText; }
+        };
+        var chooseFilter = function (company, department) {
+            if (filterNavigating) { return; }
+            // Afdelingen verschillen per bedrijf: zonder bedrijf ("Alle") geen afdeling.
+            if (company === '') { department = ''; }
+            var year = (filterForm.querySelector('input[name="year"]') || {}).value || '';
+            lockFilters(company, department);
+            var csrf = form ? ((form.querySelector('[name="csrf"]') || {}).value || '') : '';
+            if (csrf === '') {
+                var params = new URLSearchParams();
+                params.set('company', company);
+                params.set('cost_center', department);
+                params.set('year', year);
+                window.location.assign('index.php?' + params.toString());
+                return;
+            }
+            var post = document.createElement('form');
+            post.method = 'post';
+            post.action = (form && form.getAttribute('action')) || 'prefs.php';
+            post.hidden = true;
+            [['csrf', csrf], ['filter', '1'], ['company', company], ['cost_center', department], ['year', year]].forEach(function (pair) {
+                var input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = pair[0];
+                input.value = pair[1];
+                post.appendChild(input);
             });
-        });
+            document.body.appendChild(post);
+            post.submit();
+        };
+        if (companySelect) {
+            companySelect.addEventListener('change', function () {
+                // De afdelingslijst op deze pagina hoort bij het vorige bedrijf: niet meesturen.
+                chooseFilter(companySelect.value, '');
+            });
+        }
+        if (departmentSelect) {
+            departmentSelect.addEventListener('change', function () {
+                chooseFilter(companySelect ? shownCompany : '', departmentSelect.value);
+            });
+        }
+        // Bij laden, vernieuwen en de terug-knop (ook bfcache): de selects tonen
+        // de keuze van deze pagina en zijn weer te bedienen.
+        unlockFilters();
+        window.addEventListener('pageshow', unlockFilters);
     }
 
     if (form) {

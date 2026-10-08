@@ -102,4 +102,22 @@ try {
     @rmdir($root);
 }
 
+// Keuze bovenaan: opslaan en doorsturen in één navigatie, afdeling alleen bij een bedrijf.
+$redirect = consus_prefs_filter_redirect(['company' => 'Koninklijke van Twist', 'cost_center' => ' 15 ', 'year' => '2026']);
+if ($redirect !== 'index.php?company=Koninklijke%20van%20Twist&cost_center=15&year=2026') {
+    throw new RuntimeException('filter-redirect met bedrijf en afdeling: ' . $redirect);
+}
+if (consus_prefs_filter_redirect(['company' => '', 'cost_center' => '15', 'year' => '2026']) !== 'index.php?company=&cost_center=&year=2026') {
+    throw new RuntimeException('filter-redirect bij Alle hoort geen afdeling mee te sturen');
+}
+if (consus_prefs_filter_redirect(['company' => 'Hunter van Twist', 'cost_center' => '<x>']) !== 'index.php?company=Hunter%20van%20Twist&cost_center=&year=') {
+    throw new RuntimeException('filter-redirect laat ongeldige afdeling weg');
+}
+if (consus_prefs_filter_input(['company' => '', 'cost_center' => '15']) !== ['company' => '', 'cost_center' => '']) {
+    throw new RuntimeException('filter-input: bij Alle geen onthouden afdeling');
+}
+if (consus_prefs_filter_input(['company' => 'KVT Germany', 'cost_center' => '10', 'customers' => 'X']) !== ['company' => 'KVT Germany', 'cost_center' => '10']) {
+    throw new RuntimeException('filter-input: alleen bedrijf en afdeling, samen');
+}
+
 echo "OK\n";
