@@ -6712,6 +6712,13 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
 
     $discovered = auth_discover_companies_across_active_environments();
     $names = is_array($discovered['companies'] ?? null) ? $discovered['companies'] : [];
+    if (function_exists('consus_company_catalog_store') && is_array($discovered['map'] ?? null)) {
+        try {
+            // Bedrijvenlijst voor de dropdown meteen verversen (UI-cache 24 uur).
+            consus_company_catalog_store($discovered['map']);
+        } catch (Throwable $ignored) {
+        }
+    }
     $companies = consus_companies_in_scope($names);
     if ($companies === []) {
         throw new RuntimeException('Geen KVT- of HVT-bedrijf gevonden. Controleer CONSUS_COMPANIES en auth.php.');

@@ -3,6 +3,7 @@
 require_once __DIR__ . '/consus_usage.php';
 require_once __DIR__ . '/consus_prefs.php';
 require_once __DIR__ . '/consus_retour_page.php';
+require_once __DIR__ . '/consus_companies.php';
 
 function consus_h(mixed $value): string
 {
@@ -57,24 +58,38 @@ function consus_modal_payload(array $row): array
 }
 
 /**
+ * Filters uit de URL; ontbreekt een parameter, dan de laatste keuze van de
+ * gebruiker (server-side voorkeuren). `company` is de BC Name uit de
+ * bedrijvenlijst; oude deeplinks met kvt/hvt werken ook.
+ *
  * @param array<string, mixed> $query
- * @return array{company:string,cost_center:string,year:int}
+ * @param array<string, mixed> $prefs
+ * @param array<int, array{name:string,environment:string,label:string,key:string}>|null $catalog
+ * @return array{company:string,company_key:string,company_label:string,usage_available:bool,cost_center:string,year:int}
  */
-function consus_page_filters(array $query, string $asOf): array
+function consus_page_filters(array $query, string $asOf, array $prefs = [], ?array $catalog = null): array
 {
-    $company = trim((string) ($query['company'] ?? ''));
-    if (!isset(CONSUS_COMPANIES[$company])) {
-        $company = '';
-    }
+    $catalog ??= consus_company_catalog_static();
+    $rawCompany = array_key_exists('company', $query)
+        ? trim((string) $query['company'])
+        : (string) ($prefs['company'] ?? '');
+    $selected = consus_company_resolve($rawCompany, $catalog);
     $years = consus_history_years($asOf);
     $year = (int) ($query['year'] ?? 0);
     if (!in_array($year, $years, true)) {
         $year = $years[0] ?? (int) substr($asOf, 0, 4);
     }
+    $costCenter = array_key_exists('cost_center', $query)
+        ? trim((string) $query['cost_center'])
+        : (string) ($prefs['cost_center'] ?? '');
 
     return [
-        'company' => $company,
-        'cost_center' => trim((string) ($query['cost_center'] ?? '')),
+        'company' => $selected['name'] ?? '',
+        'company_key' => $selected['key'] ?? '',
+        'company_label' => $selected['label'] ?? '',
+        // De nachtcache heeft alleen KVT en HVT; een ander bedrijf heeft hier alleen de Retourlijst.
+        'usage_available' => $selected === null || ($selected['key'] ?? '') !== '',
+        'cost_center' => $costCenter,
         'year' => $year,
     ];
 }
@@ -131,21 +146,29 @@ function consus_page_client_rows(array $facts, array $years, array $windows, arr
  * @param array{customers?:array<int, string>,items?:array<int, string>,page_size?:int} $prefs
  * @param array<string, mixed> $query
  */
-function consus_page_render(array $snapshot, array $prefs, array $query, string $csrf): void
+function consus_page_render(array $snapshot, array $prefs, array $query, string $csrf, ?array $companyCatalog = null): void
 {
     $hasCache = trim((string) ($snapshot['generated_at'] ?? '')) !== '';
     $ready = (int) ($snapshot['version'] ?? 0) === CONSUS_SNAPSHOT_VERSION;
     $windows = consus_snapshot_windows($snapshot);
     $asOf = (string) ($windows['as_of'] ?? '');
-    $filters = consus_page_filters($query, $asOf);
-    $companyFilter = $filters['company'];
+    $companyCatalog = $companyCatalog ?? consus_company_catalog();
+    $filters = consus_page_filters($query, $asOf, $prefs, $companyCatalog);
+    $companyName = $filters['company'];
+    $companyLabel = $filters['company_label'];
+    $companyFilter = $filters['company_key'];
+    $usageAvailable = $filters['usage_available'];
     $costFilter = $filters['cost_center'];
     $activeYear = $filters['year'];
     $years = consus_history_years($asOf);
 
     $rows = is_array($snapshot['rows'] ?? null) ? $snapshot['rows'] : [];
     $departmentCatalog = is_array($snapshot['departments'] ?? null) ? $snapshot['departments'] : [];
-    $departmentChoices = consus_department_choices($rows, $departmentCatalog, $companyFilter);
+    $departmentChoices = $usageAvailable ? consus_department_choices($rows, $departmentCatalog, $companyFilter) : [];
+    if ($companyName !== '') {
+        // Afdelingen met retourregels of retourdata van dit bedrijf horen er ook bij.
+        $departmentChoices = consus_retour_department_choices($departmentChoices, $companyName, $costFilter, !$usageAvailable);
+    }
     $departmentValues = [];
     foreach ($departmentChoices as $departmentChoice) {
         $departmentValues[(string) ($departmentChoice['value'] ?? '')] = true;
@@ -165,7 +188,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     $excludedCustomers = consus_prefs_normalize_list($prefs['customers'] ?? []);
     $excludedItems = consus_prefs_normalize_list($prefs['items'] ?? []);
     $pageSize = consus_normalize_page_size($prefs['page_size'] ?? CONSUS_DEFAULT_PAGE_SIZE);
-    $facts = ($hasCache && $ready)
+    $facts = ($hasCache && $ready && $usageAvailable)
         ? consus_usage_facts($snapshot, $companyFilter, $costFilter, $excludedItems)
         : [];
     $clientRows = consus_page_client_rows($facts, $years, $windows, $excludedCustomers, $companyFilter === '');
@@ -180,12 +203,12 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     $warningLines = consus_warning_lines(is_array($snapshot['warnings'] ?? null) ? $snapshot['warnings'] : []);
     $infoLines = consus_info_lines(is_array($snapshot['warnings'] ?? null) ? $snapshot['warnings'] : []);
     $queryString = http_build_query([
-        'company' => $companyFilter,
+        'company' => $companyName,
         'cost_center' => $costFilter,
         'year' => (string) $activeYear,
     ], '', '&', PHP_QUERY_RFC3986);
     $exportQuery = http_build_query([
-        'company' => $companyFilter,
+        'company' => $companyName,
         'cost_center' => $costFilter,
     ], '', '&', PHP_QUERY_RFC3986);
     $columnLabels = consus_usage_column_labels();
@@ -345,7 +368,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     <?php endif; ?>
 
     <section class="panel">
-        <form class="toolbar" method="get" action="index.php">
+        <form class="toolbar" method="get" action="index.php" id="filter-form">
             <div class="field">
                 <label for="cost_center">Afdeling</label>
                 <select id="cost_center" name="cost_center">
@@ -362,15 +385,17 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             <div class="field">
                 <label for="company">Bedrijf</label>
                 <select id="company" name="company">
-                    <option value="">Alle</option>
-                    <?php foreach (CONSUS_COMPANIES as $key => $company): ?>
-                        <option value="<?= consus_h($key) ?>"<?= $companyFilter === $key ? ' selected' : '' ?>><?= consus_h($company['label'] ?? $key) ?></option>
+                    <option value="">Alle (KVT en HVT)</option>
+                    <?php foreach ($companyCatalog as $catalogCompany): ?>
+                        <option value="<?= consus_h($catalogCompany['name']) ?>"<?= $companyName === $catalogCompany['name'] ? ' selected' : '' ?>><?= consus_h($catalogCompany['label']) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
             <input type="hidden" name="year" value="<?= consus_h((string) $activeYear) ?>">
-            <button class="filter-button" type="submit">Filteren</button>
-            <a class="export-link" id="export-link" href="export.php?<?= consus_h($exportQuery) ?>">Exporteer xlsx</a>
+            <noscript><button class="filter-button" type="submit">Filteren</button></noscript>
+            <?php if ($usageAvailable): ?>
+                <a class="export-link" id="export-link" href="export.php?<?= consus_h($exportQuery) ?>">Exporteer xlsx</a>
+            <?php endif; ?>
         </form>
     </section>
 
@@ -378,7 +403,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         <form id="prefs-form" class="filters" method="post" action="prefs.php">
             <input type="hidden" name="csrf" value="<?= consus_h($csrf) ?>">
             <input type="hidden" name="redirect" value="1">
-            <input type="hidden" name="company" value="<?= consus_h($companyFilter) ?>">
+            <input type="hidden" name="company" value="<?= consus_h($companyName) ?>">
             <input type="hidden" name="cost_center" value="<?= consus_h($costFilter) ?>">
             <input type="hidden" name="year" value="<?= consus_h((string) $activeYear) ?>">
             <div class="field" data-combobox="customers">
@@ -427,6 +452,8 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             <div class="empty">Nog geen artikelen. De cache is leeg.</div>
         <?php elseif (!$ready): ?>
             <div class="empty">De jaartabel wacht op de volgende nachtrun.</div>
+        <?php elseif (!$usageAvailable): ?>
+            <div class="empty">Verbruik per jaar staat alleen voor KVT en HVT in de nachtcache. Voor <?= consus_h($companyLabel) ?> toont deze pagina alleen de Retourlijst.</div>
         <?php elseif ($facts === []): ?>
             <div class="empty">Geen artikelen voor deze filters.</div>
         <?php else: ?>
@@ -448,12 +475,15 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     </section>
 
     <?php
-    // Retourlijst: eigen afdelingskeuze; zonder keuze de afdeling uit het filter.
-    $retourDepartment = array_key_exists('retour_afdeling', $query)
-        ? trim((string) $query['retour_afdeling'])
-        : ($costFilter !== '__none__' ? $costFilter : '');
+    // Retourlijst: volgt bedrijf en afdeling van de keuze bovenaan.
     $retourError = in_array((string) ($query['retour_fout'] ?? ''), ['regel', 'opslaan'], true) ? (string) $query['retour_fout'] : '';
-    consus_retour_page_section($retourDepartment, $costFilter, $companyFilter, (int) $activeYear, $csrf, $departmentChoices, $retourError);
+    $retourDepartmentLabel = '';
+    foreach ($departmentChoices as $departmentChoice) {
+        if ((string) ($departmentChoice['value'] ?? '') === $costFilter) {
+            $retourDepartmentLabel = (string) ($departmentChoice['label'] ?? '');
+        }
+    }
+    consus_retour_page_section($companyName, $companyLabel, $costFilter, $retourDepartmentLabel, (int) $activeYear, $csrf, $retourError);
     ?>
 
     <p class="footnote">Verbruik in een maand, kwartaal of jaar is Sale (hoeveelheid met omgedraaid teken, retouren trekken af<?= CONSUS_USAGE_INCLUDES_SALE ? '' : ', nu uitgeschakeld' ?>)<?= CONSUS_USAGE_INCLUDES_INTERNAL ? ' plus intern verbruik' : '' ?>. Intern verbruik is Negative Adjmt. met documentnummer WO plus Assembly Consumption, op Item_No, Quantity en Posting_Date. Het totaal is de som van de twaalf maanden en gelijk aan de som van de vier kwartalen. Cijfers komen uit de nachtelijke snapshot<?= $hasCache && $asOf !== '' ? ' t/m ' . consus_h(consus_format_dutch_date(new DateTimeImmutable($asOf . ' 00:00:00', new DateTimeZone('Europe/Amsterdam')))) : '' ?>. Gemiddeld verbruik in de modal loopt over <?= consus_h(consus_nl_year_list(consus_average_years($windows))) ?>.</p>
@@ -633,6 +663,31 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     document.querySelectorAll('[data-combobox="items"]').forEach(function (root) {
         setupCombobox(root, itemData, labelItem);
     });
+
+    // Bedrijf en afdeling: direct tonen, en per gebruiker op de server onthouden.
+    var filterForm = document.getElementById('filter-form');
+    if (filterForm) {
+        filterForm.querySelectorAll('select[name="company"], select[name="cost_center"]').forEach(function (select) {
+            select.addEventListener('change', function () {
+                if (select.name === 'company') {
+                    var department = filterForm.querySelector('select[name="cost_center"]');
+                    if (department) { department.value = ''; }
+                }
+                var done = function () { filterForm.submit(); };
+                if (!form || !window.fetch) { done(); return; }
+                var payload = new FormData();
+                payload.set('csrf', (form.querySelector('[name="csrf"]') || {}).value || '');
+                payload.set('company', (filterForm.querySelector('[name="company"]') || {}).value || '');
+                payload.set('cost_center', (filterForm.querySelector('[name="cost_center"]') || {}).value || '');
+                fetch(form.action, {
+                    method: 'POST',
+                    body: payload,
+                    credentials: 'same-origin',
+                    headers: { 'Accept': 'application/json' }
+                }).then(done, done);
+            });
+        });
+    }
 
     if (form) {
         form.addEventListener('submit', function (event) {

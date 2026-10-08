@@ -1,5 +1,11 @@
 <?php
 
+$pageTmp = sys_get_temp_dir() . '/consus-page-test-' . getmypid();
+@mkdir($pageTmp, 0700, true);
+putenv('CONSUS_COMPANY_CATALOG_FILE=' . $pageTmp . '/companies.json');
+putenv('CONSUS_RETOUR_SETTINGS_FILE=' . $pageTmp . '/retour_settings.json');
+putenv('CONSUS_RETOUR_FILE=' . $pageTmp . '/consus_retour.json');
+
 require_once __DIR__ . '/../web/consus_page.php';
 
 /**
@@ -126,4 +132,49 @@ page_assert(substr_count($largeHtml, '<tbody') === 1, 'ook bij 2500 artikelen é
 page_assert($elapsed < 8, '2500 artikelen renderen binnen 8 seconden, duurde ' . round($elapsed, 2) . 's');
 page_assert(memory_get_peak_usage(true) < 256 * 1024 * 1024, 'piekgeheugen blijft onder 256M');
 
+// Bedrijvenlijst zoals Calculus: alle environments, geen test/FAT, label = weergavenaam.
+page_assert(is_file($pageTmp . '/companies.json'), 'mislukte discovery: terugval bewaard, over een uur opnieuw');
+@unlink($pageTmp . '/companies.json');
+unset($GLOBALS['consus_company_catalog_memo']);
+$catalog = consus_company_catalog(true, static fn (): array => [
+    'Koninklijke van Twist' => 'kvtmdlive_aad',
+    'Hunter van Twist' => 'kvtmdlive_aad',
+    'KVT Germany GmbH' => 'kvtgermanylive_aad',
+    'Koninklijke van Twist FAT' => 'kvtfat_aad',
+    'Testbedrijf' => 'kvtfat2_aad',
+]);
+page_assert(array_column($catalog, 'name') === ['Hunter van Twist', 'Koninklijke van Twist', 'KVT Germany GmbH'], 'drie live bedrijven, FAT weg');
+page_assert(array_column($catalog, 'label') === ['Hunter & van Twist', 'Koninklijke Van Twist', 'KVT Germany GmbH'], 'weergavenamen als label');
+page_assert(array_column($catalog, 'environment', 'name')['KVT Germany GmbH'] === 'kvtgermanylive_aad', 'environment volgt uit het bedrijf');
+page_assert(array_column($catalog, 'key', 'name') === ['Hunter van Twist' => 'hvt', 'Koninklijke van Twist' => 'kvt', 'KVT Germany GmbH' => ''], 'sleutel naar de nachtcache');
+page_assert(is_file($pageTmp . '/companies.json'), 'lijst 24 uur bewaard');
+unset($GLOBALS['consus_company_catalog_memo']);
+page_assert(array_column(consus_company_catalog(true, static function (): array { throw new RuntimeException('niet nodig'); }), 'name') === array_column($catalog, 'name'), 'verse cache: geen nieuwe discovery');
+page_assert(consus_company_resolve('hvt', $catalog)['name'] === 'Hunter van Twist' && consus_company_resolve('HUNTER VAN TWIST', $catalog)['name'] === 'Hunter van Twist' && consus_company_resolve('Hunter & van Twist', $catalog)['name'] === 'Hunter van Twist', 'oude sleutel, Name en weergavenaam');
+page_assert(consus_company_resolve('Onbekend', $catalog) === null, 'onbekend bedrijf');
+
+// Filters: URL wint, anders de opgeslagen keuze van de gebruiker.
+$fromPrefs = consus_page_filters([], '2026-10-06', ['company' => 'Hunter van Twist', 'cost_center' => '15'], $catalog);
+page_assert($fromPrefs['company'] === 'Hunter van Twist' && $fromPrefs['company_key'] === 'hvt' && $fromPrefs['cost_center'] === '15', 'keuze uit de voorkeuren');
+$fromUrl = consus_page_filters(['company' => 'kvt', 'cost_center' => '5'], '2026-10-06', ['company' => 'Hunter van Twist', 'cost_center' => '15'], $catalog);
+page_assert($fromUrl['company'] === 'Koninklijke van Twist' && $fromUrl['cost_center'] === '5', 'deeplink met kvt wint van de voorkeur');
+$all = consus_page_filters(['company' => ''], '2026-10-06', ['company' => 'Hunter van Twist'], $catalog);
+page_assert($all['company'] === '' && $all['usage_available'], 'Alle blijft mogelijk');
+$germany = consus_page_filters(['company' => 'KVT Germany GmbH', 'cost_center' => '15'], '2026-10-06', [], $catalog);
+page_assert($germany['company_key'] === '' && !$germany['usage_available'], 'bedrijf buiten de nachtcache: alleen Retourlijst');
+
+ob_start();
+consus_page_render(page_snapshot(5), ['company' => 'Koninklijke van Twist', 'cost_center' => '5'] + consus_empty_prefs(), [], 'tok', $catalog);
+$chosen = (string) ob_get_clean();
+page_assert(str_contains($chosen, '<option value="Koninklijke van Twist" selected>Koninklijke Van Twist</option>'), 'opgeslagen bedrijf geselecteerd, label is weergavenaam');
+page_assert(str_contains($chosen, '<option value="KVT Germany GmbH">KVT Germany GmbH</option>'), 'Germany in de dropdown');
+page_assert(!str_contains($chosen, 'retour_afdeling'), 'geen eigen afdelingskeuze voor de Retourlijst');
+page_assert(str_contains($chosen, 'retourkandidaten van Koninklijke Van Twist') || str_contains($chosen, 'Nog geen regels voor afdeling'), 'Retourlijst volgt het bedrijf bovenaan');
+ob_start();
+consus_page_render(page_snapshot(5), consus_empty_prefs(), ['company' => 'KVT Germany GmbH'], 'tok', $catalog);
+$germanyHtml = (string) ob_get_clean();
+page_assert(str_contains($germanyHtml, 'alleen voor KVT en HVT') && !str_contains($germanyHtml, 'id="export-link"'), 'Germany: geen verbruikstabel en geen export');
+
+array_map('unlink', glob($pageTmp . '/*') ?: []);
+@rmdir($pageTmp);
 echo "OK\n";

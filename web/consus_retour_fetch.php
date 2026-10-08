@@ -1,8 +1,9 @@
 <?php
 
 /**
- * Nachtelijke BC-fetch voor de Retourlijst (#1159), voor de leveranciers uit de
- * regels van alle afdelingen. Geen regels = geen fetch.
+ * Nachtelijke BC-fetch voor de Retourlijst (#1159): per bedrijf met regels, in
+ * de environment van dat bedrijf, voor de leveranciers uit de regels van dat
+ * bedrijf. Geen regels = geen fetch.
  * Gebruikt consus_each_entity_rows: Mímir eerst (max_age van nightly, 4 uur),
  * daarna het directe BC-pad; een geweigerd optioneel veld wordt uit $select gehaald.
  */
@@ -129,10 +130,10 @@ function consus_retour_build(string $company, array $settings, ?callable $each =
     $each ??= static function (string $company, string $entitySet, array $required, array $optional, string $filter, callable $onRow): void {
         consus_each_entity_rows($company, $entitySet, $required, $optional, $filter, $onRow);
     };
-    $vendors = consus_retour_rule_vendors($settings);
+    $vendors = consus_retour_rule_vendors($settings, $company);
     $warnings = [];
     // Ruim venster: een langere termijn in de regels werkt dan direct, zonder nieuwe nightly.
-    $days = max(CONSUS_RETOUR_FETCH_DAYS, consus_retour_max_window($settings));
+    $days = max(CONSUS_RETOUR_FETCH_DAYS, consus_retour_max_window($settings, $company));
     $minStart = (new DateTimeImmutable($today . ' 00:00:00', new DateTimeZone('Europe/Amsterdam')))->modify('-' . $days . ' days')->format('Y-m-d');
     $typesByVendor = [];
     foreach ($vendors as $vendorNo) {
@@ -148,6 +149,7 @@ function consus_retour_build(string $company, array $settings, ?callable $each =
         'orders' => [],
         'items' => [],
         'warnings' => [],
+        'bin_locations' => consus_retour_bin_locations_for($company),
     ];
     if ($vendors === []) {
         return $empty;
@@ -203,17 +205,13 @@ function consus_retour_build(string $company, array $settings, ?callable $each =
     foreach (array_chunk(array_keys($poNumbers), CONSUS_RETOUR_CHUNK) as $chunk) {
         $each($company, 'AppPurchaseOrder', ['No'], $orderFields, consus_retour_odata_or('No', $chunk), $onOrder);
     }
+    // De Perkins-vlaggen staan alleen op open orders (AppPurchaseOrder). Het archief
+    // (GearchiveerdeInkoopkoppen/-orders, Ariadne 08-10-2026) heeft ze niet, dus daar
+    // halen we niets. Een order die na volledige facturering weg is, telt als
+    // voorraad (57420); de regel zegt dat er zichtbaar bij.
     $missing = array_values(array_filter(array_keys($poNumbers), static fn (string $po): bool => empty($orders[$po]['found'])));
     if ($missing !== []) {
-        // Order is na volledige facturering verwijderd: probeer het archief (pagina 5168),
-        // als Ariadne dat als GearchiveerdeInkooporders publiceert.
-        try {
-            foreach (array_chunk($missing, CONSUS_RETOUR_CHUNK) as $chunk) {
-                $each($company, 'GearchiveerdeInkooporders', ['No'], $orderFields, consus_retour_odata_or('No', $chunk), $onOrder);
-            }
-        } catch (Throwable $error) {
-            $warnings[] = count($missing) . ' inkooporder(s) staan niet meer in BC en het archief is niet bereikbaar; die tellen als voorraad (57420).';
-        }
+        $warnings[] = count($missing) . ' inkooporder(s) staan niet meer open in BC; zonder EGT/CSV-vlag tellen die als voorraad (57420).';
     }
 
     $items = [];
@@ -254,7 +252,16 @@ function consus_retour_build(string $company, array $settings, ?callable $each =
 
     // Bincontrole: BinContent, anders Magazijnposten; lukt geen van beide, dan geen oordeel (bin = null).
     $binOk = true;
-    $locationFilter = consus_retour_odata_or('Location_Code', CONSUS_RETOUR_BIN_LOCATIONS);
+    $binLocations = consus_retour_bin_locations_for($company);
+    if ($binLocations === []) {
+        // Bedrijf zonder bekend magazijn met bins: geen bincontrole, geen extra calls.
+        foreach ($items as $key => $item) {
+            $items[$key]['bin'] = null;
+        }
+
+        return ['lines' => $lines, 'orders' => $orders, 'items' => $items, 'warnings' => $warnings] + $empty;
+    }
+    $locationFilter = consus_retour_odata_or('Location_Code', $binLocations);
     try {
         $bins = consus_retour_collect_bins($each, $company, 'BinContent', 'Quantity_Base', $locationFilter, $chunks);
     } catch (Throwable $error) {
@@ -294,42 +301,53 @@ function consus_retour_collect_bins(callable $each, string $company, string $ent
 }
 
 /**
- * BC-bedrijfsnaam (Name, niet de weergavenaam) voor de retourlijst, via
- * dezelfde bedrijfssleutel als de rest van de nightly. Hoofdletterongevoelig.
+ * Wordt na de snapshot vanuit nightly.php aangeroepen. Per bedrijf met regels
+ * een eigen fetch (eigen environment via de company-map). Een fout bij één
+ * bedrijf laat de vorige data van dat bedrijf staan, raakt de andere bedrijven
+ * niet en raakt de snapshot niet.
  *
- * @param array<int, array{company:string,company_key:string}> $scope
+ * @param callable|null $build fn(string $company, array $settings): array
+ * @param array<string, string>|null $map BC Name => environment (tests)
+ * @return array{skipped:bool,lines:int,companies:array<string, array{ok:bool,lines:int,error:string}>}
  */
-function consus_retour_company_from_scope(array $scope): string
+function consus_retour_refresh(?callable $build = null, ?array $map = null): array
 {
-    foreach ($scope as $entry) {
-        if (strtolower((string) ($entry['company_key'] ?? '')) === strtolower(CONSUS_RETOUR_COMPANY_KEY)) {
-            return (string) ($entry['company'] ?? '');
-        }
-    }
-
-    return '';
-}
-
-/**
- * Wordt na de snapshot vanuit nightly.php aangeroepen. Een fout hier laat de
- * vorige retourdata staan en raakt de snapshot niet.
- */
-function consus_retour_refresh(): array
-{
+    consus_retour_settings_migrate();
     $settings = consus_retour_settings_read();
-    if (consus_retour_rule_vendors($settings) === []) {
-        // Geen regels in welke afdeling dan ook: niets ophalen.
-        return ['skipped' => true, 'lines' => []];
+    $wanted = consus_retour_companies_with_rules($settings);
+    if ($wanted === []) {
+        // Geen regels bij welk bedrijf dan ook: niets ophalen.
+        return ['skipped' => true, 'lines' => 0, 'companies' => []];
     }
     $GLOBALS['consus_odata_max_age'] = CONSUS_NIGHTLY_MAX_AGE;
-    $discovered = auth_discover_companies_across_active_environments();
-    $names = is_array($discovered['companies'] ?? null) ? $discovered['companies'] : [];
-    $company = consus_retour_company_from_scope(consus_companies_in_scope($names));
-    if ($company === '') {
-        throw new RuntimeException(consus_company_display_name(CONSUS_RETOUR_COMPANY_KEY) . ' niet gevonden bij discovery voor de Retourlijst.');
+    $build ??= static fn (string $company, array $settings): array => consus_retour_build($company, $settings);
+    if ($map === null) {
+        $discovered = auth_discover_companies_across_active_environments();
+        $map = is_array($discovered['map'] ?? null) ? $discovered['map'] : [];
     }
-    $data = consus_retour_build($company, $settings);
-    consus_write_json_locked(consus_retour_data_file(), $data);
+    $status = [];
+    $results = [];
+    $total = 0;
+    foreach ($wanted as $company) {
+        $label = consus_retour_company_label($company);
+        // BC Name uit discovery (hoofdletterongevoelig), zodat het OData-pad klopt.
+        $name = consus_retour_company_slot($map, $company);
+        if ($name === null) {
+            $status[$company] = ['ok' => false, 'lines' => 0, 'error' => $label . ' niet gevonden bij discovery voor de Retourlijst.'];
+            continue;
+        }
+        try {
+            $data = $build($name, $settings);
+            $data['company'] = $name;
+            $results[$company] = $data;
+            $count = count($data['lines'] ?? []);
+            $total += $count;
+            $status[$company] = ['ok' => true, 'lines' => $count, 'error' => ''];
+        } catch (Throwable $error) {
+            $status[$company] = ['ok' => false, 'lines' => 0, 'error' => $label . ': ' . $error->getMessage()];
+        }
+    }
+    consus_retour_write_data($results, $wanted);
 
-    return $data;
+    return ['skipped' => false, 'lines' => $total, 'companies' => $status];
 }

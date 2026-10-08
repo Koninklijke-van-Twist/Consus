@@ -181,7 +181,8 @@ function consus_xlsx_sheets(array $snapshot, array $prefs, array $query): array
     $windows = consus_snapshot_windows($snapshot);
     $companyKey = trim((string) ($query['company'] ?? ''));
     if (!isset(CONSUS_COMPANIES[$companyKey])) {
-        $companyKey = '';
+        // Nieuwe links dragen de BC Name; oude de sleutel (kvt, hvt).
+        $companyKey = consus_company_key_for_name($companyKey);
     }
     $costCenter = trim((string) ($query['cost_center'] ?? ''));
     $excludedCustomers = consus_prefs_normalize_list($prefs['customers'] ?? []);
@@ -236,10 +237,15 @@ function consus_xlsx_sheets(array $snapshot, array $prefs, array $query): array
             $excludedItems[$index] ?? '',
         ];
     }
-    // Retourlijst (#1159): gekozen afdeling, anders alle afdelingen met regels.
-    $retourDepartment = consus_retour_valid_department(trim((string) ($query['retour_afdeling'] ?? $costCenter)));
+    // Retourlijst (#1159): gekozen bedrijf en afdeling; zonder afdeling alle
+    // afdelingen met regels, zonder bedrijf alle bedrijven met regels.
+    $retourDepartment = consus_retour_valid_department($costCenter);
+    $retourSettings = consus_retour_settings_read();
+    $retourCompanies = $companyKey !== ''
+        ? [consus_company_display_name($companyKey)]
+        : consus_retour_companies_with_rules($retourSettings);
     $sheets[] = consus_retour_export_sheet(
-        consus_retour_candidates(consus_retour_read_data(), consus_retour_settings_read(), consus_retour_today(), $retourDepartment)
+        consus_retour_candidates_for_companies($retourSettings, consus_retour_today(), $retourCompanies, $retourDepartment)
     );
     $sheets[] = [
         'name' => 'Filters',
