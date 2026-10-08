@@ -86,6 +86,15 @@ en doet geen OData-verzoeken. `web/nightly.php` is de enige volledige BC-refresh
   totalen per leverancier en locatie voor de warme merge.
 - De pagina filtert op bedrijf (KVT, HVT of Alle) en daarna op afdeling.
   Een rij zonder kostenplaats blijft kiesbaar als `(geen afdeling)`.
+  Afdelingen verschillen per bedrijf (15 is Perkins bij KvT, bij Hunter
+  "Niet gebruiken"; Perkins zit bij Hunter op 80 en 90). De afdelingslijst
+  (code én naam) komt daarom altijd uit het gekozen bedrijf: KVT en HVT uit
+  de nachtcache (per `company_key`; een entry zonder bedrijf telt nergens
+  mee), elk ander bedrijf (zoals KVT Germany) of een bedrijf zonder lijst in
+  de nachtcache haalt `GeneralLedgerSetup` en `DimensionValueList` in dát
+  bedrijf op (Mímir eerst, anders direct BC), 24 uur bewaard in
+  `web/data/consus_departments.json` per BC Name. Bij **Alle** is er geen
+  afdelingskeuze, want dezelfde code betekent per bedrijf iets anders.
   Er is geen leverancier- of locatiefilter meer. Van de pagina zijn ook
   verdwenen: de totalen per leverancier en locatie, de omloopsnelheid, de
   verkopen per maand per inkooppad, het werkorderverbruik per periode en de

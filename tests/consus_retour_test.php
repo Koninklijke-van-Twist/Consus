@@ -368,6 +368,9 @@ consus_retour_page_section('', '', '', '', 2026, 'tok', '', $data, $pageSettings
 retour_assert(str_contains((string) ob_get_clean(), 'Kies bovenaan een bedrijf'), 'zonder bedrijf een hint');
 $choices = consus_retour_department_choices([['value' => '5', 'label' => '5 - Service']], KVT, '', false, $pageSettings, ['lines' => [['department' => '80']]]);
 retour_assert(array_column($choices, 'value') === ['5', '15', '80'], 'afdelingen met regels of data erbij');
+$hvtChoices = consus_retour_department_choices([['value' => '90', 'label' => '90 - Voorraad']], HVT, '', false, $pageSettings, ['lines' => []]);
+retour_assert(array_column($hvtChoices, 'value') === ['90'], 'KvT-regel op 15 voegt niets toe aan Hunter');
+retour_assert(consus_retour_rules_for($pageSettings, HVT, '15') === [] && count(consus_retour_rules_for($pageSettings, KVT, '15')) === 1, 'regels strikt per bedrijf en afdeling');
 
 array_map('unlink', glob($dir . '/*') ?: []);
 @rmdir($dir);
