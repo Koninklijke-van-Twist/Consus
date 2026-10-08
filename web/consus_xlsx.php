@@ -2,6 +2,7 @@
 
 require_once __DIR__ . '/consus_usage.php';
 require_once __DIR__ . '/consus_prefs.php';
+require_once __DIR__ . '/consus_retour.php';
 
 function consus_xlsx_column_name(int $index): string
 {
@@ -235,6 +236,10 @@ function consus_xlsx_sheets(array $snapshot, array $prefs, array $query): array
             $excludedItems[$index] ?? '',
         ];
     }
+    // Perkins-retourkandidaten (#1159), zelfde afdelingsfilter als de pagina.
+    $sheets[] = consus_retour_export_sheet(
+        consus_retour_candidates(consus_retour_read_data(), consus_retour_settings_read(), consus_retour_today(), $costCenter)
+    );
     $sheets[] = [
         'name' => 'Filters',
         'rows' => $filterRows,

@@ -65,7 +65,7 @@ $prefs = [
 ];
 $sheets = consus_xlsx_sheets($snapshot, $prefs, ['company' => 'kvt', 'cost_center' => '']);
 $names = array_column($sheets, 'name');
-xlsx_assert($names === ['2026', '2025', '2024', '2023', 'Filters'], 'jaarbladen en als laatste het filterblad');
+xlsx_assert($names === ['2026', '2025', '2024', '2023', 'Retourkandidaten', 'Filters'], 'jaarbladen, retourkandidaten en als laatste het filterblad');
 foreach ($names as $name) {
     xlsx_assert(strlen($name) <= 31, 'sheetnaam blijft binnen 31 tekens');
 }
@@ -81,7 +81,7 @@ xlsx_assert(abs((float) $yearRows[1][3] - 7) < 0.0001, 'januari zonder uitgeslot
 xlsx_assert(abs((float) $yearRows[1][2] - 7) < 0.0001, 'jaartotaal volgt januari');
 xlsx_assert(abs((float) $yearRows[1][19] - 3) < 0.0001, 'intern verbruik blijft de laatste kolom');
 
-$filter = $sheets[4]['rows'];
+$filter = $sheets[5]['rows'];
 xlsx_assert($filter[0] === ['Gefilterde klanten', 'Gefilterde artikels'], 'filterblad heeft twee kolommen');
 xlsx_assert($filter[1][0] === 'C1 — Acme', 'klant toont nummer en naam');
 xlsx_assert($filter[1][1] === 'ART-9', 'uitgesloten artikel staat op het filterblad');

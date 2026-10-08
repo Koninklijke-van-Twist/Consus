@@ -259,8 +259,67 @@ php tests/consus_prefs_test.php
 php tests/consus_xlsx_test.php
 php tests/consus_page_test.php
 php tests/nightly_debug_test.php
+php tests/consus_retour_test.php
 ```
 
+
+## Perkins-retourkandidaten (Asclepius #1159)
+
+Onder de jaartabel staat **Perkins-retourkandidaten**: onderdelen van Perkins
+(leverancier `90101`, Hunter van Twist) die nog terug kunnen. Spoed (Perkins-
+account 57401) binnen 30 dagen, voorraad (57420) binnen 90 dagen na de
+factuurdatum.
+
+**Bron.** `nightly.php` haalt na de snapshot de retourdata op en schrijft
+`web/data/consus_retour.json` (los bestand; een fout raakt de snapshot niet).
+Via Mímir met BC-fallback, `max_age` 14400 zoals de rest van nightly.
+
+- `GeboekteInkoopfacturen` (pagina 146): vendor 90101, `Document_Date` vanaf de
+  vroegste startdatum. `Vendor_Invoice_No` is het Perkins-factuurnummer,
+  `Document_Date` de factuurdatum waar de termijn vanaf telt (niet
+  `Posting_Date`, die ligt vaak 3–4 weken later).
+- `GeboekteInkoopfactuurRegels` (pagina 529): per factuur, alleen artikelregels
+  (`Item`/`Artikel`); tekst- en grootboekregels vallen weg. `Order_No` geeft het
+  PO. Is dat leeg, dan het PO uit de voorgaande tekstregel ("Order No. PO…:").
+- `AppPurchaseOrder`: `KVT_Export_Status_Perkins_EGT` / `_CSV`. EGT aan en CSV
+  uit = spoed (57401), elke andere combinatie = voorraad (57420) (Ivan,
+  08-10-2026). Staat een PO niet meer in BC, dan probeert Consus
+  `GearchiveerdeInkooporders` (pagina 5168, nog niet gepubliceerd) en anders telt
+  het als voorraad met een opmerking. Booleans mogen `true`/`Ja`/`Yes` zijn.
+- `AppItemCard` (veiligheidsvoorraad, tariff, land van herkomst),
+  `ItemLedgerEntries` (`Open eq true`, boekvoorraad per locatie),
+  `ReservationEntries` (status Reservation/Reservering, positieve kant uit een
+  artikelpost; negatieve kant naar inkoopretourorder 39/5 = al op retour).
+- Bincontrole (#1165): `BinContent` (anders `Magazijnposten`) op locatie `HVT`.
+  Bin-inhoud lager dan boekvoorraad → status **Controleren** (mogelijke
+  spookvoorraad). Voorraad op andere locaties (M5xx/M6xx) krijgt
+  **Geen bincontrole**. Faalt de bin-data helemaal, dan geen oordeel.
+
+**Regel** (pagina rekent bij elke weergave, dus een instelling werkt direct):
+
+1. Regels van hetzelfde artikel op dezelfde factuur worden opgeteld.
+2. Factuurdatum ≥ startdatum en dagen sinds factuur ≤ termijn van het account.
+3. Geen veiligheidsvoorraad. Vrije voorraad = boekvoorraad − reserveringen.
+   Vrije voorraad gaat eerst naar de nieuwste factuur, daarna naar oudere.
+4. Retourwaarde = retouraantal × gemiddelde inkoopprijs op die factuur ≥ minimum.
+5. Garantieorders (lijst in de instellingen, standaard `PO52600987`) zijn geen
+   kandidaat; ze staan apart gemarkeerd onderaan.
+
+**Instellingen** (tandwiel ⚙ bij de sectie), per afdeling (kostenplaats op de
+factuurregel, Global Dimension 1). Zonder gekozen afdeling is het de standaard.
+Velden: minimumwaarde (€ 50), termijn spoed (30), termijn voorraad (90),
+startdatum (17 juli 2026). De garantielijst geldt voor alle afdelingen.
+Opslag: `web/data/retour_settings.json` (atomair, file lock, CSRF + same-origin;
+gedeeld voor alle gebruikers).
+
+**Export.** `retour_export.php` geeft één werkblad in de kolomvolgorde van Ivans
+voorbeeld (Account, Perkins-factuur, datum, artikel, omschrijving, aantal,
+prijs per stuk, totale prijs, …, Tariff Code, Country of Origin, dagen over).
+`export.php` krijgt hetzelfde blad `Retourkandidaten` vóór `Filters`.
+
+```sh
+php tests/consus_retour_test.php
+```
 
 ## Mímir (optional)
 

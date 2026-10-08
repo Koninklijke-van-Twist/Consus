@@ -2,6 +2,7 @@
 
 require_once __DIR__ . '/consus_usage.php';
 require_once __DIR__ . '/consus_prefs.php';
+require_once __DIR__ . '/consus_retour_page.php';
 
 function consus_h(mixed $value): string
 {
@@ -436,6 +437,8 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             <nav class="pager" data-pager="bottom" aria-label="Paginering"></nav>
         <?php endif; ?>
     </section>
+
+    <?php consus_retour_page_section($costFilter, $companyFilter, (int) $activeYear, $csrf, $departmentChoices); ?>
 
     <p class="footnote">Verbruik in een maand, kwartaal of jaar is Sale (hoeveelheid met omgedraaid teken, retouren trekken af<?= CONSUS_USAGE_INCLUDES_SALE ? '' : ', nu uitgeschakeld' ?>)<?= CONSUS_USAGE_INCLUDES_INTERNAL ? ' plus intern verbruik' : '' ?>. Intern verbruik is Negative Adjmt. met documentnummer WO plus Assembly Consumption, op Item_No, Quantity en Posting_Date. Het totaal is de som van de twaalf maanden en gelijk aan de som van de vier kwartalen. Cijfers komen uit de nachtelijke snapshot<?= $hasCache && $asOf !== '' ? ' t/m ' . consus_h(consus_format_dutch_date(new DateTimeImmutable($asOf . ' 00:00:00', new DateTimeZone('Europe/Amsterdam')))) : '' ?>. Gemiddeld verbruik in de modal loopt over <?= consus_h(consus_nl_year_list(consus_average_years($windows))) ?>.</p>
 </main>
