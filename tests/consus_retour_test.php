@@ -278,3 +278,9 @@ retour_assert(consus_retour_rule_hint(['vendor' => '90101', 'type' => '57401', '
 retour_assert(str_contains(consus_retour_rule_hint(['vendor' => '12345', 'type' => '57401', 'window' => 30, 'min_value' => 0.0], $hintData), 'kent type 57401 niet'), 'onbekend type bij leverancier geeft hint');
 $page = file_get_contents(__DIR__ . '/../web/consus_retour_page.php');
 retour_assert(str_contains($page, 'placeholder="blanco = alles"') && !str_contains($page, '<select id="retour-type"'), 'type is een tekstveld');
+
+// Bedrijf via dezelfde sleutel als de nightly (kleine letters), BC-Name in het pad.
+$scope = consus_companies_in_scope(['Koninklijke van Twist', 'Hunter van Twist', 'KVT Gas']);
+retour_assert(consus_retour_company_from_scope($scope) === 'Hunter van Twist', 'retourlijst vindt Hunter via sleutel hvt');
+retour_assert(consus_retour_company_from_scope([['company' => 'Hunter van Twist', 'company_key' => 'HVT']]) === 'Hunter van Twist', 'sleutel hoofdletterongevoelig');
+retour_assert(consus_retour_company_from_scope([['company' => 'Koninklijke van Twist', 'company_key' => 'kvt']]) === '', 'zonder Hunter geen bedrijf');

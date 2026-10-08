@@ -162,6 +162,12 @@ $resumeSnapshot = [
 ];
 test_assert(consus_company_refresh_is_current($resumeSnapshot, 'kvt', $windows), 'vers bedrijf van vandaag slaan we over');
 test_assert(!consus_company_refresh_is_current($resumeSnapshot, 'hvt', $windows), 'ander bedrijf blijft laden');
+$scopeBoth = [['company' => 'Koninklijke van Twist', 'company_key' => 'kvt'], ['company' => 'Hunter van Twist', 'company_key' => 'hvt']];
+test_assert(!consus_previous_run_completed($resumeSnapshot, $scopeBoth, $windows), 'half afgemaakte run wordt hervat');
+test_assert(consus_previous_run_completed($resumeSnapshot, [$scopeBoth[0]], $windows), 'complete run van vandaag hoeft niet hervat te worden');
+$withErrors = $resumeSnapshot + ['errors' => [['company' => 'KVT', 'error' => 'x']]];
+$withErrors['errors'] = [['company' => 'KVT', 'error' => 'x']];
+test_assert(!consus_previous_run_completed($withErrors, [$scopeBoth[0]], $windows), 'run met fouten wordt hervat');
 $resumeSnapshot['companies'][0]['stale'] = true;
 test_assert(!consus_company_refresh_is_current($resumeSnapshot, 'kvt', $windows), 'stale bedrijf laadt opnieuw');
 $resumeSnapshot['companies'][0]['stale'] = false;
