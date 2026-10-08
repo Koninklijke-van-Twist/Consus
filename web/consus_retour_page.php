@@ -144,7 +144,7 @@ function consus_retour_page_section(string $company, string $companyLabel, strin
                     <table class="retour-table">
                         <thead>
                         <tr>
-                            <th>Artikelnummer</th><th>Omschrijving</th><th>Leverancier</th><th>PO-nummer</th><th>Type</th><th>Leveranciersfactuur</th><th>Factuurdatum</th>
+                            <th>Artikelnummer</th><th>Omschrijving</th><th>Leverancier</th><th>PO-nummer</th><th>Type</th><th>Perkins-factuurnummer</th><th>Handling Unit</th><th>Factuur-/ontvangstdatum</th>
                             <th>Dagen over</th><th>Op voorraad</th><th>Aantal retour</th><th>Waarde</th><th>Garantie</th><th>Status</th>
                         </tr>
                         </thead>
@@ -164,8 +164,9 @@ function consus_retour_page_section(string $company, string $companyLabel, strin
                                 <td><?= $h($row['vendor']) ?></td>
                                 <td><?= $h($row['po']) ?></td>
                                 <td><span class="badge <?= $badge ?>"><?= $h(consus_retour_type_label($row['account'])) ?></span></td>
-                                <td><?= $h($row['vendor_invoice'] !== '' ? $row['vendor_invoice'] : '—') ?><br><span class="muted"><?= $h($row['invoice']) ?></span></td>
-                                <td><?= $h(consus_retour_dutch_date($row['document_date'])) ?></td>
+                                <td><?= $h(($row['perkins_invoice'] ?? '') !== '' ? $row['perkins_invoice'] : '—') ?><br><span class="muted"><?= consus_retour_is_receipt_row($row) ? 'ontvangst ' . $h($row['invoice']) . ', nog niet gefactureerd' : $h($row['invoice']) ?></span></td>
+                                <td><?= $h(($row['handling_unit'] ?? '') !== '' ? $row['handling_unit'] : '—') ?></td>
+                                <td><?= $h(consus_retour_dutch_date($row['document_date'])) ?><?= consus_retour_is_receipt_row($row) ? '<br><span class="muted">ontvangen</span>' : '' ?></td>
                                 <td class="num"><?= (int) $row['days_left'] ?><br><span class="muted">t/m <?= $h(consus_retour_dutch_date($row['deadline'])) ?></span></td>
                                 <td class="num"><?= $h(consus_retour_qty((float) $row['stock'])) ?><?= (float) $row['reserved'] > 0 ? '<br><span class="muted">' . $h(consus_retour_qty((float) $row['reserved'])) . ' gereserveerd</span>' : '' ?></td>
                                 <td class="num"><?= $h(consus_retour_qty($garantie ? (float) $row['quantity'] : (float) $row['return_qty'])) ?></td>
@@ -183,13 +184,15 @@ function consus_retour_page_section(string $company, string $companyLabel, strin
                         <dl>
                             <dt>Artikel</dt><dd><?= $h($row['item']) ?> — <?= $h($row['description']) ?></dd>
                             <dt>Leverancier</dt><dd><?= $h($row['vendor']) ?></dd>
+                            <dt>Perkins-factuurnummer</dt><dd><?= $h(($row['perkins_invoice'] ?? '') !== '' ? $row['perkins_invoice'] : '— (volgt zodra bekend)') ?></dd>
+                            <dt>Handling Unit (doosnummer)</dt><dd><?= $h(($row['handling_unit'] ?? '') !== '' ? $row['handling_unit'] : '— (volgt zodra bekend)') ?></dd>
                             <dt>Leveranciersfactuur</dt><dd><?= $h($row['vendor_invoice'] !== '' ? $row['vendor_invoice'] : '—') ?></dd>
-                            <dt>BC-factuur</dt><dd><?= $h($row['invoice']) ?></dd>
+                            <dt><?= consus_retour_is_receipt_row($row) ? 'Inkoopontvangst' : 'BC-factuur' ?></dt><dd><?= $h($row['invoice']) ?><?= consus_retour_is_receipt_row($row) ? ' (nog niet gefactureerd)' : '' ?></dd>
                             <dt>Inkooporder</dt><dd><?= $h($row['po'] !== '' ? $row['po'] : '—') ?></dd>
-                            <dt>Factuurdatum</dt><dd><?= $h(consus_retour_dutch_date($row['document_date'])) ?> (<?= (int) $row['days_since'] ?> dagen geleden)</dd>
+                            <dt><?= consus_retour_is_receipt_row($row) ? 'Ontvangstdatum' : 'Factuurdatum' ?></dt><dd><?= $h(consus_retour_dutch_date($row['document_date'])) ?> (<?= (int) $row['days_since'] ?> dagen geleden)</dd>
                             <dt>Uiterlijk retour</dt><dd><?= $h(consus_retour_dutch_date($row['deadline'])) ?> (nog <?= (int) $row['days_left'] ?> dagen)</dd>
                             <dt>Type</dt><dd><?= $h(consus_retour_type_label($row['account'])) ?></dd>
-                            <dt>Gefactureerd</dt><dd><?= $h(consus_retour_qty((float) $row['quantity'])) ?> × <?= $h(consus_retour_money((float) $row['unit_cost'])) ?> = <?= $h(consus_retour_money((float) $row['amount'])) ?></dd>
+                            <dt><?= consus_retour_is_receipt_row($row) ? 'Ontvangen' : 'Gefactureerd' ?></dt><dd><?= $h(consus_retour_qty((float) $row['quantity'])) ?> × <?= $h(consus_retour_money((float) $row['unit_cost'])) ?> = <?= $h(consus_retour_money((float) $row['amount'])) ?></dd>
                             <dt>Aantal retour</dt><dd><?= $h(consus_retour_qty($garantie ? 0.0 : (float) $row['return_qty'])) ?> (waarde <?= $h(consus_retour_money($garantie ? 0.0 : (float) $row['value'])) ?>)</dd>
                             <dt>Boekvoorraad</dt><dd><?php $parts = []; foreach ((array) $row['stock_by_location'] as $loc => $qty) { if ((float) $qty != 0.0) { $parts[] = $loc . ': ' . consus_retour_qty((float) $qty); } } ?><?= $h($parts !== [] ? implode(', ', $parts) : '0') ?></dd>
                             <dt>Bin-inhoud</dt><dd><?php if (!is_array($row['bin_by_location'])): ?>niet beschikbaar<?php else: $parts = []; foreach ($row['bin_by_location'] as $loc => $qty) { $parts[] = $loc . ': ' . consus_retour_qty((float) $qty); } ?><?= $h($parts !== [] ? implode(', ', $parts) : 'geen') ?><?php endif; ?></dd>

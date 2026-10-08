@@ -816,7 +816,10 @@ function consus_retour_rule_label(array $rule): string
  * Rekent de retourkandidaten uit.
  *
  * $data:
- *  lines:  [{invoice, vendor, vendor_invoice, document_date, item, description, quantity, unit_cost, order_no, department}]
+ *  lines:  [{invoice, vendor, vendor_invoice, document_date, item, description, quantity, unit_cost, order_no, department,
+ *            source ('invoice'|'receipt'), perkins_invoice, handling_units:[...]}]
+ *          source 'receipt' = spoedregel die ontvangen maar nog niet gefactureerd is (#1159):
+ *          invoice is dan het nummer van de inkoopontvangst, document_date de ontvangstdatum.
  *  orders: {PO: {egt:bool|null, csv:bool|null, found:bool}}
  *  items:  {ITEM: {description, safety_stock, stock:{LOC:qty}, bin:{LOC:qty}|null,
  *                  reserved:qty, reserved_return:qty, tariff, origin}}
@@ -874,7 +877,21 @@ function consus_retour_candidates(array $data, array $settings, string $today, s
                 'quantity' => 0.0,
                 'amount' => 0.0,
                 'orders' => [],
+                'source' => ($line['source'] ?? '') === 'receipt' ? 'receipt' : 'invoice',
+                'perkins_invoices' => [],
+                'handling_units' => [],
             ];
+        }
+        foreach (preg_split('/\s*,\s*/', trim((string) ($line['perkins_invoice'] ?? $line['vendor_invoice'] ?? ''))) ?: [] as $perkins) {
+            if ($perkins !== '' && !in_array($perkins, $groups[$key]['perkins_invoices'], true)) {
+                $groups[$key]['perkins_invoices'][] = $perkins;
+            }
+        }
+        foreach ((array) ($line['handling_units'] ?? []) as $hu) {
+            $hu = trim((string) $hu);
+            if ($hu !== '' && !in_array($hu, $groups[$key]['handling_units'], true)) {
+                $groups[$key]['handling_units'][] = $hu;
+            }
         }
         $groups[$key]['quantity'] += $quantity;
         $groups[$key]['amount'] += $quantity * (float) ($line['unit_cost'] ?? 0);
@@ -889,6 +906,9 @@ function consus_retour_candidates(array $data, array $settings, string $today, s
 
     $open = [];
     foreach ($groups as $group) {
+        sort($group['handling_units'], SORT_STRING);
+        $group['perkins_invoice'] = implode(', ', $group['perkins_invoices']);
+        $group['handling_unit'] = implode(', ', $group['handling_units']);
         $groupDepartment = consus_retour_valid_department($group['department']);
         if ($departmentKey !== '' && $groupDepartment !== $departmentKey) {
             $skipped['afdeling']++;
@@ -1054,16 +1074,25 @@ function consus_retour_candidates_for_companies(array $settings, string $today, 
     return $out;
 }
 
+/** Spoedregel die al ontvangen maar nog niet gefactureerd is (#1159). */
+function consus_retour_is_receipt_row(array $row): bool
+{
+    return ($row['source'] ?? '') === 'receipt';
+}
+
 /** Waarom deze regel op de lijst staat, in gewone taal. */
 function consus_retour_reason(array $row): string
 {
     $rule = $row['rule'];
     $parts = [
         'Regel ' . consus_retour_rule_label($rule) . ' van afdeling ' . $row['department'] . (($row['company'] ?? '') !== '' ? ' (' . consus_retour_company_label((string) $row['company']) . ')' : '') . '.',
-        'Factuurdatum ' . consus_retour_dutch_date($row['document_date']) . ', ' . (int) $row['days_since'] . ' dagen geleden; nog ' . (int) $row['days_left'] . ' dagen (t/m ' . consus_retour_dutch_date($row['deadline']) . ').',
+        (consus_retour_is_receipt_row($row) ? 'Ontvangen ' : 'Factuurdatum ') . consus_retour_dutch_date($row['document_date']) . ', ' . (int) $row['days_since'] . ' dagen geleden; nog ' . (int) $row['days_left'] . ' dagen (t/m ' . consus_retour_dutch_date($row['deadline']) . ').',
     ];
     if ($row['account'] !== CONSUS_RETOUR_TYPE_ALL) {
         $parts[] = 'Type ' . consus_retour_type_label($row['account']) . ($row['account'] === CONSUS_RETOUR_ACCOUNT_SPOED ? ': inkooporder met EGT aan en CSV uit.' : ': geen spoedorder (EGT aan en CSV uit).');
+    }
+    if (consus_retour_is_receipt_row($row)) {
+        $parts[] = 'Spoedregel, ontvangen op ontvangst ' . $row['invoice'] . ' en nog niet gefactureerd; Perkins-factuurnummer en doosnummer volgen zodra ze bekend zijn.';
     }
     if (!empty($row['garantie'])) {
         $parts[] = !empty($row['garantie_by_order']) ? 'Garantie via de inkooporder; geen retourkandidaat.' : 'Met de hand als garantie gemarkeerd; geen retourkandidaat.';
@@ -1128,7 +1157,7 @@ function consus_retour_money(float $value): string
 function consus_retour_export_headers(): array
 {
     return [
-        'Leverancier', 'Type', 'Leveranciersfactuur', 'BC-factuur', 'Factuurdatum', 'Artikel', 'Omschrijving',
+        'Leverancier', 'Type', 'Perkins-factuurnummer', 'Handling Unit', 'Leveranciersfactuur', 'BC-factuur / ontvangst', 'Factuur-/ontvangstdatum', 'Artikel', 'Omschrijving',
         'PO-nummer', 'Aantal retour', 'Prijs per stuk', 'Totale prijs', 'Op voorraad', 'Gereserveerd',
         'Dagen sinds factuur', 'Dagen over', 'Uiterlijk retour', 'Tariff Code', 'Country of Origin',
         'Garantie', 'Status', 'Bedrijf', 'Afdeling', 'Regel',
@@ -1142,6 +1171,8 @@ function consus_retour_export_row(array $row): array
     return [
         (string) $row['vendor'],
         consus_retour_type_label((string) $row['account']),
+        (string) ($row['perkins_invoice'] ?? ''),
+        (string) ($row['handling_unit'] ?? ''),
         (string) $row['vendor_invoice'],
         (string) $row['invoice'],
         consus_retour_dutch_date((string) $row['document_date']),

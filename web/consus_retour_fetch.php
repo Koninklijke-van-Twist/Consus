@@ -121,6 +121,137 @@ function consus_retour_reservations(array $entries): array
     return $result;
 }
 
+/** Magazijndocumentsoort Ontvangst (BC kan Engels of Nederlands sturen). */
+function consus_retour_is_receipt_doc_type(mixed $value): bool
+{
+    return in_array(strtolower(trim((string) $value)), ['receipt', 'ontvangst', 'posted receipt', 'geboekte ontvangst'], true);
+}
+
+/**
+ * Perkins-factuurnummer en Handling Unit (doosnummer) per inkooporderregel (#1159).
+ *  - $receiptLines: PurchaseReceiptLines (LVS_Order_No, LVS_Order_Line_No, No, Quantity, VendorShptNo).
+ *  - $whseEntries: Magazijnposten (Source_No, Source_Line_No, Item_No, Whse_Document_No, Whse_Document_Type).
+ *  - $whseHeaders: PostedWhseReceipt per No: {hu, invoice} (KVT_Handling_Unit, Vendor_Shipment_No).
+ * Eén geboekte magazijnontvangst = één doos; een orderregel kan meerdere dozen hebben.
+ * Sleutels: "PO\x1fREGEL" (exact) en "PO\x1fARTIKEL" (factuurregels hebben geen orderregelnummer).
+ *
+ * @return array<string, array{invoices:array<int,string>, hus:array<int,string>}>
+ */
+function consus_retour_receipt_info(array $receiptLines, array $whseEntries, array $whseHeaders): array
+{
+    $info = [];
+    $add = static function (string $po, string $lineNo, string $item, string $invoice, string $hu) use (&$info): void {
+        $keys = [];
+        if ($lineNo !== '' && $lineNo !== '0') {
+            $keys[] = $po . "\x1f#" . $lineNo;
+        }
+        if ($item !== '') {
+            $keys[] = $po . "\x1f" . strtoupper($item);
+        }
+        foreach ($keys as $key) {
+            $info[$key] ??= ['invoices' => [], 'hus' => []];
+            if ($invoice !== '' && !in_array($invoice, $info[$key]['invoices'], true)) {
+                $info[$key]['invoices'][] = $invoice;
+            }
+            if ($hu !== '' && !in_array($hu, $info[$key]['hus'], true)) {
+                $info[$key]['hus'][] = $hu;
+            }
+        }
+    };
+    foreach ($receiptLines as $row) {
+        $po = consus_retour_normalize_po((string) ($row['LVS_Order_No'] ?? $row['OrderNo'] ?? ''));
+        // Regels met aantal 0 zijn restanten van deelboekingen.
+        if ($po === '' || (float) ($row['Quantity'] ?? 0) == 0.0) {
+            continue;
+        }
+        $add($po, (string) (int) ($row['LVS_Order_Line_No'] ?? 0), trim((string) ($row['No'] ?? '')), trim((string) ($row['VendorShptNo'] ?? '')), '');
+    }
+    foreach ($whseEntries as $row) {
+        $doc = strtoupper(trim((string) ($row['Whse_Document_No'] ?? '')));
+        if ($doc === '' || !isset($whseHeaders[$doc]) || (array_key_exists('Whse_Document_Type', $row) && !consus_retour_is_receipt_doc_type($row['Whse_Document_Type']))) {
+            continue;
+        }
+        $po = consus_retour_normalize_po((string) ($row['Source_No'] ?? ''));
+        if ($po === '') {
+            continue;
+        }
+        $add($po, (string) (int) ($row['Source_Line_No'] ?? 0), trim((string) ($row['Item_No'] ?? '')), (string) $whseHeaders[$doc]['invoice'], (string) $whseHeaders[$doc]['hu']);
+    }
+    foreach ($info as $key => $entry) {
+        sort($info[$key]['hus'], SORT_STRING);
+    }
+
+    return $info;
+}
+
+/**
+ * Ontvangen maar nog niet gefactureerde regels (PurchaseReceiptLines met
+ * Qty_Rcd_Not_Invoiced > 0) als compacte regels; invoice = nummer van de
+ * inkoopontvangst, document_date = boekingsdatum van de ontvangst.
+ *
+ * @param array<string, string> $receiptDates Document_No => Y-m-d
+ */
+function consus_retour_receipt_lines(array $rows, array $receiptDates): array
+{
+    $lines = [];
+    foreach ($rows as $row) {
+        if (!consus_retour_is_item_line($row)) {
+            continue;
+        }
+        $doc = trim((string) ($row['Document_No'] ?? ''));
+        $qty = (float) ($row['Qty_Rcd_Not_Invoiced'] ?? 0);
+        $date = $receiptDates[strtoupper($doc)] ?? '';
+        if ($doc === '' || $qty <= 0 || $date === '') {
+            continue;
+        }
+        $amount = $row['LVS_Amt_Rcd_Not_Invoiced'] ?? null;
+        $unitCost = is_numeric($amount) ? (float) $amount / $qty : (float) ($row['Direct_Unit_Cost'] ?? 0);
+        $lines[] = [
+            'invoice' => $doc,
+            'source' => 'receipt',
+            'vendor' => consus_retour_normalize_vendor($row['Buy_from_Vendor_No'] ?? ''),
+            'vendor_invoice' => '',
+            'document_date' => $date,
+            'item' => (string) $row['No'],
+            'description' => trim((string) ($row['Description'] ?? '')),
+            'quantity' => $qty,
+            'unit_cost' => $unitCost,
+            'order_no' => consus_retour_normalize_po((string) ($row['LVS_Order_No'] ?? $row['OrderNo'] ?? '')),
+            'order_line' => (int) ($row['LVS_Order_Line_No'] ?? 0),
+            'department' => trim((string) ($row['Shortcut_Dimension_1_Code'] ?? '')),
+        ];
+    }
+
+    return $lines;
+}
+
+/** Zet Perkins-factuurnummer en Handling Units op de regels (leeg als onbekend). */
+function consus_retour_apply_receipt_info(array $lines, array $info): array
+{
+    foreach ($lines as $index => $line) {
+        $po = (string) ($line['order_no'] ?? '');
+        $entry = null;
+        if ($po !== '' && (int) ($line['order_line'] ?? 0) > 0) {
+            $entry = $info[$po . "\x1f#" . (int) $line['order_line']] ?? null;
+        }
+        if ($entry === null && $po !== '') {
+            $entry = $info[$po . "\x1f" . strtoupper((string) ($line['item'] ?? ''))] ?? null;
+        }
+        $invoices = $entry['invoices'] ?? [];
+        $fallback = trim((string) ($line['vendor_invoice'] ?? ''));
+        // Een factuurregel hoort bij één Perkins-factuur: past die bij een ontvangst, dan die.
+        $lines[$index]['perkins_invoice'] = $fallback !== '' && ($invoices === [] || in_array($fallback, $invoices, true))
+            ? $fallback
+            : implode(', ', $invoices);
+        $lines[$index]['handling_units'] = array_values($entry['hus'] ?? []);
+    }
+
+    return $lines;
+}
+
+/** Tijdsbudget voor de ontvangst-lookups in de nightly (seconden). */
+const CONSUS_RETOUR_RECEIPT_BUDGET = 900;
+
 /**
  * @param callable|null $each fn(string $company, string $entitySet, array $required, array $optional, string $filter, callable $onRow): void
  */
@@ -177,9 +308,29 @@ function consus_retour_build(string $company, array $settings, ?callable $each =
     $lines = consus_retour_compact_lines($rawLines, $headers);
     $lines = array_values(array_filter($lines, static fn (array $line): bool => $line['document_date'] !== '' && $line['document_date'] >= $minStart));
 
+    // Spoed (#1159): ontvangen maar nog niet gefactureerd telt vanaf de geboekte ontvangst.
+    $started = microtime(true);
+    $receiptLines = [];
+    try {
+        $openRows = [];
+        $each($company, 'PurchaseReceiptLines', ['Document_No', 'Type', 'No', 'Qty_Rcd_Not_Invoiced', 'LVS_Order_No', 'Buy_from_Vendor_No'], ['LVS_Order_Line_No', 'Description', 'LVS_Amt_Rcd_Not_Invoiced', 'Shortcut_Dimension_1_Code'], $vendor . ' and Qty_Rcd_Not_Invoiced gt 0', static function (array $row) use (&$openRows): void {
+            $openRows[] = $row;
+        });
+        $receiptDates = [];
+        $docs = array_values(array_unique(array_map(static fn (array $r): string => strtoupper(trim((string) ($r['Document_No'] ?? ''))), $openRows)));
+        foreach (array_chunk(array_filter($docs), CONSUS_RETOUR_CHUNK) as $chunk) {
+            $each($company, 'PostedPurchaseReceipt', ['No', 'Posting_Date'], [], consus_retour_odata_or('No', $chunk), static function (array $row) use (&$receiptDates): void {
+                $receiptDates[strtoupper(trim((string) ($row['No'] ?? '')))] = consus_retour_parse_date($row['Posting_Date'] ?? '');
+            });
+        }
+        $receiptLines = array_values(array_filter(consus_retour_receipt_lines($openRows, $receiptDates), static fn (array $line): bool => $line['document_date'] >= $minStart));
+    } catch (Throwable $error) {
+        $warnings[] = 'Ontvangen, nog niet gefactureerde regels niet opgehaald: ' . $error->getMessage();
+    }
+
     $poNumbers = [];
     $itemNumbers = [];
-    foreach ($lines as $line) {
+    foreach (array_merge($lines, $receiptLines) as $line) {
         // PO-vlaggen alleen voor leveranciers waarvan de type-provider types afleidt.
         if ($line['order_no'] !== '' && ($typesByVendor[$line['vendor']] ?? []) !== []) {
             $poNumbers[$line['order_no']] = true;
@@ -209,6 +360,30 @@ function consus_retour_build(string $company, array $settings, ?callable $each =
     // (GearchiveerdeInkoopkoppen/-orders, Ariadne 08-10-2026) heeft ze niet, dus daar
     // halen we niets. Een order die na volledige facturering weg is, telt als
     // voorraad (57420); de regel zegt dat er zichtbaar bij.
+    // Alleen spoedorders (EGT aan, CSV uit) komen al vanaf de ontvangst op de lijst;
+    // voorraadorders worden binnen een dag gefactureerd en komen via de factuur.
+    $receiptLines = array_values(array_filter($receiptLines, static function (array $line) use ($orders): bool {
+        $order = $orders[$line['order_no']] ?? null;
+        if (!is_array($order) || empty($order['found'])) {
+            return false;
+        }
+
+        return consus_retour_classify($order['egt'] ?? null, $order['csv'] ?? null) === CONSUS_RETOUR_ACCOUNT_SPOED;
+    }));
+    $lines = array_merge($lines, $receiptLines);
+
+    // Perkins-factuurnummer en Handling Unit uit de ontvangsten van hetzelfde bedrijf.
+    // Bij Hunter van Twist gevuld; bij KvT leeg (dan blijft alleen het factuurnummer).
+    try {
+        [$lines, $receiptWarning] = consus_retour_enrich_receipts($each, $company, $vendor, $lines, $minStart, $started);
+        if ($receiptWarning !== '') {
+            $warnings[] = $receiptWarning;
+        }
+    } catch (Throwable $error) {
+        $lines = consus_retour_apply_receipt_info($lines, []);
+        $warnings[] = 'Perkins-factuurnummer/Handling Unit niet opgehaald: ' . $error->getMessage();
+    }
+
     $missing = array_values(array_filter(array_keys($poNumbers), static fn (string $po): bool => empty($orders[$po]['found'])));
     if ($missing !== []) {
         $warnings[] = count($missing) . ' inkooporder(s) staan niet meer open in BC; zonder EGT/CSV-vlag tellen die als voorraad (57420).';
@@ -283,6 +458,67 @@ function consus_retour_build(string $company, array $settings, ?callable $each =
         'items' => $items,
         'warnings' => $warnings,
     ] + $empty;
+}
+
+/**
+ * Haalt ontvangstregels, geboekte magazijnontvangsten (met Handling Unit) en de
+ * Magazijnposten (PO-regel) op voor de PO's van $lines. Begrensd door
+ * CONSUS_RETOUR_RECEIPT_BUDGET: daarna stopt het en blijft de rest leeg.
+ *
+ * @return array{0:array, 1:string}
+ */
+function consus_retour_enrich_receipts(callable $each, string $company, string $vendorFilter, array $lines, string $minStart, float $started, ?int $budget = null): array
+{
+    $budget ??= CONSUS_RETOUR_RECEIPT_BUDGET;
+    $overBudget = static fn (): bool => microtime(true) - $started > $budget;
+    $pos = [];
+    foreach ($lines as $line) {
+        if (($line['order_no'] ?? '') !== '') {
+            $pos[$line['order_no']] = true;
+        }
+    }
+    $pos = array_keys($pos);
+    $partial = false;
+    $receiptRows = [];
+    foreach (array_chunk($pos, CONSUS_RETOUR_CHUNK) as $chunk) {
+        if ($overBudget()) {
+            $partial = true;
+            break;
+        }
+        $each($company, 'PurchaseReceiptLines', ['LVS_Order_No', 'No', 'Quantity'], ['LVS_Order_Line_No', 'VendorShptNo'], $vendorFilter . ' and ' . consus_retour_odata_or('LVS_Order_No', $chunk), static function (array $row) use (&$receiptRows): void {
+            $receiptRows[] = $row;
+        });
+    }
+    // Eerst de dozen zelf: geboekte magazijnontvangsten met Handling Unit. Zijn
+    // die er niet (KvT), dan geen Magazijnposten-calls.
+    $headers = [];
+    // Ontvangst ligt vóór de factuur: 60 dagen extra marge.
+    $whseFrom = (new DateTimeImmutable($minStart . ' 00:00:00', new DateTimeZone('Europe/Amsterdam')))->modify('-60 days')->format('Y-m-d');
+    $each($company, 'PostedWhseReceipt', ['No', 'KVT_Handling_Unit'], ['Vendor_Shipment_No'], "Posting_Date ge " . $whseFrom . " and KVT_Handling_Unit ne ''", static function (array $row) use (&$headers): void {
+        $no = strtoupper(trim((string) ($row['No'] ?? '')));
+        $hu = trim((string) ($row['KVT_Handling_Unit'] ?? ''));
+        if ($no !== '' && $hu !== '') {
+            $headers[$no] = ['hu' => $hu, 'invoice' => trim((string) ($row['Vendor_Shipment_No'] ?? ''))];
+        }
+    });
+    $entries = [];
+    if ($headers !== []) {
+        foreach (array_chunk($pos, CONSUS_RETOUR_CHUNK) as $chunk) {
+            if ($overBudget()) {
+                $partial = true;
+                break;
+            }
+            $each($company, 'Magazijnposten', ['Source_No', 'Source_Line_No', 'Item_No', 'Whse_Document_No'], ['Whse_Document_Type'], consus_retour_odata_or('Source_No', $chunk), static function (array $row) use (&$entries, $headers): void {
+                $doc = strtoupper(trim((string) ($row['Whse_Document_No'] ?? '')));
+                if (isset($headers[$doc])) {
+                    $entries[] = $row;
+                }
+            });
+        }
+    }
+    $lines = consus_retour_apply_receipt_info($lines, consus_retour_receipt_info($receiptRows, $entries, $headers));
+
+    return [$lines, $partial ? 'Perkins-factuurnummer/Handling Unit deels opgehaald (tijdslimiet van ' . (int) round($budget / 60) . ' minuten).' : ''];
 }
 
 /** @return array<string, array<string, float>> */

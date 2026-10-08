@@ -97,8 +97,8 @@ file_put_contents(getenv('CONSUS_RETOUR_FILE'), json_encode(['version' => 2, 'co
 consus_retour_rule_save('Koninklijke van Twist', '15', ['vendor' => '90101', 'type' => '57401', 'window' => 30, 'min_value' => 50]);
 consus_retour_rule_save('Koninklijke van Twist', '15', ['vendor' => '90101', 'type' => '57420', 'window' => 90, 'min_value' => 50]);
 $retourRows = consus_xlsx_sheets($snapshot, $prefs, ['company' => 'Koninklijke van Twist', 'cost_center' => '15'])[4]['rows'];
-xlsx_assert(count($retourRows) === 2 && $retourRows[1][0] === '90101' && $retourRows[1][1] === 'Voorraad (57420)' && $retourRows[1][5] === 'PK-1', 'retourlijst voor afdeling 15');
-xlsx_assert(!preg_match('/^\d{4}-/', (string) $retourRows[1][4]), 'factuurdatum in Nederlandse notatie');
+xlsx_assert(count($retourRows) === 2 && $retourRows[1][0] === '90101' && $retourRows[1][1] === 'Voorraad (57420)' && $retourRows[1][7] === 'PK-1' && $retourRows[0][2] === 'Perkins-factuurnummer' && $retourRows[0][3] === 'Handling Unit' && $retourRows[1][2] === '9024', 'retourlijst voor afdeling 15, Perkins-factuurnummer valt terug op de factuur');
+xlsx_assert(!preg_match('/^\d{4}-/', (string) $retourRows[1][6]), 'factuurdatum in Nederlandse notatie');
 $retourAll = consus_xlsx_sheets($snapshot, $prefs, ['company' => 'kvt', 'cost_center' => ''])[4]['rows'];
 xlsx_assert(count($retourAll) === 2, 'zonder afdeling: alleen afdelingen met regels (80 heeft er geen)');
 xlsx_assert(in_array('Bedrijf', $retourAll[0], true) && in_array('Koninklijke Van Twist', $retourAll[1], true), 'bedrijf in de export, met weergavenaam');
