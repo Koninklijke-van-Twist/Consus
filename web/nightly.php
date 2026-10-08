@@ -436,7 +436,8 @@ try {
         }
         foreach ($payload['warnings'] as $warning) {
             echo sprintf(
-                "  WARN %s: %s\n",
+                "  %s %s: %s\n",
+                consus_warning_is_info($warning) ? 'INFO' : 'WARN',
                 (string) ($warning['company'] ?? ''),
                 (string) ($warning['warning'] ?? '')
             );

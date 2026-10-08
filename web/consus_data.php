@@ -347,10 +347,33 @@ function consus_procurement_bucket(string $purchasingCode, string $vendorNo): st
 
 function consus_procurement_bucket_from_row(array $row): string
 {
+    if (consus_ledger_is_drop_shipment($row)) {
+        return 'dropship';
+    }
+
     return consus_procurement_bucket(
         consus_first_filled_string($row, [CONSUS_ILE_PURCHASING_CODE_FIELD, 'PurchasingCode']),
         consus_first_filled_string($row, [CONSUS_ILE_VENDOR_NO_FIELD, 'Buy_from_Vendor_No'])
     );
+}
+
+/**
+ * Drop_Shipment op PageItemLedgerEntries: boolean, of Ja/Nee/Yes/No als tekst.
+ */
+function consus_ledger_is_drop_shipment(array $row): bool
+{
+    if (!array_key_exists('Drop_Shipment', $row)) {
+        return false;
+    }
+    $value = $row['Drop_Shipment'];
+    if (is_bool($value)) {
+        return $value;
+    }
+    if (is_int($value) || is_float($value)) {
+        return (int) $value !== 0;
+    }
+
+    return in_array(strtolower(trim(consus_scalar_string($value))), ['1', 'true', 'yes', 'ja'], true);
 }
 
 function consus_entry_type_filter(string $entryType): string
@@ -2136,12 +2159,55 @@ function consus_warning_lines(array $warnings): array
         if (!is_array($warning)) {
             continue;
         }
+        if (consus_warning_is_info($warning)) {
+            continue;
+        }
         $company = trim((string) ($warning['company'] ?? ''));
         $text = trim((string) ($warning['warning'] ?? $warning['message'] ?? ''));
         if ($text === '') {
             continue;
         }
         $lines[] = $company !== '' ? $company . ': ' . $text : $text;
+    }
+
+    return $lines;
+}
+
+/**
+ * Een melding met level info (zoals verplaatste voorraad) is geen opmerking
+ * over de nachtrun. Oude snapshots zonder level herkennen we aan de tekst.
+ */
+function consus_warning_is_info($warning): bool
+{
+    if (!is_array($warning)) {
+        return false;
+    }
+    if (($warning['level'] ?? '') === 'info') {
+        return true;
+    }
+    $text = (string) ($warning['warning'] ?? $warning['message'] ?? '');
+
+    return str_contains($text, 'stond op een ander bedrijf en is verplaatst naar dit bedrijf');
+}
+
+/**
+ * Informatieve regels die de pagina los en zonder "met opmerkingen" toont.
+ *
+ * @param array<int, mixed> $warnings
+ * @return array<int, string>
+ */
+function consus_info_lines(array $warnings): array
+{
+    $lines = [];
+    foreach ($warnings as $warning) {
+        if (!consus_warning_is_info($warning)) {
+            continue;
+        }
+        $company = trim((string) ($warning['company'] ?? ''));
+        $text = trim((string) ($warning['warning'] ?? $warning['message'] ?? ''));
+        if ($text !== '') {
+            $lines[] = $company !== '' ? $company . ': ' . $text : $text;
+        }
     }
 
     return $lines;
@@ -4035,43 +4101,6 @@ function consus_each_entity_rows(
     );
 }
 
-/**
- * Velden voor een melding over ontbrekende kolommen. Een alternatieve naam
- * telt niet als ontbrekend als een andere naam uit dezelfde groep wel kwam;
- * van een groep die helemaal ontbreekt blijft alleen de eerste naam staan.
- *
- * @param array<int, string> $missing
- * @param array<int, string> $requested
- * @return array<int, string>
- */
-function consus_missing_field_report(array $missing, array $requested): array
-{
-    $missing = array_values(array_unique(array_map('strval', $missing)));
-    $present = array_values(array_diff(array_map('strval', $requested), $missing));
-    $report = [];
-    $handled = [];
-    foreach (CONSUS_FIELD_ALIAS_GROUPS as $group) {
-        $inGroup = array_values(array_intersect($missing, $group));
-        if ($inGroup === []) {
-            continue;
-        }
-        foreach ($inGroup as $field) {
-            $handled[$field] = true;
-        }
-        if (array_intersect($present, $group) !== []) {
-            continue;
-        }
-        $report[] = $inGroup[0];
-    }
-    foreach ($missing as $field) {
-        if (!isset($handled[$field])) {
-            $report[] = $field;
-        }
-    }
-
-    return array_values(array_unique($report));
-}
-
 function consus_odata_error_allows_entry_type_fallback(Throwable $error): bool
 {
     $message = $error->getMessage();
@@ -4987,6 +5016,7 @@ function consus_rehome_stranded_inventory(array &$rowsByCompany, array &$article
             $warnings[] = [
                 'company' => consus_company_display_name($companyKey),
                 'warning' => 'Voorraad van ' . $movedQty . ' stond op een ander bedrijf en is verplaatst naar dit bedrijf, omdat dit bedrijf het artikel verbruikt of als veiligheidsvoorraad of bestelpunt heeft en de andere kant geen verbruik had. Het totaal over alle bedrijven blijft gelijk.',
+                'level' => 'info',
             ];
             continue;
         }
@@ -5871,26 +5901,6 @@ function consus_collect_company(
                 $addWarning('Opgeslagen voorraad ontbreekt en wordt opnieuw opgehaald.');
             }
             $stockResult = is_array($stockOutcome['result'] ?? null) ? $stockOutcome['result'] : [];
-            $stockMissing = [];
-            foreach ($stockResult['missing_optional'] ?? [] as $field) {
-                $field = (string) $field;
-                if ($field !== '' && !in_array($field, $stockMissing, true)) {
-                    $stockMissing[] = $field;
-                }
-            }
-            $locationNames = consus_location_field_names();
-            $locationMissing = array_values(array_intersect($stockMissing, $locationNames));
-            $otherStockMissing = array_values(array_diff($stockMissing, $locationNames));
-            $stockCount = (int) ($stockResult['count'] ?? 0);
-            if ($stockCount > 0 && $locationMissing !== [] && count($locationMissing) === count($locationNames)) {
-                $addWarning(CONSUS_STOCK_ENTITY . ': locatieveld ontbreekt (' . implode(', ', $locationMissing) . '). Voorraad blijft zonder locatie; niets wordt weggefilterd.');
-            }
-            if ($stockCount > 0 && $otherStockMissing !== []) {
-                $otherStockMissing = consus_missing_field_report($otherStockMissing, array_merge(CONSUS_STOCK_FIELDS, CONSUS_STOCK_OPTIONAL_FIELDS));
-                if ($otherStockMissing !== []) {
-                    $addWarning(CONSUS_STOCK_ENTITY . ': velden niet beschikbaar (' . implode(', ', $otherStockMissing) . ').');
-                }
-            }
             if (!empty($stockResult['page_size_fallback'])) {
                 $addWarning(consus_page_size_warning(CONSUS_STOCK_ENTITY));
             }
@@ -5924,24 +5934,6 @@ function consus_collect_company(
             );
             if (!empty($ledgerResult['replayed_missing'])) {
                 $addWarning('Opgeslagen tussenstap ontbreekt en wordt opnieuw opgehaald.');
-            }
-            if (($ledgerResult['missing_optional'] ?? []) !== [] && $step['kind'] === 'sales') {
-                $missingFields = [];
-                foreach ($ledgerResult['missing_optional'] as $field) {
-                    $field = (string) $field;
-                    if ($field !== '') {
-                        $missingFields[] = $field;
-                    }
-                }
-                $customerMissing = array_values(array_intersect($missingFields, consus_ledger_customer_fields()));
-                $otherMissing = array_values(array_diff($missingFields, consus_ledger_customer_fields()));
-                if ($customerMissing !== []) {
-                    $addWarning('Verkoop: klantvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $customerMissing) . '). Verbruik blijft staan; de klantuitsplitsing valt terug op wat BC wel meestuurt.');
-                }
-                $otherMissing = consus_missing_field_report($otherMissing, array_merge(CONSUS_LEDGER_FIELDS, CONSUS_LEDGER_OPTIONAL_FIELDS));
-                if ($otherMissing !== []) {
-                    $addWarning('Verkoop: inkoopvelden ontbreken op ' . CONSUS_LEDGER_ENTITY . ' (' . implode(', ', $otherMissing) . '). Die regels vallen in eigen tot de veldnamen in consus_config.php kloppen.');
-                }
             }
             if (!empty($ledgerResult['document_filter_rejected']) && $step['document_prefix'] !== '') {
                 $addWarning('Werkorderfilter op documentnummer wordt door BC geweigerd. Negatieve correcties worden volledig opgehaald en lokaal op prefix ' . $step['document_prefix'] . ' gefilterd.');
@@ -5996,17 +5988,6 @@ function consus_collect_company(
                     $addWarning('Opgeslagen artikelen ontbreken en worden opnieuw opgehaald.');
                 }
                 $vendorResult = is_array($vendorOutcome['result'] ?? null) ? $vendorOutcome['result'] : [];
-                $missingVendorFields = [];
-                foreach ($vendorResult['missing_optional'] ?? [] as $field) {
-                    $field = (string) $field;
-                    if ($field !== '' && !in_array($field, $missingVendorFields, true)) {
-                        $missingVendorFields[] = $field;
-                    }
-                }
-                $missingVendorFields = consus_missing_field_report($missingVendorFields, array_merge(CONSUS_ITEM_FIELDS, CONSUS_ITEM_OPTIONAL_FIELDS));
-                if ($missingVendorFields !== []) {
-                    $addWarning(CONSUS_ITEM_ENTITY . ': velden niet beschikbaar (' . implode(', ', $missingVendorFields) . '). Nummer en leverancier blijven staan als die query wel lukte.');
-                }
                 if (!empty($vendorResult['page_size_fallback'])) {
                     $addWarning(consus_page_size_warning(CONSUS_ITEM_ENTITY));
                 }
@@ -6161,17 +6142,6 @@ function consus_collect_company(
                         if (!empty($dimensionResult['filter_fallback'])) {
                             $addWarning(CONSUS_DIMENSION_ENTITY . ': Table_ID werd geweigerd. Kostenplaats is alsnog opgehaald met alleen dimensie ' . $passCode . '.');
                         }
-                        $dimensionMissing = [];
-                        foreach ($dimensionResult['missing_optional'] ?? [] as $field) {
-                            $field = (string) $field;
-                            if ($field !== '' && !in_array($field, $dimensionMissing, true)) {
-                                $dimensionMissing[] = $field;
-                            }
-                        }
-                        $dimensionMissing = consus_missing_field_report($dimensionMissing, array_merge(CONSUS_DIMENSION_FIELDS, CONSUS_DIMENSION_OPTIONAL_FIELDS));
-                        if ((int) ($dimensionResult['count'] ?? 0) > 0 && $dimensionMissing !== []) {
-                            $addWarning(CONSUS_DIMENSION_ENTITY . ': velden niet beschikbaar (' . implode(', ', $dimensionMissing) . ').');
-                        }
                         if (!empty($dimensionResult['page_size_fallback'])) {
                             $addWarning(consus_page_size_warning(CONSUS_DIMENSION_ENTITY));
                         }
@@ -6209,9 +6179,7 @@ function consus_collect_company(
             }
         ));
         $checkpoint['companies'][$companyKey]['warnings'] = $warnings;
-        foreach (consus_planning_gap_warnings($items, $companyKey) as $planningWarning) {
-            $addWarning($planningWarning);
-        }
+        // Lege bestelpunten, veiligheidsvoorraad of afdelingen zijn invoer in BC, geen nightly-opmerking.
 
         $checkpoint['companies'][$companyKey]['warnings'] = $warnings;
 
@@ -6220,7 +6188,7 @@ function consus_collect_company(
         if (!empty($customerCatalog['ok'])) {
             $customers = $customerCatalog['customers'];
         } else {
-            $addWarning('Klantcatalogus niet geladen. Suggesties gebruiken alleen klantnummers uit de artikelposten tot Business Central de klantentiteit levert.');
+            $addWarning('Klantcatalogus (' . implode(', ', CONSUS_CUSTOMER_ENTITIES) . ') niet geladen: ' . implode(' | ', array_map('strval', $customerCatalog['errors'] ?? [])));
         }
 
         return [
