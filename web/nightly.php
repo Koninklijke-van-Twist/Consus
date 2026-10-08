@@ -384,6 +384,15 @@ $fullLedger = consus_nightly_full_ledger_requested(
 
 try {
     $snapshot = consus_run_nightly($force, $fullLedger);
+    // Perkins-retourkandidaten (#1159): los bestand, een fout raakt de snapshot niet.
+    $retourStatus = ['ok' => false, 'lines' => 0, 'error' => ''];
+    try {
+        require_once __DIR__ . '/consus_retour_fetch.php';
+        $retourData = consus_retour_refresh();
+        $retourStatus = ['ok' => true, 'lines' => count($retourData['lines'] ?? []), 'error' => ''];
+    } catch (Throwable $retourError) {
+        $retourStatus['error'] = consus_nightly_redact($retourError->getMessage());
+    }
     $payload = [
         'ok' => ($snapshot['errors'] ?? []) === [],
         'version' => (int) ($snapshot['version'] ?? CONSUS_SNAPSHOT_VERSION),
@@ -393,6 +402,7 @@ try {
         'warnings' => $snapshot['warnings'] ?? [],
         'errors' => $snapshot['errors'] ?? [],
         'locations' => $snapshot['locations'] ?? [],
+        'retour' => $retourStatus,
         'total_duration_ms' => (int) round((hrtime(true) - $startedAt) / 1_000_000),
     ];
 
@@ -438,6 +448,9 @@ try {
                 (string) ($error['error'] ?? '')
             );
         }
+        echo $retourStatus['ok']
+            ? sprintf("  retour: %d factuurregels\n", $retourStatus['lines'])
+            : sprintf("  WARN retour: %s\n", $retourStatus['error']);
         if ($payload['locations'] !== []) {
             echo '  locaties: ' . implode(', ', $payload['locations']) . "\n";
         }
