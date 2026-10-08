@@ -1,5 +1,10 @@
 <?php
 
+$retourDir = sys_get_temp_dir() . '/consus-xlsx-retour-' . getmypid();
+@mkdir($retourDir, 0700, true);
+putenv('CONSUS_RETOUR_SETTINGS_FILE=' . $retourDir . '/retour_settings.json');
+putenv('CONSUS_RETOUR_FILE=' . $retourDir . '/consus_retour.json');
+
 require_once __DIR__ . '/../web/consus_xlsx.php';
 
 function xlsx_assert(bool $condition, string $message): void
@@ -69,6 +74,35 @@ xlsx_assert($names === ['2026', '2025', '2024', '2023', 'Retourkandidaten', 'Fil
 foreach ($names as $name) {
     xlsx_assert(strlen($name) <= 31, 'sheetnaam blijft binnen 31 tekens');
 }
+$retourSheet = $sheets[4]['rows'];
+xlsx_assert(count($retourSheet) === 1 && $retourSheet[0][0] === 'Leverancier' && !in_array('Perkins-factuur', $retourSheet[0], true), 'zonder regels alleen de kop van de retourlijst');
+
+// Retourlijst met regels voor afdeling 15 (Perkins) en cache-data.
+$today = consus_retour_today();
+$invoiceDate = (new DateTimeImmutable($today . ' 00:00:00', new DateTimeZone('Europe/Amsterdam')))->modify('-10 days')->format('Y-m-d');
+file_put_contents(getenv('CONSUS_RETOUR_FILE'), json_encode([
+    'generated_at' => '2026-10-08T02:00:00+00:00',
+    'vendors' => ['90101'],
+    'types_by_vendor' => ['90101' => ['57401', '57420']],
+    'lines' => [
+        ['invoice' => 'PI1', 'vendor' => '90101', 'vendor_invoice' => '9024', 'document_date' => $invoiceDate, 'item' => 'PK-1', 'description' => 'Filter', 'quantity' => 1, 'unit_cost' => 80, 'order_no' => 'PO1', 'department' => '15'],
+        ['invoice' => 'PI2', 'vendor' => '90101', 'vendor_invoice' => '9025', 'document_date' => $invoiceDate, 'item' => 'PK-2', 'description' => 'Pomp', 'quantity' => 1, 'unit_cost' => 80, 'order_no' => 'PO2', 'department' => '80'],
+    ],
+    'orders' => ['PO1' => ['found' => true, 'egt' => false, 'csv' => true]],
+    'items' => [
+        'PK-1' => ['safety_stock' => 0, 'stock' => ['HVT' => 1], 'bin' => ['HVT' => 1], 'reserved' => 0, 'reserved_return' => 0],
+        'PK-2' => ['safety_stock' => 0, 'stock' => ['HVT' => 1], 'bin' => ['HVT' => 1], 'reserved' => 0, 'reserved_return' => 0],
+    ],
+]));
+consus_retour_rule_save('15', ['vendor' => '90101', 'type' => '57401', 'window' => 30, 'min_value' => 50]);
+consus_retour_rule_save('15', ['vendor' => '90101', 'type' => '57420', 'window' => 90, 'min_value' => 50]);
+$retourRows = consus_xlsx_sheets($snapshot, $prefs, ['company' => 'kvt', 'cost_center' => '', 'retour_afdeling' => '15'])[4]['rows'];
+xlsx_assert(count($retourRows) === 2 && $retourRows[1][0] === '90101' && $retourRows[1][1] === 'Voorraad (57420)' && $retourRows[1][5] === 'PK-1', 'retourlijst voor afdeling 15');
+xlsx_assert(!preg_match('/^\d{4}-/', (string) $retourRows[1][4]), 'factuurdatum in Nederlandse notatie');
+$retourAll = consus_xlsx_sheets($snapshot, $prefs, ['company' => 'kvt', 'cost_center' => ''])[4]['rows'];
+xlsx_assert(count($retourAll) === 2, 'zonder afdeling: alleen afdelingen met regels (80 heeft er geen)');
+array_map('unlink', glob($retourDir . '/*') ?: []);
+@rmdir($retourDir);
 
 $headers = consus_usage_column_labels();
 foreach (array_slice($sheets, 0, 4) as $sheet) {

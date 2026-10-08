@@ -438,7 +438,14 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         <?php endif; ?>
     </section>
 
-    <?php consus_retour_page_section($costFilter, $companyFilter, (int) $activeYear, $csrf, $departmentChoices); ?>
+    <?php
+    // Retourlijst: eigen afdelingskeuze; zonder keuze de afdeling uit het filter.
+    $retourDepartment = array_key_exists('retour_afdeling', $query)
+        ? trim((string) $query['retour_afdeling'])
+        : ($costFilter !== '__none__' ? $costFilter : '');
+    $retourError = in_array((string) ($query['retour_fout'] ?? ''), ['regel', 'opslaan'], true) ? (string) $query['retour_fout'] : '';
+    consus_retour_page_section($retourDepartment, $costFilter, $companyFilter, (int) $activeYear, $csrf, $departmentChoices, $retourError);
+    ?>
 
     <p class="footnote">Verbruik in een maand, kwartaal of jaar is Sale (hoeveelheid met omgedraaid teken, retouren trekken af<?= CONSUS_USAGE_INCLUDES_SALE ? '' : ', nu uitgeschakeld' ?>)<?= CONSUS_USAGE_INCLUDES_INTERNAL ? ' plus intern verbruik' : '' ?>. Intern verbruik is Negative Adjmt. met documentnummer WO plus Assembly Consumption, op Item_No, Quantity en Posting_Date. Het totaal is de som van de twaalf maanden en gelijk aan de som van de vier kwartalen. Cijfers komen uit de nachtelijke snapshot<?= $hasCache && $asOf !== '' ? ' t/m ' . consus_h(consus_format_dutch_date(new DateTimeImmutable($asOf . ' 00:00:00', new DateTimeZone('Europe/Amsterdam')))) : '' ?>. Gemiddeld verbruik in de modal loopt over <?= consus_h(consus_nl_year_list(consus_average_years($windows))) ?>.</p>
 </main>

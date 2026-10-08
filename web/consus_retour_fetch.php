@@ -1,7 +1,8 @@
 <?php
 
 /**
- * Nachtelijke BC-fetch voor de Perkins-retourkandidaten (#1159).
+ * Nachtelijke BC-fetch voor de Retourlijst (#1159), voor de leveranciers uit de
+ * regels van alle afdelingen. Geen regels = geen fetch.
  * Gebruikt consus_each_entity_rows: Mímir eerst (max_age van nightly, 4 uur),
  * daarna het directe BC-pad; een geweigerd optioneel veld wordt uit $select gehaald.
  */
@@ -67,6 +68,7 @@ function consus_retour_compact_lines(array $rawLines, array $headers): array
         }
         $lines[] = [
             'invoice' => $invoice,
+            'vendor' => (string) ($headers[$invoice]['vendor'] ?? ''),
             'vendor_invoice' => $headers[$invoice]['vendor_invoice'],
             'document_date' => $headers[$invoice]['document_date'],
             'item' => (string) $raw['No'],
@@ -127,22 +129,37 @@ function consus_retour_build(string $company, array $settings, ?callable $each =
     $each ??= static function (string $company, string $entitySet, array $required, array $optional, string $filter, callable $onRow): void {
         consus_each_entity_rows($company, $entitySet, $required, $optional, $filter, $onRow);
     };
-    $vendor = "Buy_from_Vendor_No eq '" . CONSUS_RETOUR_VENDOR . "'";
+    $vendors = consus_retour_rule_vendors($settings);
     $warnings = [];
-
-    $minStart = CONSUS_RETOUR_DEFAULTS['start_date'];
-    foreach ($settings['departments'] ?? [] as $rule) {
-        $start = consus_retour_parse_date($rule['start_date'] ?? '');
-        if ($start !== '' && $start < $minStart) {
-            $minStart = $start;
-        }
+    // Ruim venster: een langere termijn in de regels werkt dan direct, zonder nieuwe nightly.
+    $days = max(CONSUS_RETOUR_FETCH_DAYS, consus_retour_max_window($settings));
+    $minStart = (new DateTimeImmutable($today . ' 00:00:00', new DateTimeZone('Europe/Amsterdam')))->modify('-' . $days . ' days')->format('Y-m-d');
+    $typesByVendor = [];
+    foreach ($vendors as $vendorNo) {
+        $typesByVendor[$vendorNo] = consus_retour_vendor_types($vendorNo);
     }
+    $empty = [
+        'generated_at' => gmdate('c'),
+        'company' => $company,
+        'fetched_from' => $minStart,
+        'vendors' => $vendors,
+        'types_by_vendor' => $typesByVendor,
+        'lines' => [],
+        'orders' => [],
+        'items' => [],
+        'warnings' => [],
+    ];
+    if ($vendors === []) {
+        return $empty;
+    }
+    $vendor = consus_retour_odata_or('Buy_from_Vendor_No', $vendors);
 
     $headers = [];
-    $each($company, 'GeboekteInkoopfacturen', ['No', 'Document_Date'], ['Vendor_Invoice_No', 'Posting_Date'], $vendor . ' and Document_Date ge ' . $minStart, static function (array $row) use (&$headers): void {
+    $each($company, 'GeboekteInkoopfacturen', ['No', 'Document_Date', 'Buy_from_Vendor_No'], ['Vendor_Invoice_No', 'Posting_Date'], $vendor . ' and Document_Date ge ' . $minStart, static function (array $row) use (&$headers): void {
         $no = (string) ($row['No'] ?? '');
         if ($no !== '') {
             $headers[$no] = [
+                'vendor' => consus_retour_normalize_vendor($row['Buy_from_Vendor_No'] ?? ''),
                 'vendor_invoice' => trim((string) ($row['Vendor_Invoice_No'] ?? '')),
                 'document_date' => consus_retour_parse_date($row['Document_Date'] ?? ''),
             ];
@@ -156,18 +173,13 @@ function consus_retour_build(string $company, array $settings, ?callable $each =
         });
     }
     $lines = consus_retour_compact_lines($rawLines, $headers);
-    // Regels waarvan elke termijn al voorbij is, hebben geen artikeldata nodig.
-    $maxWindow = 0;
-    foreach ($settings['departments'] ?? [] as $rule) {
-        $maxWindow = max($maxWindow, (int) ($rule['window_spoed'] ?? 0), (int) ($rule['window_voorraad'] ?? 0));
-    }
-    $oldest = (new DateTimeImmutable($today . ' 00:00:00', new DateTimeZone('Europe/Amsterdam')))->modify('-' . $maxWindow . ' days')->format('Y-m-d');
-    $lines = array_values(array_filter($lines, static fn (array $line): bool => $line['document_date'] !== '' && $line['document_date'] >= $oldest));
+    $lines = array_values(array_filter($lines, static fn (array $line): bool => $line['document_date'] !== '' && $line['document_date'] >= $minStart));
 
     $poNumbers = [];
     $itemNumbers = [];
     foreach ($lines as $line) {
-        if ($line['order_no'] !== '') {
+        // PO-vlaggen alleen voor leveranciers waarvan de type-provider types afleidt.
+        if ($line['order_no'] !== '' && ($typesByVendor[$line['vendor']] ?? []) !== []) {
             $poNumbers[$line['order_no']] = true;
         }
         $itemNumbers[strtoupper($line['item'])] = $line['item'];
@@ -259,14 +271,11 @@ function consus_retour_build(string $company, array $settings, ?callable $each =
     }
 
     return [
-        'generated_at' => gmdate('c'),
-        'company' => $company,
-        'fetched_from' => $minStart,
         'lines' => $lines,
         'orders' => $orders,
         'items' => $items,
         'warnings' => $warnings,
-    ];
+    ] + $empty;
 }
 
 /** @return array<string, array<string, float>> */
@@ -290,6 +299,11 @@ function consus_retour_collect_bins(callable $each, string $company, string $ent
  */
 function consus_retour_refresh(): array
 {
+    $settings = consus_retour_settings_read();
+    if (consus_retour_rule_vendors($settings) === []) {
+        // Geen regels in welke afdeling dan ook: niets ophalen.
+        return ['skipped' => true, 'lines' => []];
+    }
     $GLOBALS['consus_odata_max_age'] = CONSUS_NIGHTLY_MAX_AGE;
     $discovered = auth_discover_companies_across_active_environments();
     $names = is_array($discovered['companies'] ?? null) ? $discovered['companies'] : [];
@@ -300,9 +314,9 @@ function consus_retour_refresh(): array
         }
     }
     if ($company === '') {
-        throw new RuntimeException('Hunter van Twist niet gevonden voor de Perkins-retourlijst.');
+        throw new RuntimeException('Hunter van Twist niet gevonden voor de Retourlijst.');
     }
-    $data = consus_retour_build($company, consus_retour_settings_read());
+    $data = consus_retour_build($company, $settings);
     consus_write_json_locked(consus_retour_data_file(), $data);
 
     return $data;

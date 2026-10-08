@@ -236,9 +236,10 @@ function consus_xlsx_sheets(array $snapshot, array $prefs, array $query): array
             $excludedItems[$index] ?? '',
         ];
     }
-    // Perkins-retourkandidaten (#1159), zelfde afdelingsfilter als de pagina.
+    // Retourlijst (#1159): gekozen afdeling, anders alle afdelingen met regels.
+    $retourDepartment = consus_retour_valid_department(trim((string) ($query['retour_afdeling'] ?? $costCenter)));
     $sheets[] = consus_retour_export_sheet(
-        consus_retour_candidates(consus_retour_read_data(), consus_retour_settings_read(), consus_retour_today(), $costCenter)
+        consus_retour_candidates(consus_retour_read_data(), consus_retour_settings_read(), consus_retour_today(), $retourDepartment)
     );
     $sheets[] = [
         'name' => 'Filters',
