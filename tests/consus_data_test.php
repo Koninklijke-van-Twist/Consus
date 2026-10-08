@@ -318,6 +318,22 @@ test_assert($departmentChoices[0]['value'] === '__none__' && $departmentChoices[
 test_assert($departmentChoices[1]['value'] === '5' && $departmentChoices[1]['label'] === '05 - Werkplaats', 'dropdown toont code - naam');
 test_assert($departmentChoices[2]['label'] === '20 - Inkoop', 'catalogusafdeling zonder regel blijft kiesbaar');
 test_assert(count($departmentChoices) === 3, 'HVT-afdeling zit niet in het KVT-filter');
+$leakChoices = consus_department_choices([], [
+    ['company_key' => '', 'code' => '15', 'name' => 'Zonder bedrijf', 'label' => '15 - Zonder bedrijf'],
+    ['company_key' => 'hvt', 'code' => '15', 'name' => 'Niet gebruiken', 'label' => '15 - Niet gebruiken'],
+], 'kvt');
+test_assert($leakChoices === [], 'afdeling zonder bedrijf of van HVT lekt niet naar KVT');
+$merged = consus_department_catalog_merge_passes([
+    'SALES_DEPARTMENT' => [
+        ['Dimension_Code' => 'SALES_DEPARTMENT', 'Code' => '90', 'Name' => 'Voorraad', 'Blocked' => false],
+        ['Dimension_Code' => 'SALES_DEPARTMENT', 'Code' => '15', 'Name' => 'Niet gebruiken', 'Blocked' => false],
+    ],
+    'COST_CENTER' => [
+        ['Dimension_Code' => 'COST_CENTER', 'Code' => '15', 'Name' => 'Andere naam', 'Blocked' => false],
+        ['Dimension_Code' => 'COST_CENTER', 'Code' => '80', 'Name' => 'Spoed', 'Blocked' => false],
+    ],
+]);
+test_assert(array_column($merged, 'label') === ['15 - Niet gebruiken', '80 - Spoed', '90 - Voorraad'], 'live lijst: hoofddimensie wint, terugval vult aan, gesorteerd');
 $departmentSnapshot = [
     'rows' => [
         ['company_key' => 'kvt', 'cost_center' => '5', 'vendor_no' => '', 'location' => '', 'inventory' => 4, 'safety_stock' => 1, 'reorder_point' => 0, 'item_nos' => ['D1' => true], 'item_count' => 1],

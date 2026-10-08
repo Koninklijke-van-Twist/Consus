@@ -164,7 +164,8 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
 
     $rows = is_array($snapshot['rows'] ?? null) ? $snapshot['rows'] : [];
     $departmentCatalog = is_array($snapshot['departments'] ?? null) ? $snapshot['departments'] : [];
-    $departmentChoices = $usageAvailable ? consus_department_choices($rows, $departmentCatalog, $companyFilter) : [];
+    // Afdelingen per bedrijf (code én naam uit dát bedrijf); bij "Alle" geen afdelingskeuze.
+    $departmentChoices = consus_page_department_choices($rows, $departmentCatalog, $companyName, $companyFilter);
     if ($companyName !== '') {
         // Afdelingen met retourregels of retourdata van dit bedrijf horen er ook bij.
         $departmentChoices = consus_retour_department_choices($departmentChoices, $companyName, $costFilter, !$usageAvailable);
@@ -373,6 +374,9 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                 <label for="cost_center">Afdeling</label>
                 <select id="cost_center" name="cost_center">
                     <option value="">Alle afdelingen</option>
+                    <?php if ($companyName === ''): ?>
+                        <option value="" disabled>Kies eerst een bedrijf: afdelingen verschillen per bedrijf</option>
+                    <?php endif; ?>
                     <?php foreach ($departmentChoices as $departmentChoice): ?>
                         <?php
                         $departmentValue = (string) ($departmentChoice['value'] ?? '');

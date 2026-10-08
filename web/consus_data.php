@@ -733,6 +733,32 @@ function consus_department_catalog_from_rows(array $rows, string $dimensionCode)
 }
 
 /**
+ * Zelfde samenvoeging als de nightly: eerst de dimensie uit
+ * GeneralLedgerSetup, dan de terugvaldimensie; per code de eerste naam.
+ *
+ * @param array<string, array<int, mixed>> $rowsByPass
+ * @return array<int, array{code:string,name:string,label:string}>
+ */
+function consus_department_catalog_merge_passes(array $rowsByPass): array
+{
+    $catalog = [];
+    $seen = [];
+    foreach ($rowsByPass as $passCode => $rows) {
+        foreach (consus_department_catalog_from_rows((array) $rows, (string) $passCode) as $entry) {
+            $code = (string) ($entry['code'] ?? '');
+            if ($code === '' || isset($seen[$code])) {
+                continue;
+            }
+            $seen[$code] = true;
+            $catalog[] = ['code' => $code, 'name' => (string) $entry['name'], 'label' => (string) $entry['label']];
+        }
+    }
+    usort($catalog, static fn (array $a, array $b): int => ((int) $a['code']) <=> ((int) $b['code']));
+
+    return $catalog;
+}
+
+/**
  * @return array<int, string>
  */
 function consus_dimension_filters_for_code(string $code): array
@@ -3262,6 +3288,7 @@ function consus_department_options(array $rows, string $companyKey): array
 /**
  * Dropdown: catalogusnamen als `code - naam`, plus (geen afdeling) als een
  * regel leeg is. De waarde is de genormaliseerde code (`05` en `5` zijn gelijk).
+ * Met een bedrijfssleutel tellen alleen entries met precies die company_key.
  *
  * @param array<int, array<string, mixed>> $rows
  * @param array<int, array<string, mixed>> $catalog
@@ -3275,7 +3302,8 @@ function consus_department_choices(array $rows, array $catalog, string $companyK
             continue;
         }
         $entryCompany = (string) ($entry['company_key'] ?? '');
-        if ($companyKey !== '' && $entryCompany !== '' && $entryCompany !== $companyKey) {
+        // Afdelingen verschillen per bedrijf: een entry zonder bedrijf hoort bij geen enkel gekozen bedrijf.
+        if ($companyKey !== '' && $entryCompany !== $companyKey) {
             continue;
         }
         $code = trim((string) ($entry['code'] ?? ''));

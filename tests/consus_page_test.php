@@ -5,6 +5,18 @@ $pageTmp = sys_get_temp_dir() . '/consus-page-test-' . getmypid();
 putenv('CONSUS_COMPANY_CATALOG_FILE=' . $pageTmp . '/companies.json');
 putenv('CONSUS_RETOUR_SETTINGS_FILE=' . $pageTmp . '/retour_settings.json');
 putenv('CONSUS_RETOUR_FILE=' . $pageTmp . '/consus_retour.json');
+putenv('CONSUS_DEPARTMENT_CATALOG_FILE=' . $pageTmp . '/departments.json');
+// Geen live BC in tests: KVT Germany krijgt zijn eigen lijst via deze fetcher.
+$GLOBALS['consus_department_catalog_fetcher'] = static function (string $company): array {
+    if ($company !== 'KVT Germany GmbH') {
+        throw new RuntimeException('onverwachte live fetch voor ' . $company);
+    }
+
+    return [
+        ['code' => '10', 'name' => 'Vertrieb', 'label' => '10 - Vertrieb'],
+        ['code' => '15', 'name' => 'Lager Deutschland', 'label' => '15 - Lager Deutschland'],
+    ];
+};
 
 require_once __DIR__ . '/../web/consus_page.php';
 
@@ -174,6 +186,60 @@ ob_start();
 consus_page_render(page_snapshot(5), consus_empty_prefs(), ['company' => 'KVT Germany GmbH'], 'tok', $catalog);
 $germanyHtml = (string) ob_get_clean();
 page_assert(str_contains($germanyHtml, 'alleen voor KVT en HVT') && !str_contains($germanyHtml, 'id="export-link"'), 'Germany: geen verbruikstabel en geen export');
+
+// Afdelingen per bedrijf: zelfde code, andere naam; nooit gedeeld.
+$deptSnapshot = page_snapshot(1);
+$deptSnapshot['rows'] = [
+    ['company_key' => 'kvt', 'cost_center' => '15', 'vendor_no' => '', 'location' => ''],
+    ['company_key' => 'hvt', 'cost_center' => '90', 'vendor_no' => '', 'location' => ''],
+    ['company_key' => 'hvt', 'cost_center' => '80', 'vendor_no' => '', 'location' => ''],
+];
+$deptSnapshot['departments'] = [
+    ['company_key' => 'kvt', 'code' => '15', 'name' => 'Perkins', 'label' => '15 - Perkins'],
+    ['company_key' => 'kvt', 'code' => '20', 'name' => 'Inkoop KvT', 'label' => '20 - Inkoop KvT'],
+    ['company_key' => 'hvt', 'code' => '15', 'name' => 'Niet gebruiken enkel bij KVT van Hunter & van Twist', 'label' => '15 - Niet gebruiken enkel bij KVT van Hunter & van Twist'],
+    ['company_key' => 'hvt', 'code' => '80', 'name' => 'Spoed', 'label' => '80 - Spoed'],
+    ['company_key' => 'hvt', 'code' => '90', 'name' => 'Voorraad', 'label' => '90 - Voorraad'],
+    ['company_key' => '', 'code' => '42', 'name' => 'Zonder bedrijf', 'label' => '42 - Zonder bedrijf'],
+];
+$hvtChoices = array_column(consus_page_department_choices($deptSnapshot['rows'], $deptSnapshot['departments'], 'Hunter van Twist', 'hvt'), 'label', 'value');
+page_assert($hvtChoices === ['15' => '15 - Niet gebruiken enkel bij KVT van Hunter & van Twist', '80' => '80 - Spoed', '90' => '90 - Voorraad'], 'Hunter: eigen namen, 15/80/90, niets van KvT of zonder bedrijf');
+$kvtChoices = array_column(consus_page_department_choices($deptSnapshot['rows'], $deptSnapshot['departments'], 'Koninklijke van Twist', 'kvt'), 'label', 'value');
+page_assert($kvtChoices === ['15' => '15 - Perkins', '20' => '20 - Inkoop KvT'], 'KvT: eigen namen, 15 is Perkins');
+page_assert(consus_page_department_choices($deptSnapshot['rows'], $deptSnapshot['departments'], '', '') === [], 'Alle: geen gedeelde afdelingslijst');
+$deChoices = array_column(consus_page_department_choices($deptSnapshot['rows'], $deptSnapshot['departments'], 'KVT Germany GmbH', ''), 'label', 'value');
+page_assert($deChoices === ['10' => '10 - Vertrieb', '15' => '15 - Lager Deutschland'], 'Germany: eigen lijst uit BC met namen');
+$cachedDepartments = json_decode((string) file_get_contents($pageTmp . '/departments.json'), true);
+page_assert(array_column($cachedDepartments['companies']['kvt germany gmbh']['departments'] ?? [], 'code') === ['10', '15'], 'lijst per bedrijf bewaard onder de BC Name');
+page_assert(!isset($cachedDepartments['companies']['hunter van twist']), 'Hunter komt uit de nachtcache, niet uit een gedeelde lijst');
+unset($GLOBALS['consus_department_catalog_memo']);
+page_assert(count(consus_company_department_catalog('KVT Germany GmbH', true, static function (): array { throw new RuntimeException('niet nodig'); })) === 2, 'verse lijst: geen nieuwe fetch');
+// Nachtcache zonder lijst voor HVT: HVT haalt zijn eigen lijst op, niet die van KvT.
+unset($GLOBALS['consus_department_catalog_memo']);
+$hvtOwn = consus_page_department_choices([], [$deptSnapshot['departments'][0]], 'Hunter van Twist', 'hvt', static fn (string $company): array => $company === 'Hunter van Twist' ? [['code' => '90', 'name' => 'Voorraad']] : []);
+page_assert(array_column($hvtOwn, 'label') === ['90 - Voorraad'], 'HVT zonder nachtlijst: eigen lijst uit BC, geen KvT-namen');
+// Mislukte fetch: geen namen van een ander bedrijf, over een uur opnieuw.
+unset($GLOBALS['consus_department_catalog_memo']);
+page_assert(consus_company_department_catalog('Ander Bedrijf', true, static function (): array { throw new RuntimeException('BC weg'); }) === [], 'mislukte fetch: lege lijst');
+$retry = json_decode((string) file_get_contents($pageTmp . '/departments.json'), true)['companies']['ander bedrijf'] ?? [];
+page_assert((int) ($retry['fetched_at'] ?? 0) < time() - CONSUS_DEPARTMENT_CATALOG_TTL + 3700, 'mislukte fetch: over een uur opnieuw');
+
+ob_start();
+consus_page_render($deptSnapshot, consus_empty_prefs(), ['company' => 'Hunter van Twist'], 'tok', $catalog);
+$hvtHtml = (string) ob_get_clean();
+page_assert(str_contains($hvtHtml, '15 - Niet gebruiken enkel bij KVT van Hunter &amp; van Twist') && !str_contains($hvtHtml, '15 - Perkins'), 'Hunter-dropdown toont de Hunter-naam van 15');
+ob_start();
+consus_page_render($deptSnapshot, consus_empty_prefs(), ['company' => 'Koninklijke van Twist'], 'tok', $catalog);
+$kvtHtml = (string) ob_get_clean();
+page_assert(str_contains($kvtHtml, '15 - Perkins') && !str_contains($kvtHtml, 'Niet gebruiken'), 'KvT-dropdown toont de KvT-naam van 15');
+ob_start();
+consus_page_render($deptSnapshot, consus_empty_prefs(), ['company' => '', 'cost_center' => '15'], 'tok', $catalog);
+$allHtml = (string) ob_get_clean();
+page_assert(str_contains($allHtml, 'Kies eerst een bedrijf') && !str_contains($allHtml, '<option value="15"'), 'Alle: geen afdelingsfilter over bedrijven heen');
+ob_start();
+consus_page_render($deptSnapshot, consus_empty_prefs(), ['company' => 'KVT Germany GmbH'], 'tok', $catalog);
+$deHtml = (string) ob_get_clean();
+page_assert(str_contains($deHtml, '15 - Lager Deutschland') && !str_contains($deHtml, '15 - Perkins'), 'Germany-dropdown toont eigen namen');
 
 array_map('unlink', glob($pageTmp . '/*') ?: []);
 @rmdir($pageTmp);

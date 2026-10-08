@@ -203,3 +203,186 @@ function consus_company_resolve(string $value, array $companies): ?array
 
     return null;
 }
+
+/*
+ * Afdelingen per bedrijf. De afdelingen (Globale dimensie 1) verschillen per
+ * BC-bedrijf: in Hunter van Twist is 15 "Niet gebruiken", in Koninklijke van
+ * Twist is 15 Perkins. Er is dus nooit één gedeelde lijst. KVT en HVT krijgen
+ * hun lijst uit de nachtcache (per company_key). Een bedrijf zonder lijst in
+ * de nachtcache (zoals KVT Germany) haalt zijn eigen lijst op: de dimensiecode
+ * uit GeneralLedgerSetup en de namen uit DimensionValueList, in dát bedrijf
+ * (Mímir eerst, anders direct BC). 24 uur bewaard in
+ * web/data/consus_departments.json, per BC Name.
+ */
+
+const CONSUS_DEPARTMENT_CATALOG_TTL = 86400;
+
+function consus_department_catalog_file(): string
+{
+    $override = getenv('CONSUS_DEPARTMENT_CATALOG_FILE');
+    if (is_string($override) && trim($override) !== '') {
+        return trim($override);
+    }
+
+    return __DIR__ . '/data/consus_departments.json';
+}
+
+/**
+ * Afdelingslijst van één bedrijf live uit BC (in dat bedrijf).
+ *
+ * @return array<int, array{code:string,name:string,label:string}>
+ */
+function consus_department_catalog_fetch_live(string $company): array
+{
+    $dimensionCode = '';
+    consus_each_entity_rows($company, CONSUS_GL_SETUP_ENTITY, CONSUS_GL_SETUP_FIELDS, [], '', static function (array $row) use (&$dimensionCode): void {
+        $code = trim(consus_scalar_string($row['Global_Dimension_1_Code'] ?? ''));
+        if ($code !== '') {
+            $dimensionCode = $code;
+        }
+    });
+    if ($dimensionCode === '') {
+        throw new RuntimeException(CONSUS_GL_SETUP_ENTITY . ' van ' . $company . ' heeft geen Global_Dimension_1_Code.');
+    }
+    $rowsByPass = [];
+    foreach (array_keys(consus_department_dimension_passes($dimensionCode)) as $passCode) {
+        $rowsByPass[(string) $passCode] = [];
+        try {
+            consus_each_dimension_value_rows($company, (string) $passCode, static function (array $row) use (&$rowsByPass, $passCode): void {
+                $rowsByPass[(string) $passCode][] = $row;
+            });
+        } catch (Throwable $error) {
+            if ((string) $passCode === $dimensionCode) {
+                throw $error;
+            }
+            // Terugvaldimensie bestaat niet in elk bedrijf.
+        }
+    }
+
+    return consus_department_catalog_merge_passes($rowsByPass);
+}
+
+/**
+ * Afdelingslijst van één bedrijf (BC Name). Verse cache (24 uur) eerst; anders
+ * één live ophaalactie; mislukt die, dan de oude lijst van dit bedrijf (of
+ * leeg) en over een uur opnieuw. Nooit de lijst van een ander bedrijf.
+ *
+ * @param callable|null $fetch fn(string $company): array<int, array{code:string,name:string,label:string}>
+ * @return array<int, array{code:string,name:string,label:string}>
+ */
+function consus_company_department_catalog(string $company, bool $allowLive = true, ?callable $fetch = null): array
+{
+    $company = trim($company);
+    $slot = mb_strtolower(preg_replace('/\s+/u', ' ', $company) ?? '');
+    if ($slot === '') {
+        return [];
+    }
+    $memo = $GLOBALS['consus_department_catalog_memo'][$slot] ?? null;
+    if (is_array($memo) && $fetch === null) {
+        return $memo;
+    }
+    $path = consus_department_catalog_file();
+    $raw = is_file($path) ? json_decode((string) @file_get_contents($path), true) : null;
+    $cached = is_array($raw['companies'][$slot] ?? null) ? $raw['companies'][$slot] : null;
+    $cachedList = consus_department_catalog_clean(is_array($cached['departments'] ?? null) ? $cached['departments'] : []);
+    if ($cached !== null && (time() - (int) ($cached['fetched_at'] ?? 0)) < CONSUS_DEPARTMENT_CATALOG_TTL) {
+        return $GLOBALS['consus_department_catalog_memo'][$slot] = $cachedList;
+    }
+    if (!$allowLive) {
+        return $GLOBALS['consus_department_catalog_memo'][$slot] = $cachedList;
+    }
+    $fetch ??= $GLOBALS['consus_department_catalog_fetcher'] ?? null;
+    $fetch ??= static function (string $company): array {
+        if (!function_exists('auth_get_environment_for_company')) {
+            throw new RuntimeException('Geen BC-verbinding beschikbaar.');
+        }
+
+        return consus_department_catalog_fetch_live($company);
+    };
+    $list = $cachedList;
+    $fetchedAt = time() - CONSUS_DEPARTMENT_CATALOG_TTL + 3600;
+    try {
+        $fresh = consus_department_catalog_clean((array) $fetch($company));
+        if ($fresh !== []) {
+            $list = $fresh;
+            $fetchedAt = time();
+        }
+    } catch (Throwable $ignored) {
+        // BC of Mímir niet bereikbaar: oude lijst van dit bedrijf, over een uur opnieuw.
+    }
+    try {
+        consus_update_json_locked($path, static function (array $previous) use ($slot, $company, $list, $fetchedAt): array {
+            $companies = is_array($previous['companies'] ?? null) ? $previous['companies'] : [];
+            $companies[$slot] = ['name' => $company, 'fetched_at' => $fetchedAt, 'departments' => $list];
+
+            return ['version' => 1, 'companies' => $companies];
+        });
+    } catch (Throwable $ignored) {
+    }
+
+    return $GLOBALS['consus_department_catalog_memo'][$slot] = $list;
+}
+
+/**
+ * @param array<int, mixed> $entries
+ * @return array<int, array{code:string,name:string,label:string}>
+ */
+function consus_department_catalog_clean(array $entries): array
+{
+    $out = [];
+    foreach ($entries as $entry) {
+        if (!is_array($entry)) {
+            continue;
+        }
+        $code = trim((string) ($entry['code'] ?? ''));
+        $name = trim((string) ($entry['name'] ?? ''));
+        if ($code === '') {
+            continue;
+        }
+        $label = trim((string) ($entry['label'] ?? ''));
+        $out[] = ['code' => $code, 'name' => $name, 'label' => $label !== '' ? $label : ($name !== '' ? $code . ' - ' . $name : $code)];
+    }
+
+    return $out;
+}
+
+/**
+ * Afdelingskeuzes voor het gekozen bedrijf, alleen uit de lijst van dát
+ * bedrijf. Bij "Alle" is er geen afdelingskeuze: dezelfde code betekent per
+ * bedrijf iets anders (15 is Perkins bij KvT, "Niet gebruiken" bij HVT).
+ *
+ * @param array<int, array<string, mixed>> $rows
+ * @param array<int, array<string, mixed>> $snapshotCatalog
+ * @param callable|null $fetch zie consus_company_department_catalog
+ * @return array<int, array{value:string,label:string}>
+ */
+function consus_page_department_choices(array $rows, array $snapshotCatalog, string $companyName, string $companyKey, ?callable $fetch = null): array
+{
+    if (trim($companyName) === '') {
+        return [];
+    }
+    $own = [];
+    if ($companyKey !== '') {
+        foreach ($snapshotCatalog as $entry) {
+            if (is_array($entry) && (string) ($entry['company_key'] ?? '') === $companyKey) {
+                $own[] = $entry;
+            }
+        }
+    }
+    if ($own === []) {
+        // Geen lijst in de nachtcache voor dit bedrijf: eigen lijst uit BC.
+        foreach (consus_company_department_catalog($companyName, true, $fetch) as $entry) {
+            $entry['company_key'] = $companyKey;
+            $own[] = $entry;
+        }
+    }
+    if ($companyKey === '') {
+        // Buiten de nachtcache: geen verbruiksregels, alleen de namen van dit bedrijf.
+        $rows = [];
+        foreach ($own as $index => $entry) {
+            $own[$index]['company_key'] = '';
+        }
+    }
+
+    return consus_department_choices($rows, $own, $companyKey);
+}
