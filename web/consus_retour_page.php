@@ -1,49 +1,81 @@
 <?php
 
 require_once __DIR__ . '/consus_retour.php';
+require_once __DIR__ . '/consus_usage.php';
 
 /**
- * Sectie "Retourlijst": afdeling kiezen, regels beheren (gedeeld voor alle
- * gebruikers), kandidaten met detailmodal en garantiemarkering.
+ * Afdelingskeuzes voor de pagina aangevuld met de afdelingen die bij dit
+ * bedrijf retourregels of retourdata hebben. $keepRequested: een bedrijf
+ * buiten de nachtcache heeft geen afdelingslijst, dan blijft de gevraagde
+ * afdeling kiesbaar.
  *
- * @param array<int, array{value?:string,label?:string}> $departmentChoices
+ * @param array<int, array{value?:string,label?:string}> $choices
+ * @return array<int, array{value:string,label:string}>
  */
-function consus_retour_page_section(string $retourDepartment, string $costFilter, string $companyFilter, int $activeYear, string $csrf, array $departmentChoices, string $error = '', ?array $data = null, ?array $settings = null, ?string $today = null): void
+function consus_retour_department_choices(array $choices, string $company, string $requested, bool $keepRequested, ?array $settings = null, ?array $data = null): array
 {
-    $data ??= consus_retour_read_data();
     $settings ??= consus_retour_settings_read();
-    $today ??= consus_retour_today();
-    $department = consus_retour_valid_department($retourDepartment);
-    $h = static fn (mixed $value): string => htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-
-    // Afdelingen uit het Consus-filter plus afdelingen die al regels hebben.
-    $choices = [];
-    foreach ($departmentChoices as $choice) {
-        $key = consus_retour_valid_department((string) ($choice['value'] ?? ''));
-        if ($key !== '' && !isset($choices[$key])) {
-            $choices[$key] = (string) ($choice['label'] ?? $key);
+    $data ??= consus_retour_read_data($company);
+    $seen = [];
+    $out = [];
+    foreach ($choices as $choice) {
+        $value = (string) ($choice['value'] ?? '');
+        $seen[consus_retour_department_key($value)] = true;
+        $out[] = ['value' => $value, 'label' => (string) ($choice['label'] ?? $value)];
+    }
+    $extra = array_keys(consus_retour_company_rules($settings, $company));
+    foreach ((array) ($data['lines'] ?? []) as $line) {
+        if (is_array($line)) {
+            $extra[] = (string) ($line['department'] ?? '');
         }
     }
-    foreach (array_keys($settings['rules']) as $key) {
-        $choices[(string) $key] ??= (string) $key;
+    if ($keepRequested) {
+        $extra[] = $requested;
     }
-    if ($department !== '') {
-        $choices[$department] ??= $department;
+    $added = [];
+    foreach ($extra as $value) {
+        $key = consus_retour_valid_department((string) $value);
+        if ($key === '' || isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $added[] = ['value' => $key, 'label' => $key];
     }
-    uksort($choices, 'strnatcasecmp');
-    $departmentLabel = $department !== '' ? ($choices[$department] ?? $department) : '';
-    $rules = consus_retour_rules_for_department($settings, $department);
-    $result = $department !== '' && $rules !== [] ? consus_retour_candidates($data, $settings, $today, $department) : ['rows' => [], 'garantie' => [], 'skipped' => []];
+    usort($added, static fn (array $a, array $b): int => strnatcasecmp($a['value'], $b['value']));
+
+    return array_merge($out, $added);
+}
+
+/**
+ * Sectie "Retourlijst". Volgt bedrijf en afdeling van de keuze bovenaan de
+ * pagina (geen eigen afdelingskeuze). Toont alleen de kandidaten; de regels
+ * (per bedrijf per afdeling, gedeeld voor alle gebruikers) staan alleen in de
+ * modal "Regels beheren".
+ */
+function consus_retour_page_section(string $company, string $companyLabel, string $retourDepartment, string $departmentLabel, int $activeYear, string $csrf, string $error = '', ?array $data = null, ?array $settings = null, ?string $today = null): void
+{
+    $settings ??= consus_retour_settings_read();
+    $today ??= consus_retour_today();
+    $data ??= ($company !== '' ? consus_retour_read_data($company) : consus_retour_empty_data());
+    $department = consus_retour_valid_department($retourDepartment);
+    $h = static fn (mixed $value): string => htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    if ($departmentLabel === '' || consus_retour_valid_department($departmentLabel) === $department) {
+        $departmentLabel = $department;
+    }
+    $companyLabel = $companyLabel !== '' ? $companyLabel : consus_retour_company_label($company);
+    $ready = $company !== '' && $department !== '';
+    $rules = $ready ? consus_retour_rules_for($settings, $company, $department) : [];
+    $result = $rules !== [] ? consus_retour_candidates($data, $settings, $today, $company, $department) : ['rows' => [], 'garantie' => [], 'skipped' => []];
     $allRows = array_merge($result['rows'], $result['garantie']);
     $generated = trim((string) ($data['generated_at'] ?? ''));
-    $hidden = static function () use ($h, $csrf, $department, $companyFilter, $costFilter, $activeYear): string {
+    $hidden = static function () use ($h, $csrf, $company, $department, $activeYear): string {
         return '<input type="hidden" name="csrf" value="' . $h($csrf) . '">'
-            . '<input type="hidden" name="retour_afdeling" value="' . $h($department) . '">'
-            . '<input type="hidden" name="company" value="' . $h($companyFilter) . '">'
-            . '<input type="hidden" name="cost_center" value="' . $h($costFilter) . '">'
+            . '<input type="hidden" name="company" value="' . $h($company) . '">'
+            . '<input type="hidden" name="cost_center" value="' . $h($department) . '">'
             . '<input type="hidden" name="year" value="' . $h((string) $activeYear) . '">';
     };
-    $exportQuery = http_build_query(['afdeling' => $department], '', '&', PHP_QUERY_RFC3986);
+    $exportQuery = http_build_query(['bedrijf' => $company, 'afdeling' => $department], '', '&', PHP_QUERY_RFC3986);
+    $scopeLabel = 'afdeling ' . $departmentLabel . ' van ' . $companyLabel;
     ?>
     <style>
         .retour-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
@@ -77,42 +109,29 @@ function consus_retour_page_section(string $retourDepartment, string $costFilter
         <div class="panel-head retour-head">
             <div>
                 <h2>Retourlijst</h2>
-                <p>Onderdelen die nog terug kunnen naar de leverancier. Per afdeling bepalen regels (leverancier, type, termijn, minimaal bedrag) wat op de lijst komt. De termijn telt vanaf de factuurdatum; het minimum geldt per artikel per factuur. Alleen artikelen op voorraad, niet gereserveerd en zonder veiligheidsvoorraad. Klik op een regel voor details.</p>
+                <p>Onderdelen die nog terug kunnen naar de leverancier. Volgt het bedrijf en de afdeling hierboven. Per bedrijf en afdeling bepalen regels (leverancier, type, termijn, minimaal bedrag) wat op de lijst komt. De termijn telt vanaf de factuurdatum; het minimum geldt per artikel per factuur. Alleen artikelen op voorraad, niet gereserveerd en zonder veiligheidsvoorraad. Klik op een regel voor details.</p>
             </div>
         </div>
         <?php if ($error !== ''): ?>
             <div class="notice error"><?= $error === 'regel' ? 'Niet opgeslagen: vul leverancier, termijn (1–' . CONSUS_RETOUR_MAX_WINDOW . ' dagen), minimaal bedrag en eventueel een geldige typecode (letters/cijfers) in.' : 'Niet opgeslagen. Probeer het opnieuw.' ?></div>
         <?php endif; ?>
-        <form class="retour-pick" method="get" action="index.php#retour" id="retour-pick">
-            <input type="hidden" name="company" value="<?= $h($companyFilter) ?>">
-            <input type="hidden" name="cost_center" value="<?= $h($costFilter) ?>">
-            <input type="hidden" name="year" value="<?= $h((string) $activeYear) ?>">
-            <div class="field">
-                <label for="retour_afdeling">Afdeling voor de retourlijst</label>
-                <select id="retour_afdeling" name="retour_afdeling">
-                    <option value="">Kies een afdeling…</option>
-                    <?php foreach ($choices as $value => $label): ?>
-                        <option value="<?= $h($value) ?>"<?= $department === (string) $value ? ' selected' : '' ?>><?= $h($label) ?><?= isset($settings['rules'][$value]) ? ' (' . count($settings['rules'][$value]) . ' regel' . (count($settings['rules'][$value]) === 1 ? '' : 's') . ')' : '' ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <button class="filter-button" type="submit">Toon</button>
-            <?php if ($department !== ''): ?>
+        <?php if ($ready): ?>
+            <div class="retour-pick">
                 <button type="button" class="export-link" id="retour-rules-open">Regels beheren</button>
                 <?php if ($rules !== []): ?>
                     <a class="export-link" href="retour_export.php?<?= $h($exportQuery) ?>">Exporteer retourlijst (xlsx)</a>
                 <?php endif; ?>
-            <?php endif; ?>
-        </form>
+            </div>
+        <?php endif; ?>
 
-        <?php if ($department === ''): ?>
-            <div class="empty">Kies een afdeling om de retourkandidaten te zien.</div>
+        <?php if ($company === ''): ?>
+            <div class="empty">Kies bovenaan een bedrijf en een afdeling om de retourkandidaten te zien.</div>
+        <?php elseif ($department === ''): ?>
+            <div class="empty">Kies bovenaan een afdeling om de retourkandidaten van <?= $h($companyLabel) ?> te zien.</div>
         <?php elseif ($rules === []): ?>
-            <div class="empty">Nog geen regels voor deze afdeling. Voeg via <strong>Regels beheren</strong> een regel toe (leverancier, type, termijn, minimaal bedrag).</div>
+            <div class="empty">Nog geen regels voor <?= $h($scopeLabel) ?>. Voeg via <strong>Regels beheren</strong> een regel toe (leverancier, type, termijn, minimaal bedrag).</div>
         <?php else: ?>
-            <p class="muted">Regels voor <?= $h($departmentLabel) ?>:
-                <?php foreach ($rules as $index => $rule): ?><?= $index > 0 ? '; ' : '' ?><?= $h(consus_retour_rule_label($rule)) ?><?php $hint = consus_retour_rule_hint($rule, $data); if ($hint !== ''): ?> <span class="retour-hint">(<?= $h($hint) ?>)</span><?php endif; ?><?php endforeach; ?>.
-                <?= count($result['rows']) ?> kandidaten<?= $result['garantie'] !== [] ? ', ' . count($result['garantie']) . ' garantieregel(s) onderaan' : '' ?>. Gegevens van <?= $h($generated !== '' ? consus_format_dutch_datetime($generated) : 'nog niet opgehaald') ?>.</p>
+            <p class="muted"><?= $h(ucfirst($scopeLabel)) ?>: <?= count($result['rows']) ?> kandidaten<?= $result['garantie'] !== [] ? ', ' . count($result['garantie']) . ' garantieregel(s) onderaan' : '' ?>. Gegevens van <?= $h($generated !== '' ? consus_format_dutch_datetime($generated) : 'nog niet opgehaald') ?>.</p>
             <?php foreach ((array) ($data['warnings'] ?? []) as $warning): ?>
                 <div class="notice"><?= $h($warning) ?></div>
             <?php endforeach; ?>
@@ -203,18 +222,18 @@ function consus_retour_page_section(string $retourDepartment, string $costFilter
         <div class="modal-body" id="retour-detail-body"></div>
     </dialog>
 
-    <?php if ($department !== ''): ?>
+    <?php if ($ready): ?>
     <dialog id="retour-rules">
         <div class="modal-head">
             <div>
                 <h2>Regels retourlijst</h2>
-                <p class="muted">Afdeling <?= $h($departmentLabel) ?>. Gedeeld voor alle gebruikers.</p>
+                <p class="muted"><?= $h(ucfirst($scopeLabel)) ?>. Gedeeld voor alle gebruikers.</p>
             </div>
             <button type="button" class="modal-close" data-close aria-label="Sluiten">×</button>
         </div>
         <div class="modal-body">
             <?php if ($rules === []): ?>
-                <p class="muted">Nog geen regels voor deze afdeling.</p>
+                <p class="muted">Nog geen regels voor <?= $h($scopeLabel) ?>.</p>
             <?php else: ?>
                 <table class="retour-rules">
                     <thead><tr><th>Leverancier</th><th>Type</th><th>Termijn</th><th>Minimaal bedrag</th><th></th></tr></thead>
@@ -274,10 +293,6 @@ function consus_retour_page_section(string $retourDepartment, string $costFilter
             });
             dialog.addEventListener('click', function (event) { if (event.target === dialog) { dialog.close(); } });
         }
-        var pick = document.getElementById('retour-pick');
-        var select = document.getElementById('retour_afdeling');
-        if (pick && select) { select.addEventListener('change', function () { pick.submit(); }); }
-
         var detail = document.getElementById('retour-detail-modal');
         wire(detail);
         function openDetail(row) {

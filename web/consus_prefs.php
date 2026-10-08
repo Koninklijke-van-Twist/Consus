@@ -26,7 +26,24 @@ function consus_normalize_page_size($value): int
 }
 
 /**
- * @return array{customers:array<int, string>,items:array<int, string>,page_size:int}
+ * Bedrijf (BC Name, of leeg = alle) en afdeling per gebruiker. null = nog
+ * nooit gekozen; dan geldt de standaard van de pagina.
+ */
+function consus_prefs_normalize_choice(mixed $value): ?string
+{
+    if ($value === null || is_array($value)) {
+        return null;
+    }
+    $text = preg_replace('/\s+/u', ' ', trim((string) $value)) ?? '';
+    if (mb_strlen($text) > 80 || preg_match('/[\x00-\x1f<>"|\\\\]/', $text)) {
+        return null;
+    }
+
+    return $text;
+}
+
+/**
+ * @return array{customers:array<int, string>,items:array<int, string>,page_size:int,company:?string,cost_center:?string}
  */
 function consus_empty_prefs(): array
 {
@@ -34,6 +51,8 @@ function consus_empty_prefs(): array
         'customers' => [],
         'items' => [],
         'page_size' => CONSUS_DEFAULT_PAGE_SIZE,
+        'company' => null,
+        'cost_center' => null,
     ];
 }
 
@@ -96,7 +115,7 @@ function consus_prefs_normalize_list($value, int $limit = 500): array
 function consus_prefs_input_from_request(array $post): array
 {
     $input = [];
-    foreach (['customers', 'items', 'page_size'] as $key) {
+    foreach (['customers', 'items', 'page_size', 'company', 'cost_center'] as $key) {
         if (array_key_exists($key, $post)) {
             $input[$key] = $post[$key];
         }
@@ -115,6 +134,8 @@ function consus_prefs_from_array(array $decoded): array
         'customers' => consus_prefs_normalize_list($decoded['customers'] ?? []),
         'items' => consus_prefs_normalize_list($decoded['items'] ?? []),
         'page_size' => consus_normalize_page_size($decoded['page_size'] ?? CONSUS_DEFAULT_PAGE_SIZE),
+        'company' => consus_prefs_normalize_choice($decoded['company'] ?? null),
+        'cost_center' => consus_prefs_normalize_choice($decoded['cost_center'] ?? null),
     ];
 }
 
@@ -159,12 +180,22 @@ function consus_prefs_write(string $email, array $input): array
         if (array_key_exists('page_size', $input)) {
             $current['page_size'] = consus_normalize_page_size($input['page_size']);
         }
+        foreach (['company', 'cost_center'] as $choice) {
+            if (array_key_exists($choice, $input)) {
+                $value = consus_prefs_normalize_choice($input[$choice]);
+                if ($value !== null) {
+                    $current[$choice] = $value;
+                }
+            }
+        }
 
         return [
             'email' => $email,
             'customers' => $current['customers'],
             'items' => $current['items'],
             'page_size' => $current['page_size'],
+            'company' => $current['company'],
+            'cost_center' => $current['cost_center'],
         ];
     });
 

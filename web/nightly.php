@@ -367,6 +367,7 @@ if (PHP_SAPI !== 'cli') {
 }
 
 require_once __DIR__ . '/consus_data.php';
+require_once __DIR__ . '/consus_companies.php';
 
 $startedAt = hrtime(true);
 $GLOBALS['consus_progress_echo'] = PHP_SAPI === 'cli';
@@ -382,14 +383,34 @@ $fullLedger = consus_nightly_full_ledger_requested(
     $cliArgv
 );
 
+// ?retour=1 (of --retour / CONSUS_RETOUR_ONLY=1): alleen de Retourlijst verversen, snapshot ongemoeid.
+$retourOnly = consus_nightly_force_requested(
+    getenv('CONSUS_RETOUR_ONLY'),
+    PHP_SAPI === 'cli' ? null : ($_GET['retour'] ?? null),
+    []
+) || in_array('--retour', $cliArgv, true);
+
 try {
-    $snapshot = consus_run_nightly($force, $fullLedger);
-    // Retourlijst (#1159): los bestand, een fout raakt de snapshot niet. Zonder regels geen fetch.
-    $retourStatus = ['ok' => false, 'lines' => 0, 'skipped' => false, 'error' => ''];
+    $snapshot = $retourOnly ? consus_read_snapshot() : consus_run_nightly($force, $fullLedger);
+    // Retourlijst (#1159): los bestand, per bedrijf met regels; een fout raakt de snapshot niet.
+    $retourStatus = ['ok' => false, 'lines' => 0, 'skipped' => false, 'error' => '', 'companies' => []];
     try {
         require_once __DIR__ . '/consus_retour_fetch.php';
         $retourData = consus_retour_refresh();
-        $retourStatus = ['ok' => true, 'lines' => count($retourData['lines'] ?? []), 'skipped' => !empty($retourData['skipped']), 'error' => ''];
+        $retourErrors = [];
+        foreach ($retourData['companies'] as $retourCompany => $retourCompanyStatus) {
+            $retourData['companies'][$retourCompany]['error'] = consus_nightly_redact((string) $retourCompanyStatus['error']);
+            if (!$retourCompanyStatus['ok']) {
+                $retourErrors[] = $retourData['companies'][$retourCompany]['error'];
+            }
+        }
+        $retourStatus = [
+            'ok' => $retourErrors === [],
+            'lines' => (int) $retourData['lines'],
+            'skipped' => !empty($retourData['skipped']),
+            'error' => implode(' | ', $retourErrors),
+            'companies' => $retourData['companies'],
+        ];
     } catch (Throwable $retourError) {
         $retourStatus['error'] = consus_nightly_redact($retourError->getMessage());
     }
@@ -449,9 +470,16 @@ try {
                 (string) ($error['error'] ?? '')
             );
         }
-        echo $retourStatus['ok']
-            ? ($retourStatus['skipped'] ? "  retour: overgeslagen (nog geen regels)\n" : sprintf("  retour: %d factuurregels\n", $retourStatus['lines']))
-            : sprintf("  WARN retour: %s\n", $retourStatus['error']);
+        if ($retourStatus['skipped']) {
+            echo "  retour: overgeslagen (nog geen regels)\n";
+        } elseif ($retourStatus['companies'] === [] && $retourStatus['error'] !== '') {
+            echo sprintf("  WARN retour: %s\n", $retourStatus['error']);
+        }
+        foreach ($retourStatus['companies'] as $retourCompany => $retourCompanyStatus) {
+            echo $retourCompanyStatus['ok']
+                ? sprintf("  retour %s: %d factuurregels\n", $retourCompany, $retourCompanyStatus['lines'])
+                : sprintf("  WARN retour %s: %s\n", $retourCompany, $retourCompanyStatus['error']);
+        }
         if ($payload['locations'] !== []) {
             echo '  locaties: ' . implode(', ', $payload['locations']) . "\n";
         }

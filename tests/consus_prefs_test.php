@@ -40,6 +40,18 @@ try {
     $invalid = consus_prefs_write('tim@kvt.nl', ['page_size' => 15]);
     prefs_assert($invalid['page_size'] === 20, 'ongeldige paginagrootte wordt 20');
     prefs_assert(consus_prefs_input_from_request(['page_size' => '50', 'extra' => 'nee']) === ['page_size' => '50'], 'request houdt alleen bekende velden');
+    // Bedrijf en afdeling per gebruiker, server-side.
+    prefs_assert($invalid['company'] === null && $invalid['cost_center'] === null, 'nog geen keuze: null');
+    $chosen = consus_prefs_write('tim@kvt.nl', ['company' => ' Hunter van Twist ', 'cost_center' => '15']);
+    prefs_assert($chosen['company'] === 'Hunter van Twist' && $chosen['cost_center'] === '15', 'bedrijf en afdeling opgeslagen');
+    prefs_assert($chosen['page_size'] === 20 && $chosen['customers'] === ['C9'], 'keuze wist de andere voorkeuren niet');
+    $other = consus_prefs_write('ariadne@kvt.nl', ['company' => 'Koninklijke van Twist']);
+    prefs_assert(consus_prefs_read('tim@kvt.nl')['company'] === 'Hunter van Twist' && $other['company'] === 'Koninklijke van Twist' && $other['cost_center'] === null, 'per gebruiker');
+    $all = consus_prefs_write('tim@kvt.nl', ['company' => '', 'cost_center' => '']);
+    prefs_assert($all['company'] === '' && $all['cost_center'] === '', 'Alle is een bewuste keuze (leeg, niet null)');
+    $bad = consus_prefs_write('tim@kvt.nl', ['company' => "x|<script>"]);
+    prefs_assert($bad['company'] === '', 'ongeldige keuze overschrijft niets');
+    prefs_assert(consus_prefs_input_from_request(['company' => 'A', 'cost_center' => '5']) === ['company' => 'A', 'cost_center' => '5'], 'request neemt bedrijf en afdeling mee');
     prefs_assert(is_file($path), 'json-bestand staat op schijf');
     prefs_assert(!is_file($path . '.tmp.' . getmypid()), 'tijdelijk bestand is hernoemd');
 

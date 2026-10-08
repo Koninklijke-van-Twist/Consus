@@ -3,40 +3,52 @@
 /**
  * Retourlijst (Asclepius #1159): onderdelen die nog terug kunnen naar de leverancier.
  *
- * Afdelingsonafhankelijk. Per afdeling (Global Dimension 1, zelfde code als het
- * afdelingsfilter van Consus) staan regels, gedeeld voor alle gebruikers:
+ * Per bedrijf en per afdeling (Global Dimension 1, zelfde code als het
+ * afdelingsfilter van Consus; afdeling 15 bij Hunter is niet afdeling 15 bij
+ * KVT) staan regels, gedeeld voor alle gebruikers:
  * leverancier, type (optioneel, standaard "Alle"), termijn in dagen en minimaal
  * bedrag. Een afdeling kan meerdere regels hebben; zonder regels toont de
  * lijst niets.
  *
- * Bron (nachtelijk, via Mímir met BC-fallback, zelfde pad als de snapshot), voor
- * de leveranciers uit alle regels:
+ * Bron (nachtelijk, via Mímir met BC-fallback, zelfde pad als de snapshot), per
+ * bedrijf met regels, in de environment van dat bedrijf, voor de leveranciers
+ * uit de regels van dat bedrijf:
  *  - GeboekteInkoopfacturen (pagina 146): No, Buy_from_Vendor_No, Vendor_Invoice_No, Document_Date.
  *  - GeboekteInkoopfactuurRegels (pagina 529): Document_No, Type, No, Quantity,
  *    Direct_Unit_Cost, Order_No, Shortcut_Dimension_1_Code. Tekstregels vallen weg.
  *  - AppPurchaseOrder: KVT_Export_Status_Perkins_EGT / _CSV (type 57401/57420, alleen Perkins).
+ *    Alleen open orders hebben die vlaggen; het archief (GearchiveerdeInkoopkoppen/-orders)
+ *    niet. Een volledig gefactureerde, verwijderde of gearchiveerde order telt als
+ *    voorraad (57420) en de regel krijgt daar een zichtbare melding over.
  *  - AppItemCard: omschrijving, veiligheidsvoorraad, Tariff_No, land van herkomst.
  *  - ItemLedgerEntries (Open): boekvoorraad per locatie.
  *  - ReservationEntries: reserveringen op voorraad (en of die naar een retourorder gaan).
- *  - BinContent (fallback Magazijnposten): bin-inhoud op HVT tegen boekvoorraad.
+ *  - BinContent (fallback Magazijnposten): bin-inhoud op het eigen magazijn
+ *    (KVT of HVT, per bedrijf) tegen boekvoorraad.
  *
- * Die ruwe feiten staan in web/data/consus_retour.json (ruim venster). De pagina
+ * Die ruwe feiten staan per bedrijf in web/data/consus_retour.json (ruim venster). De pagina
  * rekent de kandidaten bij elke weergave uit met de regels, zodat een gewijzigde
  * termijn of minimum direct zichtbaar is zonder nieuwe BC-run.
  */
 
 require_once __DIR__ . '/consus_prefs.php';
+require_once __DIR__ . '/consus_companies.php';
 
-/** Sleutel uit CONSUS_COMPANIES (kleine letters), dezelfde als de rest van de nightly. */
-const CONSUS_RETOUR_COMPANY_KEY = 'hvt';
+/**
+ * Regels van vóór "per bedrijf" (versie 2) zijn op Perkins, afdeling 15,
+ * ingevoerd. Perkins is Koninklijke van Twist (Tim, 08-10-2026).
+ */
+const CONSUS_RETOUR_LEGACY_COMPANY = 'Koninklijke van Twist';
+/** PO52600987 (standaard garantie) is een Hunter-order (PO5-reeks). */
+const CONSUS_RETOUR_DEFAULT_GARANTIE_COMPANY = 'Hunter van Twist';
 const CONSUS_RETOUR_ACCOUNT_SPOED = '57401';
 const CONSUS_RETOUR_ACCOUNT_VOORRAAD = '57420';
 /** Leverancier waarvoor de type-provider 57401/57420 uit de PO-vlaggen afleidt. */
 const CONSUS_RETOUR_PERKINS_VENDOR = '90101';
 /** Leeg type = "Alle": de regel geldt voor alle regels van die leverancier. */
 const CONSUS_RETOUR_TYPE_ALL = '';
-/** Locaties met bins. Andere locaties (M5xx/M6xx) krijgen 'geen bincontrole'. */
-const CONSUS_RETOUR_BIN_LOCATIONS = ['HVT'];
+/** Locaties met bins per bedrijfssleutel (CONSUS_COMPANIES). Geverifieerd in BinContent. */
+const CONSUS_RETOUR_BIN_LOCATIONS_BY_COMPANY = ['kvt' => ['KVT'], 'hvt' => ['HVT']];
 const CONSUS_RETOUR_CHUNK = 25;
 /** Nightly haalt minstens zoveel dagen op, zodat een langere termijn direct werkt. */
 const CONSUS_RETOUR_FETCH_DAYS = 180;
@@ -249,7 +261,7 @@ function consus_retour_normalize_po_list(mixed $value): array
     return array_values(array_slice($list, 0, 500));
 }
 
-/** Sleutel van een kandidaat (factuur + artikel) voor de garantiemarkering. */
+/** Sleutel van een kandidaat (factuur + artikel) voor de garantiemarkering, binnen één bedrijf. */
 function consus_retour_line_key(string $invoice, string $item): string
 {
     return strtoupper(trim($invoice)) . '|' . strtoupper(trim($item));
@@ -270,41 +282,142 @@ function consus_retour_normalize_line_keys(mixed $value): array
 }
 
 /**
- * Instellingen (gedeeld voor alle gebruikers):
- *  rules:            {afdeling: [regel, ...]}
- *  garantie_orders:  PO's die garantie zijn (standaard PO52600987)
- *  garantie_lines:   "factuur|artikel" met de hand als garantie gemarkeerd
+ * BC-bedrijfsnaam (Name) zoals hij in de instellingen staat: getrimd, enkele
+ * spaties, geen scheidingstekens. Leeg = ongeldig.
+ */
+function consus_retour_company_name(mixed $value): string
+{
+    $name = preg_replace('/\s+/u', ' ', trim((string) $value)) ?? '';
+    if ($name === '' || mb_strlen($name) > 80 || preg_match('/[|\x00-\x1f<>"\\\\]/', $name)) {
+        return '';
+    }
+
+    return $name;
+}
+
+/** Vergelijkingssleutel voor bedrijfsnamen: hoofdletterongevoelig, spaties genormaliseerd. */
+function consus_retour_company_norm(string $name): string
+{
+    return mb_strtolower(consus_retour_company_name($name));
+}
+
+/**
+ * Bestaande sleutel in een map per bedrijf, hoofdletterongevoelig.
  *
- * De oude vorm ('departments' met termijnen en startdatum per afdeling) wordt
- * genegeerd: bij livegang heeft elke afdeling lege regels.
+ * @param array<string, mixed> $map
+ */
+function consus_retour_company_slot(array $map, string $company): ?string
+{
+    $norm = consus_retour_company_norm($company);
+    if ($norm === '') {
+        return null;
+    }
+    foreach (array_keys($map) as $key) {
+        if (consus_retour_company_norm((string) $key) === $norm) {
+            return (string) $key;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Lijst per bedrijf normaliseren (garantie-PO's of -regels).
  *
- * @return array{version:int,rules:array<string, array<int, array>>,garantie_orders:array<int,string>,garantie_lines:array<int,string>}
+ * @param callable(mixed):array<int,string> $normalizeList
+ * @return array<string, array<int, string>>
+ */
+function consus_retour_normalize_company_lists(mixed $value, callable $normalizeList): array
+{
+    $out = [];
+    foreach (is_array($value) ? $value : [] as $company => $list) {
+        $name = consus_retour_company_name((string) $company);
+        if ($name === '') {
+            continue;
+        }
+        $slot = consus_retour_company_slot($out, $name) ?? $name;
+        $out[$slot] = array_values(array_unique(array_merge($out[$slot] ?? [], $normalizeList($list))));
+    }
+    ksort($out, SORT_NATURAL | SORT_FLAG_CASE);
+
+    return $out;
+}
+
+/**
+ * Instellingen (gedeeld voor alle gebruikers), versie 3:
+ *  rules:            {bedrijf (BC Name): {afdeling: [regel, ...]}}
+ *  garantie_orders:  {bedrijf: [PO, ...]}  (standaard PO52600987 bij Hunter van Twist)
+ *  garantie_lines:   {bedrijf: ["factuur|artikel", ...]}
+ *
+ * Afdeling 15 bij Hunter is niet afdeling 15 bij KVT, daarom per bedrijf.
+ *
+ * Migratie van versie 2 ({afdeling: [regel]}): die regels zijn op Perkins
+ * (afdeling 15) ingevoerd en horen bij Koninklijke van Twist. Garantie-PO's en
+ * -regels van versie 2 hadden geen bedrijf; die gaan naar KVT én Hunter, omdat
+ * factuur- en ordernummers per bedrijf een eigen reeks hebben en dus niet botsen.
+ *
+ * @return array{version:int,rules:array<string, array<string, array<int, array>>>,garantie_orders:array<string, array<int,string>>,garantie_lines:array<string, array<int,string>>}
  */
 function consus_retour_normalize_settings(mixed $raw): array
 {
     $raw = is_array($raw) ? $raw : [];
+    $legacy = (int) ($raw['version'] ?? 0) < 3;
+    $rulesIn = is_array($raw['rules'] ?? null) ? $raw['rules'] : [];
+    if ($legacy) {
+        $rulesIn = $rulesIn === [] ? [] : [CONSUS_RETOUR_LEGACY_COMPANY => $rulesIn];
+    }
     $rules = [];
-    foreach (is_array($raw['rules'] ?? null) ? $raw['rules'] : [] as $department => $list) {
-        $key = consus_retour_valid_department((string) $department);
-        if ($key === '' || !is_array($list)) {
+    foreach ($rulesIn as $company => $departments) {
+        $name = consus_retour_company_name((string) $company);
+        if ($name === '' || !is_array($departments)) {
             continue;
         }
-        foreach ($list as $rule) {
-            $normalized = consus_retour_normalize_rule($rule);
-            if ($normalized !== null && count($rules[$key] ?? []) < CONSUS_RETOUR_MAX_RULES) {
-                $rules[$key][] = $normalized;
+        $slot = consus_retour_company_slot($rules, $name) ?? $name;
+        foreach ($departments as $department => $list) {
+            $key = consus_retour_valid_department((string) $department);
+            if ($key === '' || !is_array($list)) {
+                continue;
+            }
+            foreach ($list as $rule) {
+                $normalized = consus_retour_normalize_rule($rule);
+                if ($normalized !== null && count($rules[$slot][$key] ?? []) < CONSUS_RETOUR_MAX_RULES) {
+                    $rules[$slot][$key][] = $normalized;
+                }
             }
         }
+        if (isset($rules[$slot])) {
+            ksort($rules[$slot], SORT_NATURAL);
+        }
     }
-    ksort($rules, SORT_NATURAL);
+    ksort($rules, SORT_NATURAL | SORT_FLAG_CASE);
+
+    if ($legacy) {
+        $orders = array_key_exists('garantie_orders', $raw)
+            ? consus_retour_normalize_po_list($raw['garantie_orders'])
+            : CONSUS_RETOUR_DEFAULT_GARANTIE;
+        $lines = consus_retour_normalize_line_keys($raw['garantie_lines'] ?? []);
+        $garantieOrders = [];
+        $garantieLines = [];
+        foreach ([CONSUS_RETOUR_LEGACY_COMPANY, CONSUS_RETOUR_DEFAULT_GARANTIE_COMPANY] as $company) {
+            $garantieOrders[$company] = $orders;
+            if ($lines !== []) {
+                $garantieLines[$company] = $lines;
+            }
+        }
+        ksort($garantieOrders, SORT_NATURAL | SORT_FLAG_CASE);
+        ksort($garantieLines, SORT_NATURAL | SORT_FLAG_CASE);
+    } else {
+        $garantieOrders = array_key_exists('garantie_orders', $raw)
+            ? consus_retour_normalize_company_lists($raw['garantie_orders'], 'consus_retour_normalize_po_list')
+            : [CONSUS_RETOUR_DEFAULT_GARANTIE_COMPANY => CONSUS_RETOUR_DEFAULT_GARANTIE];
+        $garantieLines = consus_retour_normalize_company_lists($raw['garantie_lines'] ?? [], 'consus_retour_normalize_line_keys');
+    }
 
     return [
-        'version' => 2,
+        'version' => 3,
         'rules' => $rules,
-        'garantie_orders' => array_key_exists('garantie_orders', $raw)
-            ? consus_retour_normalize_po_list($raw['garantie_orders'])
-            : CONSUS_RETOUR_DEFAULT_GARANTIE,
-        'garantie_lines' => consus_retour_normalize_line_keys($raw['garantie_lines'] ?? []),
+        'garantie_orders' => $garantieOrders,
+        'garantie_lines' => $garantieLines,
     ];
 }
 
@@ -327,11 +440,34 @@ function consus_retour_settings_update(callable $change): array
 }
 
 /**
- * Voegt een regel toe of wijzigt hem (zelfde id). Gooit InvalidArgumentException
- * bij een ongeldige afdeling of regel.
+ * Schrijft een versie-2-bestand eenmalig om naar versie 3 (regels naar KVT).
+ * Geeft true als er gemigreerd is.
  */
-function consus_retour_rule_save(string $department, array $input, string $id = ''): array
+function consus_retour_settings_migrate(): bool
 {
+    $path = consus_retour_settings_file();
+    if (!is_file($path)) {
+        return false;
+    }
+    $raw = json_decode((string) @file_get_contents($path), true);
+    if (!is_array($raw) || (int) ($raw['version'] ?? 0) >= 3) {
+        return false;
+    }
+    consus_retour_settings_update(static fn (array $settings): array => $settings);
+
+    return true;
+}
+
+/**
+ * Voegt een regel toe of wijzigt hem (zelfde id). Gooit InvalidArgumentException
+ * bij een ongeldig bedrijf, afdeling of regel.
+ */
+function consus_retour_rule_save(string $company, string $department, array $input, string $id = ''): array
+{
+    $name = consus_retour_company_name($company);
+    if ($name === '') {
+        throw new InvalidArgumentException('Kies eerst een bedrijf.');
+    }
     $key = consus_retour_valid_department($department);
     if ($key === '') {
         throw new InvalidArgumentException('Kies eerst een afdeling.');
@@ -341,8 +477,9 @@ function consus_retour_rule_save(string $department, array $input, string $id = 
         throw new InvalidArgumentException('Vul leverancier, termijn (1–' . CONSUS_RETOUR_MAX_WINDOW . ' dagen) en minimaal bedrag correct in.');
     }
 
-    return consus_retour_settings_update(static function (array $settings) use ($key, $rule, $id): array {
-        $list = $settings['rules'][$key] ?? [];
+    return consus_retour_settings_update(static function (array $settings) use ($name, $key, $rule, $id): array {
+        $slot = consus_retour_company_slot($settings['rules'], $name) ?? $name;
+        $list = $settings['rules'][$slot][$key] ?? [];
         $replaced = false;
         foreach ($list as $index => $existing) {
             if ($id !== '' && $existing['id'] === $id) {
@@ -356,22 +493,29 @@ function consus_retour_rule_save(string $department, array $input, string $id = 
             }
             $list[] = $rule;
         }
-        $settings['rules'][$key] = array_values($list);
+        $settings['rules'][$slot][$key] = array_values($list);
 
         return $settings;
     });
 }
 
-function consus_retour_rule_delete(string $department, string $id): array
+function consus_retour_rule_delete(string $company, string $department, string $id): array
 {
     $key = consus_retour_valid_department($department);
 
-    return consus_retour_settings_update(static function (array $settings) use ($key, $id): array {
-        $list = array_values(array_filter($settings['rules'][$key] ?? [], static fn (array $rule): bool => $rule['id'] !== $id));
+    return consus_retour_settings_update(static function (array $settings) use ($company, $key, $id): array {
+        $slot = consus_retour_company_slot($settings['rules'], $company);
+        if ($slot === null) {
+            return $settings;
+        }
+        $list = array_values(array_filter($settings['rules'][$slot][$key] ?? [], static fn (array $rule): bool => $rule['id'] !== $id));
         if ($list === []) {
-            unset($settings['rules'][$key]);
+            unset($settings['rules'][$slot][$key]);
         } else {
-            $settings['rules'][$key] = $list;
+            $settings['rules'][$slot][$key] = $list;
+        }
+        if (($settings['rules'][$slot] ?? []) === []) {
+            unset($settings['rules'][$slot]);
         }
 
         return $settings;
@@ -379,47 +523,80 @@ function consus_retour_rule_delete(string $department, string $id): array
 }
 
 /**
- * Garantie aan/uit voor één kandidaat (globaal). Uitzetten haalt ook de
- * PO's van die regel van de garantielijst, anders blijft hij garantie.
+ * Garantie aan/uit voor één kandidaat van één bedrijf. Uitzetten haalt ook de
+ * PO's van die regel van de garantielijst van dat bedrijf.
  *
  * @param array<int, string> $orders
  */
-function consus_retour_garantie_set(string $invoice, string $item, array $orders, bool $on): array
+function consus_retour_garantie_set(string $company, string $invoice, string $item, array $orders, bool $on): array
 {
+    $name = consus_retour_company_name($company);
     $lineKey = consus_retour_line_key($invoice, $item);
-    if (consus_retour_normalize_line_keys([$lineKey]) === []) {
+    if ($name === '' || consus_retour_normalize_line_keys([$lineKey]) === []) {
         throw new InvalidArgumentException('Onbekende regel.');
     }
     $orders = consus_retour_normalize_po_list($orders);
 
-    return consus_retour_settings_update(static function (array $settings) use ($lineKey, $orders, $on): array {
-        $lines = array_values(array_filter($settings['garantie_lines'], static fn (string $key): bool => $key !== $lineKey));
+    return consus_retour_settings_update(static function (array $settings) use ($name, $lineKey, $orders, $on): array {
+        $lineSlot = consus_retour_company_slot($settings['garantie_lines'], $name) ?? $name;
+        $lines = array_values(array_filter($settings['garantie_lines'][$lineSlot] ?? [], static fn (string $key): bool => $key !== $lineKey));
         if ($on) {
             $lines[] = $lineKey;
         } else {
-            $settings['garantie_orders'] = array_values(array_diff($settings['garantie_orders'], $orders));
+            $orderSlot = consus_retour_company_slot($settings['garantie_orders'], $name) ?? $name;
+            $settings['garantie_orders'][$orderSlot] = array_values(array_diff($settings['garantie_orders'][$orderSlot] ?? [], $orders));
         }
-        $settings['garantie_lines'] = $lines;
+        $settings['garantie_lines'][$lineSlot] = $lines;
 
         return $settings;
     });
 }
 
 /** @return array<int, array> */
-function consus_retour_rules_for_department(array $settings, string $department): array
+function consus_retour_rules_for(array $settings, string $company, string $department): array
 {
     $key = consus_retour_valid_department($department);
+    $slot = consus_retour_company_slot($settings['rules'] ?? [], $company);
 
-    return $key === '' ? [] : ($settings['rules'][$key] ?? []);
+    return ($key === '' || $slot === null) ? [] : ($settings['rules'][$slot][$key] ?? []);
 }
 
-/** @return array<int, string> Leveranciers uit alle regels van alle afdelingen. */
-function consus_retour_rule_vendors(array $settings): array
+/** @return array<string, array<int, array>> Regels per afdeling van één bedrijf. */
+function consus_retour_company_rules(array $settings, string $company): array
+{
+    $slot = consus_retour_company_slot($settings['rules'] ?? [], $company);
+
+    return $slot === null ? [] : $settings['rules'][$slot];
+}
+
+/** @return array<int, string> Bedrijven (BC Name) met minstens één regel. */
+function consus_retour_companies_with_rules(array $settings): array
+{
+    $out = [];
+    foreach ($settings['rules'] ?? [] as $company => $departments) {
+        foreach ((array) $departments as $list) {
+            if ($list !== []) {
+                $out[] = (string) $company;
+                break;
+            }
+        }
+    }
+
+    return $out;
+}
+
+/** @return array<int, string> Leveranciers uit de regels van één bedrijf (of alle bedrijven). */
+function consus_retour_rule_vendors(array $settings, ?string $company = null): array
 {
     $vendors = [];
-    foreach ($settings['rules'] ?? [] as $list) {
-        foreach ($list as $rule) {
-            $vendors[$rule['vendor']] = $rule['vendor'];
+    foreach ($settings['rules'] ?? [] as $name => $departments) {
+        if ($company !== null && consus_retour_company_norm((string) $name) !== consus_retour_company_norm($company)) {
+            continue;
+        }
+        foreach ((array) $departments as $list) {
+            foreach ($list as $rule) {
+                $vendors[$rule['vendor']] = $rule['vendor'];
+            }
         }
     }
     ksort($vendors, SORT_NATURAL);
@@ -427,23 +604,50 @@ function consus_retour_rule_vendors(array $settings): array
     return array_values($vendors);
 }
 
-function consus_retour_max_window(array $settings): int
+function consus_retour_max_window(array $settings, ?string $company = null): int
 {
     $max = 0;
-    foreach ($settings['rules'] ?? [] as $list) {
-        foreach ($list as $rule) {
-            $max = max($max, (int) $rule['window']);
+    foreach ($settings['rules'] ?? [] as $name => $departments) {
+        if ($company !== null && consus_retour_company_norm((string) $name) !== consus_retour_company_norm($company)) {
+            continue;
+        }
+        foreach ((array) $departments as $list) {
+            foreach ($list as $rule) {
+                $max = max($max, (int) $rule['window']);
+            }
         }
     }
 
     return $max;
 }
 
-function consus_retour_is_garantie(string $po, array $settings): bool
+function consus_retour_is_garantie(string $po, array $settings, string $company): bool
 {
     $po = consus_retour_normalize_po($po);
+    $slot = consus_retour_company_slot($settings['garantie_orders'] ?? [], $company);
 
-    return $po !== '' && in_array($po, consus_retour_normalize_po_list($settings['garantie_orders'] ?? []), true);
+    return $po !== '' && $slot !== null && in_array($po, consus_retour_normalize_po_list($settings['garantie_orders'][$slot] ?? []), true);
+}
+
+/** @return array<int, string> Garantieregels ("factuur|artikel") van één bedrijf. */
+function consus_retour_garantie_lines(array $settings, string $company): array
+{
+    $slot = consus_retour_company_slot($settings['garantie_lines'] ?? [], $company);
+
+    return $slot === null ? [] : consus_retour_normalize_line_keys($settings['garantie_lines'][$slot] ?? []);
+}
+
+/**
+ * Locaties met bins per bedrijf (BinContent-check). KVT en HVT hebben elk hun
+ * eigen magazijn; andere locaties (M5xx/M6xx, busjes) krijgen 'geen bincontrole'.
+ *
+ * @return array<int, string>
+ */
+function consus_retour_bin_locations_for(string $company): array
+{
+    $key = function_exists('consus_company_key_for_name') ? consus_company_key_for_name($company) : '';
+
+    return CONSUS_RETOUR_BIN_LOCATIONS_BY_COMPANY[$key] ?? [];
 }
 
 /**
@@ -471,18 +675,43 @@ function consus_retour_type_label(string $type): string
     };
 }
 
+function consus_retour_company_label(string $company): string
+{
+    return consus_company_label_for($company);
+}
+
 /** Oud label, nog gebruikt door de tabel. */
 function consus_retour_account_label(string $account): string
 {
     return consus_retour_type_label($account);
 }
 
-function consus_retour_read_data(): array
+function consus_retour_empty_data(string $company = ''): array
 {
-    $empty = ['generated_at' => '', 'lines' => [], 'orders' => [], 'items' => [], 'warnings' => [], 'vendors' => [], 'types_by_vendor' => [], 'fetched_from' => ''];
+    return ['generated_at' => '', 'company' => $company, 'lines' => [], 'orders' => [], 'items' => [], 'warnings' => [], 'vendors' => [], 'types_by_vendor' => [], 'fetched_from' => '', 'bin_locations' => consus_retour_bin_locations_for($company)];
+}
+
+/**
+ * Ruwe retourdata van één bedrijf. Bestand (versie 2): {version, companies: {BC Name: data}}.
+ * Een ouder bestand (één bedrijf, veld 'company'; nog ouder: alleen Perkins
+ * bij Hunter) telt alleen voor dat bedrijf.
+ */
+function consus_retour_read_data(string $company): array
+{
+    $empty = consus_retour_empty_data($company);
     $path = consus_retour_data_file();
     $raw = is_file($path) ? json_decode((string) @file_get_contents($path), true) : null;
     if (!is_array($raw)) {
+        return $empty;
+    }
+    if (is_array($raw['companies'] ?? null)) {
+        $slot = consus_retour_company_slot($raw['companies'], $company);
+        $data = $slot !== null && is_array($raw['companies'][$slot]) ? $raw['companies'][$slot] : [];
+
+        return $data + $empty;
+    }
+    $owner = trim((string) ($raw['company'] ?? '')) !== '' ? (string) $raw['company'] : CONSUS_RETOUR_DEFAULT_GARANTIE_COMPANY;
+    if (consus_retour_company_norm($owner) !== consus_retour_company_norm($company)) {
         return $empty;
     }
     $data = $raw + $empty;
@@ -500,6 +729,35 @@ function consus_retour_read_data(): array
     return $data;
 }
 
+/**
+ * Schrijft de data per bedrijf. Bedrijven die niet in $byCompany staan houden
+ * hun vorige data (een fout bij één bedrijf wist de andere niet); bedrijven
+ * zonder regels vallen weg.
+ *
+ * @param array<string, array> $byCompany
+ * @param array<int, string> $keep
+ */
+function consus_retour_write_data(array $byCompany, array $keep): void
+{
+    consus_update_json_locked(consus_retour_data_file(), static function (array $previous) use ($byCompany, $keep): array {
+        $companies = is_array($previous['companies'] ?? null) ? $previous['companies'] : [];
+        $out = [];
+        foreach ($keep as $company) {
+            $slot = consus_retour_company_slot($byCompany, $company);
+            if ($slot !== null) {
+                $out[$company] = $byCompany[$slot];
+                continue;
+            }
+            $old = consus_retour_company_slot($companies, $company);
+            if ($old !== null) {
+                $out[$company] = $companies[$old];
+            }
+        }
+
+        return ['version' => 2, 'generated_at' => gmdate('c'), 'companies' => $out];
+    });
+}
+
 /** @return array<int, string> Types voor de editor: "Alle", de types uit de data en uit opgeslagen regels. */
 function consus_retour_type_options(array $data, array $settings): array
 {
@@ -510,9 +768,11 @@ function consus_retour_type_options(array $data, array $settings): array
             $types[$type] = $type;
         }
     }
-    foreach ($settings['rules'] ?? [] as $list) {
-        foreach ($list as $rule) {
-            $types[$rule['type']] = $rule['type'];
+    foreach ($settings['rules'] ?? [] as $departments) {
+        foreach ((array) $departments as $list) {
+            foreach ($list as $rule) {
+                $types[$rule['type']] = $rule['type'];
+            }
         }
     }
 
@@ -571,13 +831,14 @@ function consus_retour_rule_label(array $rule): string
  *     Vrije voorraad gaat eerst naar de nieuwste factuur, daarna naar oudere.
  *  5. Retourwaarde = retouraantal × gemiddelde inkoopprijs ≥ minimum van een
  *     regel waarvan de termijn nog loopt.
- *  6. Bincontrole HVT: bin-inhoud < boekvoorraad → 'controleren'.
+ *  6. Bincontrole eigen magazijn (bin_locations): bin-inhoud < boekvoorraad → 'controleren'.
  *
- * $department leeg = alle afdelingen met regels (export).
+ * Alleen regels van $company (BC Name; de data is van dat bedrijf).
+ * $department leeg = alle afdelingen met regels van dat bedrijf (export).
  *
  * @return array{rows:array<int, array>, garantie:array<int, array>, skipped:array<string,int>}
  */
-function consus_retour_candidates(array $data, array $settings, string $today, string $department = ''): array
+function consus_retour_candidates(array $data, array $settings, string $today, string $company, string $department = ''): array
 {
     $skipped = ['geen_regel' => 0, 'verlopen' => 0, 'veiligheidsvoorraad' => 0, 'geen_vrije_voorraad' => 0, 'onder_minimum' => 0, 'afdeling' => 0];
     $departmentKey = $department === '' ? '' : consus_retour_valid_department($department);
@@ -585,7 +846,8 @@ function consus_retour_candidates(array $data, array $settings, string $today, s
         return ['rows' => [], 'garantie' => [], 'skipped' => $skipped];
     }
     $typesByVendor = is_array($data['types_by_vendor'] ?? null) ? $data['types_by_vendor'] : [];
-    $garantieLines = array_flip(consus_retour_normalize_line_keys($settings['garantie_lines'] ?? []));
+    $garantieLines = array_flip(consus_retour_garantie_lines($settings, $company));
+    $binLocations = array_values(array_map('strtoupper', array_map('strval', is_array($data['bin_locations'] ?? null) ? $data['bin_locations'] : consus_retour_bin_locations_for($company))));
 
     $groups = [];
     foreach ($data['lines'] ?? [] as $line) {
@@ -608,6 +870,7 @@ function consus_retour_candidates(array $data, array $settings, string $today, s
                 'item' => $item,
                 'description' => trim((string) ($line['description'] ?? '')),
                 'department' => trim((string) ($line['department'] ?? '')),
+                'company' => $company,
                 'quantity' => 0.0,
                 'amount' => 0.0,
                 'orders' => [],
@@ -650,7 +913,7 @@ function consus_retour_candidates(array $data, array $settings, string $today, s
             }
         }
         $matching = array_values(array_filter(
-            consus_retour_rules_for_department($settings, $group['department']),
+            consus_retour_rules_for($settings, $company, $group['department']),
             static fn (array $rule): bool => $rule['vendor'] === $group['vendor'] && ($rule['type'] === CONSUS_RETOUR_TYPE_ALL || $rule['type'] === $account)
         ));
         if ($matching === []) {
@@ -671,7 +934,7 @@ function consus_retour_candidates(array $data, array $settings, string $today, s
         $garantie = isset($garantieLines[consus_retour_line_key($group['invoice'], $group['item'])]);
         $garantieByOrder = false;
         foreach ($poList as $po) {
-            $garantieByOrder = $garantieByOrder || consus_retour_is_garantie($po, $settings);
+            $garantieByOrder = $garantieByOrder || consus_retour_is_garantie($po, $settings, $company);
         }
         $group += [
             'po' => implode(', ', $poList),
@@ -756,7 +1019,7 @@ function consus_retour_candidates(array $data, array $settings, string $today, s
         $free[$itemKey] -= $returnQty;
         $row['return_qty'] = $returnQty;
         $row['value'] = $value;
-        [$row['status'], $row['status_label']] = consus_retour_bin_status($info, $stockByLocation);
+        [$row['status'], $row['status_label']] = consus_retour_bin_status($info, $stockByLocation, $binLocations);
         if (!$row['flags_known']) {
             $row['status_label'] .= ' · order niet meer in BC, als voorraad (57420) gerekend';
         }
@@ -770,12 +1033,33 @@ function consus_retour_candidates(array $data, array $settings, string $today, s
     return ['rows' => $rows, 'garantie' => $garantieRows, 'skipped' => $skipped];
 }
 
+/**
+ * Kandidaten van meerdere bedrijven samen (export), elk met zijn eigen data en regels.
+ *
+ * @param array<int, string> $companies
+ * @return array{rows:array<int, array>, garantie:array<int, array>, skipped:array<string,int>}
+ */
+function consus_retour_candidates_for_companies(array $settings, string $today, array $companies, string $department = ''): array
+{
+    $out = ['rows' => [], 'garantie' => [], 'skipped' => []];
+    foreach ($companies as $company) {
+        $result = consus_retour_candidates(consus_retour_read_data($company), $settings, $today, $company, $department);
+        $out['rows'] = array_merge($out['rows'], $result['rows']);
+        $out['garantie'] = array_merge($out['garantie'], $result['garantie']);
+        foreach ($result['skipped'] as $reason => $count) {
+            $out['skipped'][$reason] = ($out['skipped'][$reason] ?? 0) + $count;
+        }
+    }
+
+    return $out;
+}
+
 /** Waarom deze regel op de lijst staat, in gewone taal. */
 function consus_retour_reason(array $row): string
 {
     $rule = $row['rule'];
     $parts = [
-        'Regel ' . consus_retour_rule_label($rule) . ' van afdeling ' . $row['department'] . '.',
+        'Regel ' . consus_retour_rule_label($rule) . ' van afdeling ' . $row['department'] . (($row['company'] ?? '') !== '' ? ' (' . consus_retour_company_label((string) $row['company']) . ')' : '') . '.',
         'Factuurdatum ' . consus_retour_dutch_date($row['document_date']) . ', ' . (int) $row['days_since'] . ' dagen geleden; nog ' . (int) $row['days_left'] . ' dagen (t/m ' . consus_retour_dutch_date($row['deadline']) . ').',
     ];
     if ($row['account'] !== CONSUS_RETOUR_TYPE_ALL) {
@@ -792,19 +1076,19 @@ function consus_retour_reason(array $row): string
 }
 
 /**
- * Bincontrole (Ariadne, #1165): op locaties met bins (HVT) moet de bin-inhoud
+ * Bincontrole (Ariadne, #1165): op locaties met bins (KVT, HVT) moet de bin-inhoud
  * de boekvoorraad dekken. Minder bin-inhoud = mogelijk spookvoorraad.
  * Locaties zonder bins (M5xx/M6xx) krijgen 'geen bincontrole'.
  * Ontbreekt de bin-data helemaal (webservice faalde), dan geen oordeel.
  *
  * @return array{0:string,1:string}
  */
-function consus_retour_bin_status(array $info, array $stockByLocation): array
+function consus_retour_bin_status(array $info, array $stockByLocation, array $binLocations): array
 {
     $bins = $info['bin'] ?? null;
     $other = [];
     foreach ($stockByLocation as $location => $qty) {
-        if ((float) $qty != 0.0 && !in_array(strtoupper((string) $location), CONSUS_RETOUR_BIN_LOCATIONS, true)) {
+        if ((float) $qty != 0.0 && !in_array(strtoupper((string) $location), $binLocations, true)) {
             $other[] = (string) $location;
         }
     }
@@ -812,7 +1096,7 @@ function consus_retour_bin_status(array $info, array $stockByLocation): array
     if (!is_array($bins)) {
         return ['kandidaat', 'Retourkandidaat (bincontrole niet beschikbaar)' . $suffix];
     }
-    foreach (CONSUS_RETOUR_BIN_LOCATIONS as $location) {
+    foreach ($binLocations as $location) {
         $book = (float) ($stockByLocation[$location] ?? 0);
         $bin = (float) ($bins[$location] ?? 0);
         if ($book > 0 && $bin + 0.00001 < $book) {
@@ -823,7 +1107,7 @@ function consus_retour_bin_status(array $info, array $stockByLocation): array
             return ['controleren', $label . $suffix];
         }
     }
-    if ($other !== [] && array_sum(array_map(static fn ($l) => (float) ($stockByLocation[$l] ?? 0), CONSUS_RETOUR_BIN_LOCATIONS)) <= 0) {
+    if ($other !== [] && array_sum(array_map(static fn ($l) => (float) ($stockByLocation[$l] ?? 0), $binLocations)) <= 0) {
         return ['geen_bincontrole', 'Geen bincontrole — voorraad alleen op ' . implode(', ', $other)];
     }
 
@@ -847,7 +1131,7 @@ function consus_retour_export_headers(): array
         'Leverancier', 'Type', 'Leveranciersfactuur', 'BC-factuur', 'Factuurdatum', 'Artikel', 'Omschrijving',
         'PO-nummer', 'Aantal retour', 'Prijs per stuk', 'Totale prijs', 'Op voorraad', 'Gereserveerd',
         'Dagen sinds factuur', 'Dagen over', 'Uiterlijk retour', 'Tariff Code', 'Country of Origin',
-        'Garantie', 'Status', 'Afdeling', 'Regel',
+        'Garantie', 'Status', 'Bedrijf', 'Afdeling', 'Regel',
     ];
 }
 
@@ -876,6 +1160,7 @@ function consus_retour_export_row(array $row): array
         (string) $row['origin'],
         $garantie ? 'Ja' : 'Nee',
         (string) $row['status_label'],
+        consus_retour_company_label((string) ($row['company'] ?? '')),
         (string) $row['department'],
         consus_retour_rule_label($row['rule']),
     ];

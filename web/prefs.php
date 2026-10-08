@@ -48,14 +48,13 @@ if ($wantsJson) {
         'customers' => $saved['customers'],
         'items' => $saved['items'],
         'page_size' => $saved['page_size'],
+        'company' => $saved['company'],
+        'cost_center' => $saved['cost_center'],
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
-$company = trim((string) ($_POST['company'] ?? ''));
-if (!isset(CONSUS_COMPANIES[$company])) {
-    $company = '';
-}
+$company = (string) (consus_prefs_normalize_choice($_POST['company'] ?? '') ?? '');
 $costCenter = trim((string) ($_POST['cost_center'] ?? ''));
 $year = (int) ($_POST['year'] ?? 0);
 $target = 'index.php?' . http_build_query([
