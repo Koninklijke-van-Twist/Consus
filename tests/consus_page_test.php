@@ -254,6 +254,7 @@ page_assert(str_contains($kvtHtml, "['filter', '1']") && str_contains($kvtHtml, 
 page_assert(!str_contains($kvtHtml, '.then(done, done)'), 'geen fetch-dan-navigeren meer voor bedrijf/afdeling');
 page_assert(str_contains($kvtHtml, 'if (filterNavigating) { return; }') && str_contains($kvtHtml, 'select.disabled = true'), 'keuzes op slot zolang een keuze laadt');
 page_assert(str_contains($kvtHtml, 'chooseFilter(companySelect.value, \'\')'), 'bedrijfswissel stuurt de afdeling van het vorige bedrijf niet mee');
+page_assert(str_contains($kvtHtml, 'setExportsBusy(true)') && str_contains($kvtHtml, 'setExportsBusy(false)') && str_contains($kvtHtml, 'body.filters-busy a.export-link'), 'exportlinks uit tijdens laden van een keuze');
 page_assert(str_contains($kvtHtml, 'defaultSelected') && str_contains($kvtHtml, "addEventListener('pageshow', unlockFilters)"), 'select toont na terug/vernieuwen de keuze van de pagina');
 page_assert(str_contains($kvtHtml, 'data-filter-status'), 'laadmelding bij de keuze bovenaan');
 // Onthouden afdeling bij paginaload (zonder query): die van de voorkeuren, als hij bij het bedrijf hoort.

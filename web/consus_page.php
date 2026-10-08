@@ -261,6 +261,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             background: #0099cc; color: #fff; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center;
         }
         .export-link { background: #fff; color: #00529b; }
+        body.filters-busy a.export-link { pointer-events: none; opacity: .5; cursor: default; }
         .notice { margin-bottom: 16px; padding: 13px 16px; border-radius: 12px; background: #fff8e7; border: 1px solid #f3d691; color: #704d00; }
         .notice p { margin: 0 0 8px; }
         .notice div + div { margin-top: 6px; }
@@ -701,12 +702,28 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         };
         var shownCompany = renderedValue(companySelect);
         var shownDepartment = renderedValue(departmentSelect);
+        // Exportlinks horen bij de pagina die nu getoond wordt. Een download
+        // tijdens het laden van een andere keuze breekt die navigatie af (de
+        // pagina blijft dan op "laden…" staan), dus tijdens het laden uit.
+        var setExportsBusy = function (busy) {
+            document.body.classList.toggle('filters-busy', busy);
+            document.querySelectorAll('a.export-link').forEach(function (link) {
+                if (busy) { link.setAttribute('aria-disabled', 'true'); link.setAttribute('tabindex', '-1'); }
+                else { link.removeAttribute('aria-disabled'); link.removeAttribute('tabindex'); }
+            });
+        };
+        document.addEventListener('click', function (event) {
+            if (!filterNavigating) { return; }
+            var link = event.target && event.target.closest ? event.target.closest('a.export-link') : null;
+            if (link) { event.preventDefault(); event.stopPropagation(); }
+        }, true);
         var lockFilters = function (company, department) {
             filterNavigating = true;
             [companySelect, departmentSelect].forEach(function (select) { if (select) { select.disabled = true; } });
             var text = company === '' ? 'Alle bedrijven laden…' : (company !== shownCompany ? 'Ander bedrijf: afdelingen laden…' : 'Retourlijst en verbruik laden…');
             if (filterStatus) { filterStatus.hidden = false; filterStatus.textContent = text; }
             if (retourEmpty) { retourEmpty.textContent = text; }
+            setExportsBusy(true);
         };
         var unlockFilters = function () {
             filterNavigating = false;
@@ -717,6 +734,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             }
             if (filterStatus) { filterStatus.hidden = true; filterStatus.textContent = ''; }
             if (retourEmpty) { retourEmpty.textContent = retourEmptyText; }
+            setExportsBusy(false);
         };
         var chooseFilter = function (company, department) {
             if (filterNavigating) { return; }
