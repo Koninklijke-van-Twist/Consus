@@ -69,9 +69,10 @@ if ($path === '/prefs.php') {
         echo 'De filters zijn niet opgeslagen.';
         return true;
     }
-    $saved = consus_prefs_write($email, consus_prefs_input_from_request($_POST));
+    $filterChoice = (string) ($_POST['filter'] ?? '') === '1';
+    $saved = consus_prefs_write($email, $filterChoice ? consus_prefs_filter_input($_POST) : consus_prefs_input_from_request($_POST));
     $accept = (string) ($_SERVER['HTTP_ACCEPT'] ?? '');
-    if (strpos($accept, 'application/json') !== false) {
+    if (!$filterChoice && strpos($accept, 'application/json') !== false) {
         header('Content-Type: application/json; charset=utf-8');
         echo json_encode([
             'ok' => true,
@@ -81,15 +82,7 @@ if ($path === '/prefs.php') {
         ], JSON_UNESCAPED_UNICODE);
         return true;
     }
-    $company = trim((string) ($_POST['company'] ?? ''));
-    if (!isset(CONSUS_COMPANIES[$company])) {
-        $company = '';
-    }
-    header('Location: /?' . http_build_query([
-        'company' => $company,
-        'cost_center' => (string) ($_POST['cost_center'] ?? ''),
-        'year' => (string) ($_POST['year'] ?? ''),
-    ], '', '&', PHP_QUERY_RFC3986), true, 303);
+    header('Location: /' . consus_prefs_filter_redirect($_POST), true, 303);
     return true;
 }
 
