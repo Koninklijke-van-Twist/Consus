@@ -208,6 +208,12 @@ function consus_retour_normalize_rule(mixed $input): ?array
     $vendor = consus_retour_normalize_vendor($input['vendor'] ?? '');
     $window = $input['window'] ?? null;
     $min = consus_retour_parse_amount($input['min_value'] ?? '');
+    $rawType = trim((string) ($input['type'] ?? ''));
+    $type = consus_retour_normalize_type($rawType);
+    if ($type === CONSUS_RETOUR_TYPE_ALL && $rawType !== '' && !in_array(strtolower($rawType), ['alle', 'all', '*'], true)) {
+        // Ongeldige typecode is geen "alles": anders wordt een tikfout een brede regel.
+        return null;
+    }
     if ($vendor === '' || !is_numeric($window) || (int) $window < 1 || (int) $window > CONSUS_RETOUR_MAX_WINDOW || $min === null || $min < 0 || $min > 1000000) {
         return null;
     }
@@ -219,7 +225,7 @@ function consus_retour_normalize_rule(mixed $input): ?array
     return [
         'id' => $id,
         'vendor' => $vendor,
-        'type' => consus_retour_normalize_type($input['type'] ?? ''),
+        'type' => $type,
         'window' => (int) $window,
         'min_value' => round($min, 2),
     ];
@@ -522,9 +528,12 @@ function consus_retour_rule_hint(array $rule, array $data): string
     if (trim((string) ($data['generated_at'] ?? '')) === '' || !in_array($rule['vendor'], $vendors, true)) {
         return 'Gegevens volgen na de volgende nightly.';
     }
-    $types = (array) (($data['types_by_vendor'] ?? [])[$rule['vendor']] ?? []);
+    $types = array_merge(
+        consus_retour_vendor_types($rule['vendor']),
+        array_map('strval', (array) (($data['types_by_vendor'] ?? [])[$rule['vendor']] ?? []))
+    );
     if ($rule['type'] !== CONSUS_RETOUR_TYPE_ALL && !in_array($rule['type'], $types, true)) {
-        return 'Leverancier ' . $rule['vendor'] . ' kent type ' . $rule['type'] . ' niet; deze regel vindt niets. Kies "Alle".';
+        return 'Leverancier ' . $rule['vendor'] . ' kent type ' . $rule['type'] . ' niet; deze regel vindt niets. Laat Type leeg voor alles.';
     }
     $from = consus_retour_parse_date($data['fetched_from'] ?? '');
     if ($from !== '') {

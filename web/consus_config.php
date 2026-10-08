@@ -152,10 +152,12 @@ const CONSUS_STOCK_FIELDS = [
  */
 const CONSUS_STOCK_OPTIONAL_FIELDS = [];
 
-const CONSUS_ITEM_ENTITY = 'AppItemCard';
+const CONSUS_ITEM_ENTITY = 'AppItems';
 /**
- * Exacte veldnamen uit $metadata (kvtmdlive_aad). AppItemCard heeft geen
- * kostenplaatsveld; de afdeling komt uit DefaultDimensions.
+ * AppItems (lijstpagina) in plaats van AppItemCard (kaart): zelfde 85.000
+ * artikelen, ruim twee keer zo snel per rij. AppItemCard gaf bij KVT een
+ * timeout van 300 s. Reorder_Point staat niet op AppItems; dat komt uit
+ * VoorraadPerBedrijf, net als de veiligheidsvoorraad per bedrijf.
  */
 const CONSUS_ITEM_FIELDS = [
     'No',
@@ -163,7 +165,6 @@ const CONSUS_ITEM_FIELDS = [
     'LVS_Vendor_Name',
     'Description',
     'Safety_Stock_Quantity',
-    'Reorder_Point',
 ];
 const CONSUS_ITEM_OPTIONAL_FIELDS = [];
 
@@ -242,12 +243,12 @@ const CONSUS_DIMENSION_TABLE_ID = 27;
 const CONSUS_DEPARTMENT_FALLBACK_DIMENSION = 'COST_CENTER';
 
 /**
- * Aantal rijen per OData-pagina ($top). 20000 is de gebruikelijke BC-bovengrens,
- * zodat een pagina niet uit tientallen regels bestaat en ook niet de hele
- * artikelposthistorie in één response stopt. Weigert BC die grootte, dan
- * valt nightly terug op de serverstandaard.
+ * Rijen per OData-pagina. Consus zet dit als $top in de URL; de directe
+ * BC-route stuurt het als Prefer: odata.maxpagesize en volgt nextLink, zodat
+ * grote sets helemaal binnenkomen. Mímir pagineert zelf (top 0). 5000 houdt
+ * een pagina AppItems rond 15 s, ruim onder de cURL-timeout van 300 s.
  */
-const CONSUS_ODATA_PAGE_SIZE = 20000;
+const CONSUS_ODATA_PAGE_SIZE = 5000;
 
 
 /**

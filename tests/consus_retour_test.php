@@ -264,3 +264,17 @@ retour_assert(array_column($builtResult['rows'], 'account', 'item')['PK-X'] === 
 array_map('unlink', glob($dir . '/*') ?: []);
 @rmdir($dir);
 echo "OK\n";
+
+// Type is vrije tekst: leeg/Alle = alles, ongeldige code wordt geweigerd.
+$typed = consus_retour_normalize_rule(['vendor' => '90101', 'type' => ' 57401 ', 'window' => 30, 'min_value' => '10']);
+retour_assert(is_array($typed) && $typed['type'] === '57401', 'typecode wordt getrimd');
+$blankType = consus_retour_normalize_rule(['vendor' => '90101', 'type' => '', 'window' => 30, 'min_value' => '10']);
+retour_assert(is_array($blankType) && $blankType['type'] === '', 'leeg type is alles');
+$alleType = consus_retour_normalize_rule(['vendor' => '90101', 'type' => 'Alle', 'window' => 30, 'min_value' => '10']);
+retour_assert(is_array($alleType) && $alleType['type'] === '', 'Alle is alles');
+retour_assert(consus_retour_normalize_rule(['vendor' => '90101', 'type' => '574 01', 'window' => 30, 'min_value' => '10']) === null, 'ongeldige typecode wordt geen alles');
+$hintData = ['generated_at' => '2026-10-08T03:00:00+02:00', 'vendors' => ['90101', '12345'], 'types_by_vendor' => []];
+retour_assert(consus_retour_rule_hint(['vendor' => '90101', 'type' => '57401', 'window' => 30, 'min_value' => 0.0], $hintData) === '', 'type-provider kent 57401 voor 90101 zonder nightly-types');
+retour_assert(str_contains(consus_retour_rule_hint(['vendor' => '12345', 'type' => '57401', 'window' => 30, 'min_value' => 0.0], $hintData), 'kent type 57401 niet'), 'onbekend type bij leverancier geeft hint');
+$page = file_get_contents(__DIR__ . '/../web/consus_retour_page.php');
+retour_assert(str_contains($page, 'placeholder="blanco = alles"') && !str_contains($page, '<select id="retour-type"'), 'type is een tekstveld');

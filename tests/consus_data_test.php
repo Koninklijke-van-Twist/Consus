@@ -50,7 +50,14 @@ test_assert(consus_procurement_bucket('', 'PERK') === 'eigen', 'artikelleveranci
 test_assert(consus_procurement_bucket('', '') === 'eigen' && consus_procurement_bucket_from_row(['Location_Code' => 'BYKLANT']) === 'eigen', 'locatiecode maakt geen dropship');
 
 test_assert(CONSUS_SALES_ENTRY_TYPES === ['Sale'], 'verkoop is de Engelse optienaam Sale');
-test_assert(CONSUS_ODATA_PAGE_SIZE === 20000, 'pagina is groot genoeg om round-trips te beperken');
+test_assert(CONSUS_ODATA_PAGE_SIZE === 5000, 'pagina blijft ruim onder de cURL-timeout');
+[$pagedUrl, $pagedSize] = consus_odata_page_size_from_url("https://bc.example/ODataV4/Company('K')/AppItems?%24select=No&%24top=5000");
+test_assert($pagedUrl === "https://bc.example/ODataV4/Company('K')/AppItems?%24select=No" && $pagedSize === 5000, 'paginagrootte-$top wordt Prefer maxpagesize');
+[$pagedUrl, $pagedSize] = consus_odata_page_size_from_url("https://bc.example/ODataV4/Company('K')/AppItems?\$top=5000&\$select=No");
+test_assert($pagedUrl === "https://bc.example/ODataV4/Company('K')/AppItems?\$select=No" && $pagedSize === 5000, '$top vooraan wordt ook paginagrootte');
+[$limitUrl, $limitSize] = consus_odata_page_size_from_url("https://bc.example/ODataV4/Company('K')/GeneralLedgerSetup?%24select=X&%24top=1");
+test_assert($limitSize === 0 && str_contains($limitUrl, '%24top=1'), 'een echte limiet blijft $top');
+test_assert(CONSUS_ITEM_ENTITY === 'AppItems' && !in_array('Reorder_Point', CONSUS_ITEM_FIELDS, true), 'artikelen uit AppItems zonder Reorder_Point');
 $chunks = consus_ledger_date_chunks($windows);
 $historyDate = new DateTimeImmutable($windows['history_start'] . ' 00:00:00', new DateTimeZone('Europe/Amsterdam'));
 $asOfDate = new DateTimeImmutable($windows['as_of'] . ' 00:00:00', new DateTimeZone('Europe/Amsterdam'));
@@ -2536,7 +2543,7 @@ test_assert(consus_warning_lines($mixed) === ['KVT: AppCustomerCard niet geladen
 test_assert(count(consus_info_lines($mixed)) === 2, 'verplaatste voorraad blijft als info zichtbaar');
 test_assert(CONSUS_LEDGER_ENTITY === 'PageItemLedgerEntries', 'klant en dimensie staan op PageItemLedgerEntries');
 test_assert(CONSUS_STOCK_OPTIONAL_FIELDS === [] && CONSUS_ITEM_OPTIONAL_FIELDS === [] && CONSUS_DIMENSION_OPTIONAL_FIELDS === [] && CONSUS_LEDGER_OPTIONAL_FIELDS === [], 'geen gegokte veldnamen meer');
-test_assert(in_array('Description', CONSUS_ITEM_FIELDS, true) && in_array('Reorder_Point', CONSUS_ITEM_FIELDS, true), 'artikelkaart vraagt omschrijving en bestelpunt');
+test_assert(in_array('Description', CONSUS_ITEM_FIELDS, true) && in_array('Vendor_No', CONSUS_ITEM_FIELDS, true), 'artikelen vragen omschrijving en leverancier');
 test_assert(CONSUS_CUSTOMER_ENTITIES === ['AppCustomerCard'], 'klantcatalogus uit AppCustomerCard');
 test_assert(consus_procurement_bucket_from_row(['Drop_Shipment' => true]) === 'dropship', 'Drop_Shipment is dropship');
 test_assert(consus_procurement_bucket_from_row(['Drop_Shipment' => false]) === 'eigen', 'geen Drop_Shipment is eigen');

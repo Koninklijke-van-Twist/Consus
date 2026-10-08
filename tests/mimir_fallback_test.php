@@ -636,4 +636,32 @@ if (strpos(fallback_log(), 'primary-secret') !== false) {
     fail('log bevat een geheim');
 }
 
+
+// Eén 400 of leestimeout zet Mímir niet uit voor de rest van de run.
+if (odata_mimir_failure_is_outage(new Exception('Mímir HTTP 400: Onbekende kolom: X'))) {
+    fail('een 400 mag het circuit niet openen');
+}
+if (odata_mimir_failure_is_outage(new Exception('Mímir cURL error: Operation timed out after 600001 milliseconds with 0 bytes received'))) {
+    fail('een leestimeout op één set mag het circuit niet openen');
+}
+if (odata_mimir_failure_is_outage(new Exception('Mímir error: BC weigerde het filter'))) {
+    fail('een Mímir-foutmelding voor één set mag het circuit niet openen');
+}
+if (!odata_mimir_failure_is_outage(new Exception('Mímir cURL error: Failed to connect to sleutels.kvt.nl port 443'))
+    || !odata_mimir_failure_is_outage(new Exception('Mímir HTTP 503: down'))
+    || !odata_mimir_failure_is_outage(new Exception('Mímir gaf ongeldige JSON terug.'))) {
+    fail('een echte Mímir-storing moet het circuit openen');
+}
+odata_mimir_circuit_reset();
+try {
+    odata_mimir_or_direct(
+        static function (): array { throw new Exception('Mímir HTTP 400: Onbekende kolom: X'); },
+        static function (): array { return ['direct']; }
+    );
+} catch (Throwable $ignored) {
+}
+if (odata_mimir_circuit_open()) {
+    fail('na een 400 moet het volgende verzoek Mímir weer proberen');
+}
+
 echo "OK\n";

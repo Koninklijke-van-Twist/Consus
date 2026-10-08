@@ -36,7 +36,6 @@ function consus_retour_page_section(string $retourDepartment, string $costFilter
     $result = $department !== '' && $rules !== [] ? consus_retour_candidates($data, $settings, $today, $department) : ['rows' => [], 'garantie' => [], 'skipped' => []];
     $allRows = array_merge($result['rows'], $result['garantie']);
     $generated = trim((string) ($data['generated_at'] ?? ''));
-    $typeOptions = consus_retour_type_options($data, $settings);
     $hidden = static function () use ($h, $csrf, $department, $companyFilter, $costFilter, $activeYear): string {
         return '<input type="hidden" name="csrf" value="' . $h($csrf) . '">'
             . '<input type="hidden" name="retour_afdeling" value="' . $h($department) . '">'
@@ -82,7 +81,7 @@ function consus_retour_page_section(string $retourDepartment, string $costFilter
             </div>
         </div>
         <?php if ($error !== ''): ?>
-            <div class="notice error"><?= $error === 'regel' ? 'Niet opgeslagen: vul leverancier, termijn (1–' . CONSUS_RETOUR_MAX_WINDOW . ' dagen) en minimaal bedrag correct in.' : 'Niet opgeslagen. Probeer het opnieuw.' ?></div>
+            <div class="notice error"><?= $error === 'regel' ? 'Niet opgeslagen: vul leverancier, termijn (1–' . CONSUS_RETOUR_MAX_WINDOW . ' dagen), minimaal bedrag en eventueel een geldige typecode (letters/cijfers) in.' : 'Niet opgeslagen. Probeer het opnieuw.' ?></div>
         <?php endif; ?>
         <form class="retour-pick" method="get" action="index.php#retour" id="retour-pick">
             <input type="hidden" name="company" value="<?= $h($companyFilter) ?>">
@@ -253,17 +252,11 @@ function consus_retour_page_section(string $retourDepartment, string $costFilter
                 <input type="hidden" name="rule_id" value="">
                 <div class="retour-form">
                     <div class="field"><label for="retour-vendor">Leverancier (leveranciersnr.)</label><input id="retour-vendor" name="vendor" required maxlength="20" placeholder="bijv. 90101"></div>
-                    <div class="field"><label for="retour-type">Type</label>
-                        <select id="retour-type" name="type">
-                            <?php foreach ($typeOptions as $type): ?>
-                                <option value="<?= $h($type) ?>"><?= $h(consus_retour_type_label($type)) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
+                    <div class="field"><label for="retour-type">Type</label><input id="retour-type" name="type" maxlength="20" placeholder="blanco = alles" autocomplete="off"></div>
                     <div class="field"><label for="retour-window">Termijn (dagen)</label><input id="retour-window" name="window" type="number" min="1" max="<?= CONSUS_RETOUR_MAX_WINDOW ?>" required></div>
                     <div class="field"><label for="retour-min">Minimaal bedrag (€)</label><input id="retour-min" name="min_value" type="number" min="0" step="0.01" required></div>
                 </div>
-                <p class="muted">Type "Alle" geldt voor alle facturen van de leverancier. Spoed (57401) = inkooporder met EGT aan en CSV uit; elke andere combinatie is voorraad (57420).</p>
+                <p class="muted">Type leeg laten = alle facturen van de leverancier. Anders de typecode, bijvoorbeeld voor 90101 (Perkins): 57401 = spoed (inkooporder met EGT aan en CSV uit), 57420 = voorraad (elke andere combinatie).</p>
                 <div class="retour-actions">
                     <button class="filter-button" type="submit" id="retour-rule-submit">Regel toevoegen</button>
                     <button class="export-link" type="button" id="retour-rule-reset" hidden>Annuleren</button>
@@ -318,12 +311,7 @@ function consus_retour_page_section(string $retourDepartment, string $costFilter
         function setForm(id, vendor, type, windowDays, min) {
             form.elements.rule_id.value = id;
             form.elements.vendor.value = vendor;
-            var typeSelect = form.elements.type;
-            if (![].some.call(typeSelect.options, function (o) { return o.value === type; })) {
-                var option = document.createElement('option');
-                option.value = type; option.textContent = type; typeSelect.appendChild(option);
-            }
-            typeSelect.value = type;
+            form.elements.type.value = type || '';
             form.elements.window.value = windowDays;
             form.elements.min_value.value = min;
             title.textContent = id ? 'Regel bewerken' : 'Regel toevoegen';
