@@ -111,8 +111,32 @@ function odata_mimir_timeout_seconds(): int
 
 function odata_mimir_fail(Exception $exception): void
 {
-    odata_mimir_trip($exception);
+    if (odata_mimir_failure_is_outage($exception)) {
+        odata_mimir_trip($exception);
+    }
     throw $exception;
+}
+
+/**
+ * Alleen een storing van Mímir zelf (geen verbinding, 502/503/504, geen JSON)
+ * zet Mímir voor de rest van de run uit. Een 4xx/500, een Mímir-foutmelding of
+ * een leestimeout hoort bij dat ene verzoek: dat verzoek valt terug op BC,
+ * het volgende probeert Mímir gewoon weer.
+ */
+function odata_mimir_failure_is_outage(Throwable $exception): bool
+{
+    $message = $exception->getMessage();
+    if (strpos($message, 'Mímir cURL error:') === 0) {
+        return stripos($message, 'Operation timed out') === false;
+    }
+    if (preg_match('/^Mímir HTTP ([0-9]+):/', $message, $matches) === 1) {
+        $code = (int) $matches[1];
+        return $code === 0 || in_array($code, [502, 503, 504], true);
+    }
+    if (strpos($message, 'Mímir gaf ongeldige JSON terug.') === 0) {
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -603,7 +627,9 @@ function odata_mimir_or_direct(callable $viaMimir, callable $viaDirect)
         if (!odata_mimir_failure_opens_circuit($exception)) {
             throw $exception;
         }
-        odata_mimir_trip($exception);
+        if (odata_mimir_failure_is_outage($exception)) {
+            odata_mimir_trip($exception);
+        }
         if (!odata_bc_credentials_configured()) {
             throw $exception;
         }

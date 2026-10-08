@@ -3803,9 +3803,16 @@ function consus_each_url_live_direct(string $url, array $auth, callable $onRow, 
 
     $count = 0;
     $pages = 0;
-    $next = $url;
+    [$next, $pageSize] = consus_odata_page_size_from_url($url);
     $guard = 0;
     $handle = odata_init_curl($auth);
+    if ($pageSize > 0) {
+        curl_setopt($handle, CURLOPT_HTTPHEADER, [
+            'Accept: application/json',
+            'Accept-Language: nl-NL,nl;q=0.9,en;q=0.8',
+            'Prefer: odata.maxpagesize=' . $pageSize,
+        ]);
+    }
 
     try {
         while ($next !== '') {
@@ -3840,6 +3847,30 @@ function consus_each_url_live_direct(string $url, array $auth, callable $onRow, 
     }
 
     return $count;
+}
+
+/**
+ * $top=CONSUS_ODATA_PAGE_SIZE is in Consus een paginagrootte, maar voor BC een
+ * totaallimiet: zonder nextLink kwamen bij grote sets (AppItemCard, 85.000
+ * artikelen) alleen de eerste rijen mee, in één lange response. Die $top gaat
+ * eruit en wordt Prefer: odata.maxpagesize, zodat BC met nextLink pagineert.
+ * Een andere $top (bijvoorbeeld 1) blijft een echte limiet.
+ *
+ * @return array{0:string,1:int}
+ */
+function consus_odata_page_size_from_url(string $url): array
+{
+    if (CONSUS_ODATA_PAGE_SIZE <= 0) {
+        return [$url, 0];
+    }
+    $pattern = '/([?&])(?:\$|%24)top=' . CONSUS_ODATA_PAGE_SIZE . '(?=&|#|$)&?/';
+    if (preg_match($pattern, $url) !== 1) {
+        return [$url, 0];
+    }
+    $stripped = (string) preg_replace($pattern, '$1', $url, 1);
+    $stripped = rtrim($stripped, '?&');
+
+    return [$stripped, CONSUS_ODATA_PAGE_SIZE];
 }
 
 function consus_odata_spill_path(): string
