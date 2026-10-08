@@ -228,7 +228,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         * { box-sizing: border-box; }
         body { margin: 0; background: #f4f7fb; color: var(--kvt-text); }
         button, input, select { font: inherit; }
-        .page { width: min(1440px, 100%); margin: 0 auto; padding: 24px; }
+        .page { width: min(1940px, 100%); margin: 0 auto; padding: 24px; }
         .hero {
             display: flex; align-items: flex-start; justify-content: space-between; gap: 24px;
             margin-bottom: 20px; padding: 24px; border-radius: 18px; color: #fff;
