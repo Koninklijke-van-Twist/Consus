@@ -58,6 +58,8 @@ jobs:
             --exclude-glob data/*.lock \
             --exclude-glob data/*.checkpoint \
             --exclude-glob data/*.checkpoint/** \
+            --exclude-glob data/prefs/ \
+            --exclude-glob data/prefs/** \
             ./web .
 
           bye
