@@ -32,19 +32,58 @@ retour_assert(!consus_retour_is_item_line(['Type' => ' ', 'No' => '', 'Descripti
 retour_assert(!consus_retour_is_item_line(['Type' => 'G/L Account', 'No' => '460200']), 'grootboekregel valt weg');
 retour_assert(consus_retour_dutch_date('2026-07-17') === '17 juli 2026', 'Nederlandse datum');
 
-// Instellingen per afdeling, standaard en garantielijst.
+// Instellingen: bij livegang geen regels, oude vorm wordt genegeerd, garantie blijft.
+file_put_contents(getenv('CONSUS_RETOUR_SETTINGS_FILE'), json_encode(['departments' => ['__default' => ['min_value' => 50, 'window_spoed' => 30, 'window_voorraad' => 90, 'start_date' => '2026-07-17'], '15' => ['min_value' => 10]], 'garantie_orders' => ['PO52600987']]));
 $settings = consus_retour_settings_read();
-retour_assert($settings['departments']['__default'] === ['min_value' => 50.0, 'window_spoed' => 30, 'window_voorraad' => 90, 'start_date' => '2026-07-17'], 'standaardregel');
-retour_assert($settings['garantie_orders'] === ['PO52600987'], 'PO52600987 staat standaard op de garantielijst');
-$settings = consus_retour_settings_write('080', ['min_value' => '75,5', 'window_spoed' => '14', 'window_voorraad' => '60', 'start_date' => '01-08-2026'], "PO52600987\npo52600796, x y");
-retour_assert($settings['departments']['80'] === ['min_value' => 75.5, 'window_spoed' => 14, 'window_voorraad' => 60, 'start_date' => '2026-08-01'], 'afdeling 080 wordt 80, komma en NL-datum gelezen');
-retour_assert($settings['garantie_orders'] === ['PO52600987', 'PO52600796', 'X', 'Y'] || in_array('PO52600796', $settings['garantie_orders'], true), 'garantielijst genormaliseerd');
-retour_assert(consus_retour_rule_for_department($settings, '80')['window_spoed'] === 14, 'afdeling 80 gebruikt eigen regel');
-retour_assert(consus_retour_rule_for_department($settings, '90')['window_spoed'] === 30, 'afdeling 90 valt terug op standaard');
-$settings = consus_retour_settings_write('80', [], null, true);
-retour_assert(!isset($settings['departments']['80']), 'terug naar standaard verwijdert de afdelingsregel');
-$settings = consus_retour_settings_write('', ['min_value' => '50', 'window_spoed' => '30', 'window_voorraad' => '90', 'start_date' => '2026-07-17'], 'PO52600987');
+retour_assert($settings['rules'] === [], 'oude instellingen geven geen regels, ook niet voor Perkins (15)');
+retour_assert($settings['garantie_orders'] === ['PO52600987'], 'PO52600987 blijft garantie na migratie');
+retour_assert(!str_contains(json_encode($settings), 'start_date'), 'startdatum bestaat niet meer');
+unlink(getenv('CONSUS_RETOUR_SETTINGS_FILE'));
+$settings = consus_retour_settings_read();
+retour_assert($settings['rules'] === [] && $settings['garantie_orders'] === ['PO52600987'] && $settings['garantie_lines'] === [], 'leeg bestand: geen regels, standaard garantie-PO');
+retour_assert(consus_retour_rules_for_department($settings, '15') === [], 'afdeling 15 heeft standaard geen regels');
+retour_assert(consus_retour_rule_vendors($settings) === [], 'zonder regels geen leveranciers voor de nightly');
+
+$settings = consus_retour_rule_save('15', ['vendor' => '90101', 'type' => '57401', 'window' => '30', 'min_value' => '50']);
+$settings = consus_retour_rule_save('015', ['vendor' => ' 90101 ', 'type' => '57420', 'window' => '90', 'min_value' => '50,00']);
+$rules15 = consus_retour_rules_for_department($settings, '15');
+retour_assert(count($rules15) === 2, 'twee regels voor afdeling 15 (015 = 15)');
+retour_assert($rules15[0]['vendor'] === '90101' && $rules15[0]['type'] === '57401' && $rules15[0]['window'] === 30 && $rules15[0]['min_value'] === 50.0, 'spoedregel opgeslagen');
+retour_assert($rules15[1]['type'] === '57420' && $rules15[1]['window'] === 90 && $rules15[1]['min_value'] === 50.0, 'voorraadregel opgeslagen, komma gelezen');
+retour_assert(consus_retour_rules_for_department($settings, '80') === [], 'andere afdeling blijft leeg (per afdeling, niet per persoon)');
+$settings = consus_retour_rule_save('80', ['vendor' => '70001', 'type' => 'Alle', 'window' => '60', 'min_value' => '1.234,50']);
+retour_assert(consus_retour_rules_for_department($settings, '80')[0]['type'] === '' && consus_retour_rules_for_department($settings, '80')[0]['min_value'] === 1234.5, 'type Alle is leeg, NL-bedrag gelezen');
+retour_assert(consus_retour_rule_vendors($settings) === ['70001', '90101'], 'nightly-leveranciers uit alle afdelingen');
+$id80 = consus_retour_rules_for_department($settings, '80')[0]['id'];
+$settings = consus_retour_rule_save('80', ['vendor' => '70001', 'type' => '', 'window' => '45', 'min_value' => '25'], $id80);
+retour_assert(count(consus_retour_rules_for_department($settings, '80')) === 1 && consus_retour_rules_for_department($settings, '80')[0]['window'] === 45, 'bewerken vervangt de regel');
+$settings = consus_retour_rule_delete('80', $id80);
+retour_assert(!isset($settings['rules']['80']), 'verwijderen haalt de regel weg');
+foreach ([['vendor' => '', 'window' => 30, 'min_value' => 1], ['vendor' => '90101', 'window' => 0, 'min_value' => 1], ['vendor' => '90101', 'window' => 400, 'min_value' => 1], ['vendor' => '90101', 'window' => 30, 'min_value' => 'x']] as $bad) {
+    $threw = false;
+    try {
+        consus_retour_rule_save('15', $bad);
+    } catch (InvalidArgumentException $e) {
+        $threw = true;
+    }
+    retour_assert($threw, 'ongeldige regel geweigerd: ' . json_encode($bad));
+}
+foreach (['', '__none__', '__default'] as $badDepartment) {
+    $threw = false;
+    try {
+        consus_retour_rule_save($badDepartment, ['vendor' => '90101', 'window' => 30, 'min_value' => 1]);
+    } catch (InvalidArgumentException $e) {
+        $threw = true;
+    }
+    retour_assert($threw, 'regel zonder echte afdeling geweigerd');
+}
+retour_assert(count(consus_retour_settings_read()['rules']['15']) === 2, 'opgeslagen op schijf, gedeeld');
 retour_assert(consus_retour_is_garantie('po52600987', $settings), 'garantie-PO herkend, hoofdletterongevoelig');
+retour_assert(consus_retour_vendor_types('90101') === ['57401', '57420'] && consus_retour_vendor_types('70001') === [], 'type-provider: alleen Perkins kent 57401/57420');
+retour_assert(consus_retour_type_options([], $settings) === ['', '57401', '57420'], 'zonder nightly: Alle plus types uit opgeslagen regels');
+retour_assert(consus_retour_type_options(['types_by_vendor' => ['90101' => ['57401', '57420']]], consus_retour_normalize_settings([])) === ['', '57401', '57420'], 'types uit de data');
+retour_assert(consus_retour_rule_hint($rules15[0], []) === 'Gegevens volgen na de volgende nightly.', 'hint zonder data');
+retour_assert(str_contains(consus_retour_rule_hint(['vendor' => '70001', 'type' => '57401', 'window' => 30, 'min_value' => 1.0], ['generated_at' => 'x', 'vendors' => ['70001'], 'types_by_vendor' => ['70001' => []]]), 'vindt niets'), 'hint bij type dat de leverancier niet kent');
 
 // Tekstregel als PO-bron als Order_No leeg is.
 $headers = ['PI1' => ['vendor_invoice' => '90243586', 'document_date' => '2026-09-11']];
@@ -67,43 +106,36 @@ retour_assert($reservations['PK-T438898'] === ['reserved' => 3.0, 'reserved_retu
 
 // Kandidaten.
 $item = static fn (array $extra = []): array => $extra + ['description' => '', 'safety_stock' => 0, 'stock' => ['HVT' => 5], 'bin' => ['HVT' => 5], 'reserved' => 0, 'reserved_return' => 0, 'tariff' => '', 'origin' => ''];
-$line = static fn (string $invoice, string $date, string $no, float $qty, float $cost, string $po, string $dept = '90'): array => [
-    'invoice' => $invoice, 'vendor_invoice' => 'V' . $invoice, 'document_date' => $date, 'item' => $no, 'description' => $no,
+$line = static fn (string $invoice, string $date, string $no, float $qty, float $cost, string $po, string $dept = '15', string $vendor = '90101'): array => [
+    'invoice' => $invoice, 'vendor' => $vendor, 'vendor_invoice' => 'V' . $invoice, 'document_date' => $date, 'item' => $no, 'description' => $no,
     'quantity' => $qty, 'unit_cost' => $cost, 'order_no' => $po, 'department' => $dept,
 ];
 $data = [
     'generated_at' => '2026-10-08T02:00:00+00:00',
+    'vendors' => ['90101', '70001'],
+    'types_by_vendor' => ['90101' => ['57401', '57420'], '70001' => []],
     'lines' => [
-        // €30 + €30 op dezelfde factuur = €60: samen boven €50.
         $line('PI10', '2026-09-20', 'SUM', 1, 30, 'POS'),
         $line('PI10', '2026-09-20', 'SUM', 1, 30, 'POS'),
-        // €40 alleen: onder minimum.
         $line('PI10', '2026-09-20', 'LOW', 1, 40, 'POS'),
-        // Spoed, 31 dagen oud: buiten 30 dagen.
         $line('PI11', '2026-09-07', 'OLDSPOED', 1, 100, 'POS'),
-        // Spoed, 30 dagen oud: nog net binnen.
         $line('PI12', '2026-09-08', 'EDGE', 1, 100, 'POS'),
-        // Voorraad, 60 dagen oud: binnen 90.
         $line('PI13', '2026-08-09', 'STOCK', 1, 100, 'POV'),
-        // Voor de startdatum.
+        // Oud (vroeger "voor de startdatum"), maar binnen 90 dagen: telt nu mee.
         $line('PI14', '2026-07-16', 'EARLY', 1, 100, 'POV'),
-        // Veiligheidsvoorraad.
+        $line('PI14B', '2026-07-01', 'TOOOLD', 1, 100, 'POV'),
         $line('PI15', '2026-09-20', 'SAFE', 1, 100, 'POV'),
-        // Volledig gereserveerd.
         $line('PI15', '2026-09-20', 'RES', 1, 100, 'POV'),
-        // Garantie.
         $line('PI16', '2026-09-20', 'WARR', 1, 100, 'PO52600987'),
-        // Geen bin-inhoud op HVT.
+        $line('PI16', '2026-09-20', 'MARKED', 1, 100, 'POV'),
         $line('PI17', '2026-09-20', 'PHANTOM', 1, 100, 'POV'),
-        // Voorraad alleen op M602.
         $line('PI17', '2026-09-20', 'VAN', 1, 100, 'POV'),
-        // Order niet meer in BC: voorraad.
         $line('PI18', '2026-08-20', 'GONE', 1, 100, 'POGONE'),
-        // Twee facturen, 1 op voorraad: de nieuwste krijgt hem.
         $line('PI19', '2026-09-01', 'SPLIT', 1, 100, 'POV'),
         $line('PI20', '2026-09-25', 'SPLIT', 1, 100, 'POV'),
-        // Andere afdeling.
         $line('PI21', '2026-09-20', 'DEPT80', 1, 100, 'POV', '80'),
+        // Andere leverancier zonder regel in 15.
+        $line('PI22', '2026-09-20', 'OTHERV', 1, 100, 'POX', '15', '70001'),
     ],
     'orders' => [
         'POS' => ['found' => true, 'egt' => true, 'csv' => false],
@@ -111,65 +143,90 @@ $data = [
         'PO52600987' => ['found' => true, 'egt' => false, 'csv' => false],
     ],
     'items' => [
-        'SUM' => $item(), 'LOW' => $item(), 'OLDSPOED' => $item(), 'EDGE' => $item(), 'STOCK' => $item(), 'EARLY' => $item(),
+        'SUM' => $item(), 'LOW' => $item(), 'OLDSPOED' => $item(), 'EDGE' => $item(), 'STOCK' => $item(), 'EARLY' => $item(), 'TOOOLD' => $item(),
         'SAFE' => $item(['safety_stock' => 2]), 'RES' => $item(['stock' => ['HVT' => 1], 'reserved' => 1]),
-        'WARR' => $item(), 'PHANTOM' => $item(['bin' => []]), 'VAN' => $item(['stock' => ['M602' => 1], 'bin' => []]),
-        'GONE' => $item(), 'SPLIT' => $item(['stock' => ['HVT' => 1], 'bin' => ['HVT' => 1]]), 'DEPT80' => $item(),
+        'WARR' => $item(), 'MARKED' => $item(), 'PHANTOM' => $item(['bin' => []]), 'VAN' => $item(['stock' => ['M602' => 1], 'bin' => []]),
+        'GONE' => $item(), 'SPLIT' => $item(['stock' => ['HVT' => 1], 'bin' => ['HVT' => 1]]), 'DEPT80' => $item(), 'OTHERV' => $item(),
     ],
 ];
-$result = consus_retour_candidates($data, $settings, '2026-10-08');
+// Geen regels: niets.
+$none = consus_retour_candidates($data, consus_retour_normalize_settings([]), '2026-10-08', '15');
+retour_assert($none['rows'] === [] && $none['garantie'] === [], 'zonder regels geen kandidaten');
+// Garantie via de modal (globaal) op MARKED.
+$settings = consus_retour_garantie_set('PI16', 'marked', ['POV'], true);
+retour_assert(in_array('PI16|MARKED', consus_retour_settings_read()['garantie_lines'], true), 'garantiemarkering opgeslagen');
+$result = consus_retour_candidates($data, $settings, '2026-10-08', '15');
 $byItem = [];
 foreach ($result['rows'] as $row) {
     $byItem[$row['item'] . '@' . $row['invoice']] = $row;
 }
 retour_assert(isset($byItem['SUM@PI10']) && abs($byItem['SUM@PI10']['value'] - 60.0) < 0.001 && $byItem['SUM@PI10']['return_qty'] == 2.0, '€50 per artikel per factuur: regels opgeteld');
-retour_assert($byItem['SUM@PI10']['account'] === '57401' && $byItem['SUM@PI10']['vendor_invoice'] === 'VPI10', 'spoed en Perkins-factuurnummer');
+retour_assert($byItem['SUM@PI10']['account'] === '57401' && $byItem['SUM@PI10']['vendor_invoice'] === 'VPI10' && $byItem['SUM@PI10']['vendor'] === '90101', 'spoed en leveranciersfactuur');
+retour_assert($byItem['SUM@PI10']['rule']['type'] === '57401' && $byItem['SUM@PI10']['window'] === 30, 'spoedregel gebruikt');
 retour_assert(!isset($byItem['LOW@PI10']), 'onder €50 valt weg');
 retour_assert(!isset($byItem['OLDSPOED@PI11']), 'spoed na 30 dagen verlopen');
 retour_assert(isset($byItem['EDGE@PI12']) && $byItem['EDGE@PI12']['days_left'] === 0 && $byItem['EDGE@PI12']['days_since'] === 30, 'dag 30 telt nog mee');
-retour_assert(isset($byItem['STOCK@PI13']) && $byItem['STOCK@PI13']['account'] === '57420' && $byItem['STOCK@PI13']['days_left'] === 30, 'voorraad: 90 dagen');
-retour_assert($byItem['STOCK@PI13']['deadline'] === '2026-11-07', 'uiterste retourdatum');
-retour_assert(!isset($byItem['EARLY@PI14']), 'factuur voor 17 juli 2026 telt niet');
-retour_assert(!isset($byItem['SAFE@PI15']), 'artikel met veiligheidsvoorraad valt weg');
-retour_assert(!isset($byItem['RES@PI15']), 'gereserveerde voorraad is geen kandidaat');
-retour_assert(!isset($byItem['WARR@PI16']), 'garantieorder is geen kandidaat');
-retour_assert(count($result['garantie']) === 1 && $result['garantie'][0]['item'] === 'WARR' && $result['garantie'][0]['garantie'] === true, 'garantieorder apart gemarkeerd');
-retour_assert($byItem['PHANTOM@PI17']['status'] === 'controleren' && str_contains($byItem['PHANTOM@PI17']['status_label'], 'geen bin-inhoud'), 'spookvoorraad: controleren');
-retour_assert($byItem['VAN@PI17']['status'] === 'geen_bincontrole', 'M602 zonder bincontrole');
-retour_assert($byItem['SUM@PI10']['status'] === 'kandidaat', 'gewone kandidaat');
-retour_assert($byItem['GONE@PI18']['account'] === '57420' && str_contains($byItem['GONE@PI18']['status_label'], 'niet meer in BC'), 'verdwenen order telt als voorraad met opmerking');
-retour_assert(isset($byItem['SPLIT@PI20']) && !isset($byItem['SPLIT@PI19']), 'vrije voorraad gaat naar de nieuwste factuur');
-retour_assert(isset($byItem['DEPT80@PI21']), 'alle afdelingen zonder filter');
-retour_assert($result['rows'][0]['days_left'] <= $result['rows'][count($result['rows']) - 1]['days_left'], 'gesorteerd op dagen over');
+retour_assert(isset($byItem['STOCK@PI13']) && $byItem['STOCK@PI13']['account'] === '57420' && $byItem['STOCK@PI13']['days_left'] === 30, 'voorraad 90 dagen');
+retour_assert(isset($byItem['EARLY@PI14']), 'geen startdatumfilter meer');
+retour_assert(!isset($byItem['TOOOLD@PI14B']), 'voorraad na 90 dagen verlopen');
+retour_assert(!isset($byItem['SAFE@PI15']) && !isset($byItem['RES@PI15']), 'veiligheidsvoorraad en reservering vallen weg');
+retour_assert(!isset($byItem['DEPT80@PI21']), 'andere afdeling valt weg');
+retour_assert(!isset($byItem['OTHERV@PI22']), 'leverancier zonder regel valt weg');
+retour_assert($byItem['PHANTOM@PI17']['status'] === 'controleren' && str_contains($byItem['PHANTOM@PI17']['status_label'], 'geen bin-inhoud'), 'geen bin-inhoud: controleren');
+retour_assert($byItem['VAN@PI17']['status'] === 'geen_bincontrole', 'M602: geen bincontrole');
+retour_assert(isset($byItem['GONE@PI18']) && $byItem['GONE@PI18']['account'] === '57420' && str_contains($byItem['GONE@PI18']['status_label'], 'niet meer in BC'), 'order weg: voorraad');
+retour_assert(isset($byItem['SPLIT@PI20']) && !isset($byItem['SPLIT@PI19']), 'nieuwste factuur krijgt de vrije voorraad');
+$garantieItems = array_column($result['garantie'], 'item');
+sort($garantieItems);
+retour_assert($garantieItems === ['MARKED', 'WARR'], 'garantie: PO52600987 en de handmatige markering, apart onderaan');
+retour_assert(!isset($byItem['WARR@PI16']) && !isset($byItem['MARKED@PI16']), 'garantie is geen kandidaat');
+retour_assert(str_contains(consus_retour_reason($byItem['SUM@PI10']), 'Retourwaarde € 60,00'), 'uitleg in de modal');
+// Opheffen haalt ook de PO van de garantielijst.
+$settings = consus_retour_garantie_set('PI16', 'WARR', ['PO52600987'], false);
+retour_assert($settings['garantie_orders'] === [] && consus_retour_settings_read()['garantie_lines'] === ['PI16|MARKED'], 'garantie opheffen');
+$settings = consus_retour_garantie_set('PI16', 'WARR', ['PO52600987'], true);
+retour_assert(count(consus_retour_candidates($data, $settings, '2026-10-08', '15')['garantie']) === 2, 'garantie weer aan');
 
-$only80 = consus_retour_candidates($data, $settings, '2026-10-08', '080');
-retour_assert(count($only80['rows']) === 1 && $only80['rows'][0]['item'] === 'DEPT80', 'afdelingsfilter');
-$strict = consus_retour_settings_write('90', ['min_value' => '100.01', 'window_spoed' => '30', 'window_voorraad' => '90', 'start_date' => '2026-07-17'], null);
-$strictResult = consus_retour_candidates($data, $strict, '2026-10-08');
-$strictItems = array_column($strictResult['rows'], 'item');
-retour_assert(!in_array('STOCK', $strictItems, true) && in_array('DEPT80', $strictItems, true), 'minimum per afdeling');
-retour_assert($strict['garantie_orders'] === ['PO52600987'], 'garantielijst blijft staan bij null');
+// Type "Alle": één regel voor alle facturen van de leverancier, alleen termijn + minimum.
+$alle = consus_retour_normalize_settings(['rules' => ['15' => [['vendor' => '90101', 'type' => '', 'window' => 30, 'min_value' => 50]], '80' => [['vendor' => '90101', 'type' => '57420', 'window' => 90, 'min_value' => 50]]]]);
+$alleResult = consus_retour_candidates($data, $alle, '2026-10-08', '15');
+$alleItems = array_column($alleResult['rows'], 'item');
+retour_assert(in_array('SUM', $alleItems, true) && in_array('SPLIT', $alleItems, true) && !in_array('STOCK', $alleItems, true), 'type Alle: 30 dagen voor alles');
+// Type 57401 bij leverancier zonder types: matcht niets.
+$wrong = consus_retour_normalize_settings(['rules' => ['15' => [['vendor' => '70001', 'type' => '57401', 'window' => 30, 'min_value' => 1]]]]);
+retour_assert(consus_retour_candidates($data, $wrong, '2026-10-08', '15')['rows'] === [], 'type bij leverancier zonder types matcht niets');
+$alle70 = consus_retour_normalize_settings(['rules' => ['15' => [['vendor' => '70001', 'type' => '', 'window' => 30, 'min_value' => 1]]]]);
+retour_assert(array_column(consus_retour_candidates($data, $alle70, '2026-10-08', '15')['rows'], 'item') === ['OTHERV'], 'Alle bij andere leverancier');
+// Alle afdelingen (export): 80 eigen regel.
+$all = consus_retour_candidates($data, $alle, '2026-10-08');
+retour_assert(in_array('DEPT80', array_column($all['rows'], 'item'), true) && in_array('SUM', array_column($all['rows'], 'item'), true), 'export zonder afdeling: alle afdelingen met regels');
+// Oude data zonder leverancier per regel.
+file_put_contents(getenv('CONSUS_RETOUR_FILE'), json_encode(['generated_at' => '2026-10-08T02:00:00+00:00', 'lines' => [['invoice' => 'X']]]));
+$legacy = consus_retour_read_data();
+retour_assert($legacy['vendors'] === ['90101'] && $legacy['lines'][0]['vendor'] === '90101', 'oude data telt als Perkins');
 
-// Export volgt Ivans kolommen.
 $sheet = consus_retour_export_sheet($result);
-retour_assert($sheet['rows'][0][0] === 'Account' && in_array('Perkins-factuur', $sheet['rows'][0], true) && in_array('Dagen over', $sheet['rows'][0], true), 'exportkop');
+retour_assert($sheet['rows'][0][0] === 'Leverancier' && in_array('Leveranciersfactuur', $sheet['rows'][0], true) && in_array('Dagen over', $sheet['rows'][0], true) && !in_array('Perkins-factuur', $sheet['rows'][0], true), 'exportkop');
 retour_assert(count($sheet['rows']) === count($result['rows']) + count($result['garantie']) + 1, 'export bevat kandidaten en garantieregels');
 retour_assert($sheet['rows'][1][4] !== '' && !preg_match('/^\d{4}-/', (string) $sheet['rows'][1][4]), 'datum in export is Nederlands');
 
 // Build met nep-BC: vlaggen, kop-filter, archief-fallback.
 $calls = [];
-$fake = static function (string $company, string $entitySet, array $required, array $optional, string $filter, callable $onRow) use (&$calls): void {
+$filters = [];
+$fake = static function (string $company, string $entitySet, array $required, array $optional, string $filter, callable $onRow) use (&$calls, &$filters): void {
     $calls[] = $entitySet;
+    $filters[$entitySet][] = $filter;
     $rows = match ($entitySet) {
-        'GeboekteInkoopfacturen' => [['No' => 'PI1', 'Document_Date' => '2026-09-20', 'Vendor_Invoice_No' => '90243586']],
+        'GeboekteInkoopfacturen' => [['No' => 'PI1', 'Document_Date' => '2026-09-20', 'Vendor_Invoice_No' => '90243586', 'Buy_from_Vendor_No' => '90101'], ['No' => 'PI2', 'Document_Date' => '2026-09-20', 'Vendor_Invoice_No' => 'A1', 'Buy_from_Vendor_No' => '70001']],
         'GeboekteInkoopfactuurRegels' => [
-            ['Document_No' => 'PI1', 'Line_No' => 10000, 'Type' => 'Item', 'No' => 'PK-T438898', 'Quantity' => 1, 'Direct_Unit_Cost' => 249.65, 'Order_No' => 'PO52601154', 'Shortcut_Dimension_1_Code' => '90'],
-            ['Document_No' => 'PI1', 'Line_No' => 20000, 'Type' => 'Item', 'No' => 'PK-X', 'Quantity' => 1, 'Direct_Unit_Cost' => 60, 'Order_No' => 'PO1', 'Shortcut_Dimension_1_Code' => '90'],
+            ['Document_No' => 'PI1', 'Line_No' => 10000, 'Type' => 'Item', 'No' => 'PK-T438898', 'Quantity' => 1, 'Direct_Unit_Cost' => 249.65, 'Order_No' => 'PO52601154', 'Shortcut_Dimension_1_Code' => '15'],
+            ['Document_No' => 'PI1', 'Line_No' => 20000, 'Type' => 'Item', 'No' => 'PK-X', 'Quantity' => 1, 'Direct_Unit_Cost' => 60, 'Order_No' => 'PO1', 'Shortcut_Dimension_1_Code' => '15'],
+            ['Document_No' => 'PI2', 'Line_No' => 10000, 'Type' => 'Artikel', 'No' => 'AB-1', 'Quantity' => 1, 'Direct_Unit_Cost' => 60, 'Order_No' => 'PO9', 'Shortcut_Dimension_1_Code' => '15'],
         ],
         'AppPurchaseOrder' => [['No' => 'PO52601154', 'KVT_Export_Status_Perkins_EGT' => 'Ja', 'KVT_Export_Status_Perkins_CSV' => 'Nee']],
         'GearchiveerdeInkooporders' => throw new RuntimeException('404 Onbekende tabel'),
-        'AppItemCard' => [['No' => 'PK-T438898', 'Safety_Stock_Quantity' => 0], ['No' => 'PK-X', 'Safety_Stock_Quantity' => 0]],
-        'ItemLedgerEntries' => [['Item_No' => 'PK-T438898', 'Remaining_Quantity' => 1, 'Location_Code' => 'HVT'], ['Item_No' => 'PK-X', 'Remaining_Quantity' => 1, 'Location_Code' => 'HVT']],
+        'AppItemCard' => [['No' => 'PK-T438898', 'Safety_Stock_Quantity' => 0], ['No' => 'PK-X', 'Safety_Stock_Quantity' => 0], ['No' => 'AB-1', 'Safety_Stock_Quantity' => 0]],
+        'ItemLedgerEntries' => [['Item_No' => 'PK-T438898', 'Remaining_Quantity' => 1, 'Location_Code' => 'HVT'], ['Item_No' => 'PK-X', 'Remaining_Quantity' => 1, 'Location_Code' => 'HVT'], ['Item_No' => 'AB-1', 'Remaining_Quantity' => 1, 'Location_Code' => 'M602']],
         'ReservationEntries' => [
             ['Entry_No' => 9, 'Positive' => true, 'Item_No' => 'PK-T438898', 'Quantity_Base' => 1, 'Source_Type' => 32, 'Reservation_Status' => 'Reservation'],
             ['Entry_No' => 9, 'Positive' => false, 'Item_No' => 'PK-T438898', 'Quantity_Base' => -1, 'Source_Type' => 39, 'Source_Subtype' => '5', 'Reservation_Status' => 'Reservation'],
@@ -182,15 +239,27 @@ $fake = static function (string $company, string $entitySet, array $required, ar
         $onRow($row);
     }
 };
-$built = consus_retour_build('Hunter van Twist', consus_retour_normalize_settings([]), $fake, '2026-10-08');
+$noRules = consus_retour_build('Hunter van Twist', consus_retour_normalize_settings([]), $fake, '2026-10-08');
+retour_assert($calls === [] && $noRules['lines'] === [] && $noRules['vendors'] === [], 'zonder regels geen BC-calls');
+$buildSettings = consus_retour_normalize_settings(['rules' => [
+    '15' => [['vendor' => '90101', 'type' => '57420', 'window' => 90, 'min_value' => 50], ['vendor' => '70001', 'type' => '', 'window' => 30, 'min_value' => 50]],
+]]);
+$built = consus_retour_build('Hunter van Twist', $buildSettings, $fake, '2026-10-08');
+retour_assert(str_contains($filters['GeboekteInkoopfacturen'][0], "Buy_from_Vendor_No eq '70001'") && str_contains($filters['GeboekteInkoopfacturen'][0], "Buy_from_Vendor_No eq '90101'"), 'leveranciers uit de regels');
+retour_assert(str_contains($filters['GeboekteInkoopfacturen'][0], 'Document_Date ge 2026-04-11'), 'ruim venster van 180 dagen');
+retour_assert($built['fetched_from'] === '2026-04-11' && $built['vendors'] === ['70001', '90101'], 'venster en leveranciers in de data');
+retour_assert($built['types_by_vendor'] === ['70001' => [], '90101' => ['57401', '57420']], 'types per leverancier uit de type-provider');
+retour_assert(!str_contains(implode(' ', $filters['AppPurchaseOrder']), 'PO9'), 'geen PO-vlaggen voor leverancier zonder types');
 retour_assert($built['orders']['PO52601154'] === ['found' => true, 'egt' => true, 'csv' => false], 'Nederlandse booleans van Mímir');
 retour_assert(empty($built['orders']['PO1']['found']), 'onbekende order blijft onbekend');
 retour_assert(in_array('GearchiveerdeInkooporders', $calls, true) && count($built['warnings']) === 1, 'archief geprobeerd, waarschuwing bij 404');
 retour_assert($built['items']['PK-T438898']['reserved_return'] == 1.0, 'retourorder-reservering');
 retour_assert($built['items']['PK-X']['bin'] === ['HVT' => 1.0], 'Magazijnposten als fallback voor bins');
-$builtResult = consus_retour_candidates($built, consus_retour_normalize_settings([]), '2026-10-08');
-retour_assert(array_column($builtResult['rows'], 'item') === ['PK-X'], 'T438898 staat al op retourorder en is geen kandidaat');
-retour_assert($builtResult['rows'][0]['account'] === '57420', 'PO1 zonder vlaggen is voorraad');
+$builtResult = consus_retour_candidates($built, $buildSettings, '2026-10-08', '15');
+$builtItems = array_column($builtResult['rows'], 'item');
+sort($builtItems);
+retour_assert($builtItems === ['AB-1', 'PK-X'], 'T438898 staat al op retourorder; AB-1 via Alle-regel');
+retour_assert(array_column($builtResult['rows'], 'account', 'item')['PK-X'] === '57420' && array_column($builtResult['rows'], 'account', 'item')['AB-1'] === '', 'PO1 zonder vlaggen is voorraad, AB-1 zonder type');
 
 array_map('unlink', glob($dir . '/*') ?: []);
 @rmdir($dir);

@@ -384,12 +384,12 @@ $fullLedger = consus_nightly_full_ledger_requested(
 
 try {
     $snapshot = consus_run_nightly($force, $fullLedger);
-    // Perkins-retourkandidaten (#1159): los bestand, een fout raakt de snapshot niet.
-    $retourStatus = ['ok' => false, 'lines' => 0, 'error' => ''];
+    // Retourlijst (#1159): los bestand, een fout raakt de snapshot niet. Zonder regels geen fetch.
+    $retourStatus = ['ok' => false, 'lines' => 0, 'skipped' => false, 'error' => ''];
     try {
         require_once __DIR__ . '/consus_retour_fetch.php';
         $retourData = consus_retour_refresh();
-        $retourStatus = ['ok' => true, 'lines' => count($retourData['lines'] ?? []), 'error' => ''];
+        $retourStatus = ['ok' => true, 'lines' => count($retourData['lines'] ?? []), 'skipped' => !empty($retourData['skipped']), 'error' => ''];
     } catch (Throwable $retourError) {
         $retourStatus['error'] = consus_nightly_redact($retourError->getMessage());
     }
@@ -450,7 +450,7 @@ try {
             );
         }
         echo $retourStatus['ok']
-            ? sprintf("  retour: %d factuurregels\n", $retourStatus['lines'])
+            ? ($retourStatus['skipped'] ? "  retour: overgeslagen (nog geen regels)\n" : sprintf("  retour: %d factuurregels\n", $retourStatus['lines']))
             : sprintf("  WARN retour: %s\n", $retourStatus['error']);
         if ($payload['locations'] !== []) {
             echo '  locaties: ' . implode(', ', $payload['locations']) . "\n";
