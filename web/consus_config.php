@@ -238,6 +238,7 @@ const CONSUS_CUSTOMER_SOURCE_TYPES = [
  * nummers uit de artikelposten.
  */
 const CONSUS_CUSTOMER_ENTITIES = [
+    'AppCustomerCard',
     'Customer',
     'Customer_Card',
     'Customers',
@@ -283,6 +284,8 @@ const CONSUS_DIMENSION_OPTIONAL_FIELDS = [
     'Value_Code',
 ];
 const CONSUS_DIMENSION_TABLE_ID = 27;
+/** Terugval voor de afdeling als een artikel geen waarde op Globale dimensie 1 heeft. */
+const CONSUS_DEPARTMENT_FALLBACK_DIMENSION = 'COST_CENTER';
 
 /**
  * Aantal rijen per OData-pagina ($top). 20000 is de gebruikelijke BC-bovengrens,
@@ -291,6 +294,27 @@ const CONSUS_DIMENSION_TABLE_ID = 27;
  * valt nightly terug op de serverstandaard.
  */
 const CONSUS_ODATA_PAGE_SIZE = 20000;
+
+/**
+ * Alternatieve namen voor hetzelfde gegeven. Een melding over ontbrekende
+ * velden noemt een naam alleen als geen enkele naam uit de groep kwam.
+ * Live metadata (kvtmdlive_aad): VoorraadPerBedrijf heeft Company_Name,
+ * Inventory, Safety_Stock_Quantity en Reorder_Point maar geen locatie;
+ * DefaultDimensions heeft No en Dimension_Value_Code.
+ */
+const CONSUS_FIELD_ALIAS_GROUPS = [
+    ['Location_Code', 'LocationCode', 'Locatiecode', 'Locatie', 'Location_No'],
+    ['Reorder_Point', 'Bestelpunt', 'ReorderPoint'],
+    ['Safety_Stock_Quantity', 'Veiligheidsvoorraad', 'SafetyStockQuantity'],
+    ['Global_Dimension_1_Code', 'LVS_Global_Dimension_1_Code', 'Shortcut_Dimension_1_Code', 'COST_CENTER', 'Cost_Center', 'Kostenplaats', 'Afdeling'],
+    ['Company_Name', 'CompanyName', 'Bedrijfsnaam', 'Bedrijf', 'Firma', 'Company'],
+    ['Inventory', 'Voorraad', 'Quantity_on_Hand', 'Qty_on_Hand', 'In_voorraad'],
+    ['LVS_Vendor_Name', 'Vendor_Name'],
+    ['Purchasing_Code', 'PurchasingCode'],
+    ['Vendor_No', 'Buy_from_Vendor_No'],
+    ['No', 'Item_No'],
+    ['Dimension_Value_Code', 'Dimension_Value', 'Value_Code'],
+];
 
 /**
  * Mímir max_age for UI / on-demand / live recheck when $mimirApi is set.

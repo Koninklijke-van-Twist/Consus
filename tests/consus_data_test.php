@@ -2509,4 +2509,33 @@ try {
     }
 }
 
+// Afdeling: SALES_DEPARTMENT eerst, COST_CENTER alleen voor artikelen zonder waarde.
+$passes = consus_department_dimension_passes('SALES_DEPARTMENT');
+test_assert(array_keys($passes) === ['SALES_DEPARTMENT', 'COST_CENTER'], 'terugval op COST_CENTER na Globale dimensie 1');
+test_assert($passes['SALES_DEPARTMENT']['defaults'] === 'kostenplaats', 'eerste pas houdt de oude checkpointstap');
+test_assert(array_keys(consus_department_dimension_passes('COST_CENTER')) === ['COST_CENTER'], 'geen dubbele pas');
+$deptItems = [
+    'kvt|A1' => consus_new_item_fact('kvt', 'A1'),
+    'kvt|A2' => consus_new_item_fact('kvt', 'A2'),
+];
+test_assert(consus_apply_dimension_row($deptItems, ['No' => 'A1', 'Dimension_Code' => 'SALES_DEPARTMENT', 'Dimension_Value_Code' => '45'], 'kvt', 'SALES_DEPARTMENT'), 'SALES_DEPARTMENT telt');
+test_assert(!consus_apply_dimension_row($deptItems, ['No' => 'A2', 'Dimension_Code' => 'COST_CENTER', 'Dimension_Value_Code' => '15'], 'kvt', 'SALES_DEPARTMENT'), 'andere dimensie telt niet');
+test_assert(!consus_apply_dimension_row($deptItems, ['No' => 'X9', 'Dimension_Code' => 'SALES_DEPARTMENT', 'Dimension_Value_Code' => '15'], 'kvt', 'SALES_DEPARTMENT'), 'onbekend artikel telt niet');
+consus_apply_dimension_row($deptItems, ['No' => 'A1', 'Dimension_Code' => 'COST_CENTER', 'Dimension_Value_Code' => '15'], 'kvt', 'COST_CENTER');
+consus_apply_dimension_row($deptItems, ['No' => 'A2', 'Dimension_Code' => 'COST_CENTER', 'Dimension_Value_Code' => '15'], 'kvt', 'COST_CENTER');
+test_assert($deptItems['kvt|A1']['cost_center'] === '45', 'SALES_DEPARTMENT wint van COST_CENTER');
+test_assert($deptItems['kvt|A2']['cost_center'] === '15', 'COST_CENTER vult een lege afdeling');
+
+// Ontbrekende velden: aliassen zijn geen melding als de echte naam kwam.
+$report = consus_missing_field_report(['Item_No', 'Dimension_Value', 'Value_Code'], array_merge(CONSUS_DIMENSION_FIELDS, CONSUS_DIMENSION_OPTIONAL_FIELDS));
+test_assert($report === [], 'DefaultDimensions-aliassen geven geen melding');
+$report = consus_missing_field_report(['Bestelpunt', 'ReorderPoint', 'Global_Dimension_1_Code', 'LVS_Global_Dimension_1_Code'], array_merge(CONSUS_STOCK_FIELDS, CONSUS_STOCK_OPTIONAL_FIELDS));
+test_assert($report === ['Global_Dimension_1_Code'], 'alleen een groep die helemaal ontbreekt');
+$spill = consus_collect_rows_via_spill(static function (callable $onRow): int {
+    $onRow(['No' => '1']);
+    $onRow(['No' => '2', 'Description' => 'x']);
+    return 2;
+}, static function (array $row): void {});
+test_assert(array_key_exists('Description', $spill['sample']), 'veldbestaan uit alle rijen, niet de eerste');
+
 echo "OK\n";
