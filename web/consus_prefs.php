@@ -43,7 +43,26 @@ function consus_prefs_normalize_choice(mixed $value): ?string
 }
 
 /**
- * @return array{customers:array<int, string>,items:array<int, string>,page_size:int,company:?string,cost_center:?string}
+ * "Nul-regels wegfilteren" in de jaartabel. Alleen een expliciete aan-waarde
+ * zet het filter aan; alles anders (ook ontbrekend) is uit.
+ */
+function consus_prefs_normalize_flag(mixed $value): bool
+{
+    if (is_bool($value)) {
+        return $value;
+    }
+    if (is_int($value)) {
+        return $value === 1;
+    }
+    if (!is_string($value)) {
+        return false;
+    }
+
+    return in_array(strtolower(trim($value)), ['1', 'true', 'on', 'yes'], true);
+}
+
+/**
+ * @return array{customers:array<int, string>,items:array<int, string>,page_size:int,company:?string,cost_center:?string,hide_zero:bool}
  */
 function consus_empty_prefs(): array
 {
@@ -53,6 +72,7 @@ function consus_empty_prefs(): array
         'page_size' => CONSUS_DEFAULT_PAGE_SIZE,
         'company' => null,
         'cost_center' => null,
+        'hide_zero' => false,
     ];
 }
 
@@ -115,7 +135,7 @@ function consus_prefs_normalize_list($value, int $limit = 500): array
 function consus_prefs_input_from_request(array $post): array
 {
     $input = [];
-    foreach (['customers', 'items', 'page_size', 'company', 'cost_center'] as $key) {
+    foreach (['customers', 'items', 'page_size', 'company', 'cost_center', 'hide_zero'] as $key) {
         if (array_key_exists($key, $post)) {
             $input[$key] = $post[$key];
         }
@@ -173,6 +193,7 @@ function consus_prefs_from_array(array $decoded): array
         'page_size' => consus_normalize_page_size($decoded['page_size'] ?? CONSUS_DEFAULT_PAGE_SIZE),
         'company' => consus_prefs_normalize_choice($decoded['company'] ?? null),
         'cost_center' => consus_prefs_normalize_choice($decoded['cost_center'] ?? null),
+        'hide_zero' => consus_prefs_normalize_flag($decoded['hide_zero'] ?? false),
     ];
 }
 
@@ -217,6 +238,9 @@ function consus_prefs_write(string $email, array $input): array
         if (array_key_exists('page_size', $input)) {
             $current['page_size'] = consus_normalize_page_size($input['page_size']);
         }
+        if (array_key_exists('hide_zero', $input)) {
+            $current['hide_zero'] = consus_prefs_normalize_flag($input['hide_zero']);
+        }
         foreach (['company', 'cost_center'] as $choice) {
             if (array_key_exists($choice, $input)) {
                 $value = consus_prefs_normalize_choice($input[$choice]);
@@ -233,6 +257,7 @@ function consus_prefs_write(string $email, array $input): array
             'page_size' => $current['page_size'],
             'company' => $current['company'],
             'cost_center' => $current['cost_center'],
+            'hide_zero' => $current['hide_zero'],
         ];
     });
 

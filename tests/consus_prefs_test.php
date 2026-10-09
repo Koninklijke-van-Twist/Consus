@@ -34,6 +34,18 @@ try {
     prefs_assert($sized['page_size'] === 150, 'geldige paginagrootte blijft staan');
     prefs_assert($sized['customers'] === ['C1', 'C2'], 'paginagrootte wist de klanten niet');
     prefs_assert($sized['items'] === ['ART-1', 'ART-2'], 'paginagrootte wist de artikelen niet');
+    prefs_assert($sized['hide_zero'] === false, 'nul-regels wegfilteren staat standaard uit');
+    $hidden = consus_prefs_write('tim@kvt.nl', consus_prefs_input_from_request(['csrf' => 'x', 'hide_zero' => '1']));
+    prefs_assert($hidden['hide_zero'] === true, 'nul-regels wegfilteren wordt opgeslagen');
+    prefs_assert($hidden['page_size'] === 150 && $hidden['customers'] === ['C1', 'C2'], 'nul-filter wist paginagrootte en klanten niet');
+    prefs_assert(consus_prefs_read('tim@kvt.nl')['hide_zero'] === true, 'nul-filter blijft na opnieuw lezen aan');
+    prefs_assert(consus_prefs_write('tim@kvt.nl', ['page_size' => 150])['hide_zero'] === true, 'paginagrootte wist het nul-filter niet');
+    prefs_assert(consus_prefs_write('tim@kvt.nl', ['customers' => 'C1, C2', 'items' => 'ART-1, ART-2'])['hide_zero'] === true, 'filteropslag (zonder vinkje) wist het nul-filter niet');
+    prefs_assert(consus_prefs_write('tim@kvt.nl', ['hide_zero' => '0'])['hide_zero'] === false, 'nul-filter weer uit');
+    prefs_assert(consus_prefs_write('tim@kvt.nl', ['hide_zero' => 'onzin'])['hide_zero'] === false, 'onbekende waarde is uit');
+    prefs_assert(consus_prefs_normalize_flag(true) && consus_prefs_normalize_flag('on') && consus_prefs_normalize_flag(1), 'aan-waarden');
+    prefs_assert(!consus_prefs_normalize_flag(null) && !consus_prefs_normalize_flag('') && !consus_prefs_normalize_flag([1]) && !consus_prefs_normalize_flag(2), 'uit-waarden');
+    prefs_assert(!array_key_exists('hide_zero', consus_prefs_input_from_request(['customers' => 'C1'])), 'zonder vinkje in het verzoek geen nul-filterwijziging');
     $kept = consus_prefs_write('tim@kvt.nl', ['customers' => 'C9']);
     prefs_assert($kept['page_size'] === 150, 'filteropslag houdt de paginagrootte');
     prefs_assert($kept['items'] === ['ART-1', 'ART-2'], 'alleen meegestuurde klanten wijzigen');

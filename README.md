@@ -278,6 +278,7 @@ php tests/consus_usage_test.php
 php tests/consus_prefs_test.php
 php tests/consus_xlsx_test.php
 php tests/consus_page_test.php
+node tests/consus_table_test.js
 php tests/nightly_debug_test.php
 php tests/consus_retour_test.php
 ```

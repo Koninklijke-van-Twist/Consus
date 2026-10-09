@@ -143,7 +143,7 @@ function consus_page_client_rows(array $facts, array $years, array $windows, arr
 
 /**
  * @param array<string, mixed> $snapshot
- * @param array{customers?:array<int, string>,items?:array<int, string>,page_size?:int} $prefs
+ * @param array{customers?:array<int, string>,items?:array<int, string>,page_size?:int,hide_zero?:bool} $prefs
  * @param array<string, mixed> $query
  */
 function consus_page_render(array $snapshot, array $prefs, array $query, string $csrf, ?array $companyCatalog = null): void
@@ -189,12 +189,14 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     $excludedCustomers = consus_prefs_normalize_list($prefs['customers'] ?? []);
     $excludedItems = consus_prefs_normalize_list($prefs['items'] ?? []);
     $pageSize = consus_normalize_page_size($prefs['page_size'] ?? CONSUS_DEFAULT_PAGE_SIZE);
+    $hideZero = consus_prefs_normalize_flag($prefs['hide_zero'] ?? false);
     $facts = ($hasCache && $ready && $usageAvailable)
         ? consus_usage_facts($snapshot, $companyFilter, $costFilter, $excludedItems)
         : [];
     $clientRows = consus_page_client_rows($facts, $years, $windows, $excludedCustomers, $companyFilter === '');
     $tablePayload = [
         'pageSize' => $pageSize,
+        'hideZero' => $hideZero,
         'activeYear' => $activeYear,
         'legend' => consus_low_stock_legend(),
         'articles' => $clientRows,
@@ -295,6 +297,14 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             padding: 10px 12px; border-bottom: 1px solid var(--kvt-line); background: #f8fafc;
             color: #34445a; text-align: left; white-space: nowrap; cursor: pointer; position: sticky; top: 0;
         }
+        th .sort-button { border: 0; background: transparent; color: inherit; font: inherit; font-weight: inherit; padding: 0; cursor: pointer; white-space: nowrap; display: inline-flex; gap: 4px; align-items: center; }
+        th.numeric .sort-button { flex-direction: row; }
+        th .sort-button:focus-visible { outline: 3px solid rgba(0,153,204,.35); border-radius: 4px; }
+        .sort-arrow { display: inline-block; min-width: .8em; color: #0099cc; }
+        .table-tools { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
+        .zero-filter { display: grid; gap: 4px; padding-bottom: 10px; font-size: .86rem; }
+        .zero-filter .check { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; color: #34445a; }
+        .zero-hidden { font-size: .76rem; min-height: 1em; }
         td { padding: 10px 12px; border-bottom: 1px solid #e8edf4; vertical-align: top; }
         .numeric { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
         td.item, th.item { position: sticky; left: 0; background: #fff; z-index: 1; }
@@ -441,6 +451,11 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                 <h2>Verbruik per jaar</h2>
                 <p><?= count($facts) ?> artikelen. Klik een artikelnummer voor de voorraadberekening. Klik een kolomkop om te sorteren.</p>
             </div>
+            <div class="table-tools">
+            <div class="zero-filter">
+                <label class="check"><input type="checkbox" id="hide-zero"<?= $hideZero ? ' checked' : '' ?>> Nul-regels wegfilteren</label>
+                <span class="muted zero-hidden" data-zero-hidden role="status" aria-live="polite"></span>
+            </div>
             <div class="field page-size">
                 <label for="page-size">Regels per pagina</label>
                 <select id="page-size">
@@ -448,6 +463,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                         <option value="<?= (int) $size ?>"<?= $pageSize === (int) $size ? ' selected' : '' ?>><?= (int) $size ?></option>
                     <?php endforeach; ?>
                 </select>
+            </div>
             </div>
         </div>
         <div class="tabs" role="tablist" aria-label="Jaren">
@@ -471,7 +487,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                     <thead>
                         <tr>
                             <?php foreach ($columnLabels as $index => $label): ?>
-                                <th scope="col" data-col="<?= (int) $index ?>" data-type="<?= $index === 0 ? 'text' : 'number' ?>" class="<?= $index === 0 ? 'item' : 'numeric' ?>"><?= consus_h($label) ?></th>
+                                <th scope="col" data-col="<?= (int) $index ?>" data-type="<?= $index === 0 ? 'text' : 'number' ?>" class="<?= $index === 0 ? 'item' : 'numeric' ?>"><button type="button" class="sort-button" data-sort-col="<?= (int) $index ?>"><?= consus_h($label) ?><span class="sort-arrow" aria-hidden="true"></span></button></th>
                             <?php endforeach; ?>
                         </tr>
                     </thead>
@@ -522,6 +538,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
 <script id="customer-suggestions" type="application/json"><?= json_encode($customerSuggestions, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?></script>
 <script id="item-suggestions" type="application/json"><?= json_encode($itemSuggestions, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?></script>
 <script id="year-data" type="application/json"><?= json_encode($tablePayload, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?></script>
+<script><?php readfile(__DIR__ . '/consus_table.js'); ?></script>
 <script>
 (function () {
     var form = document.getElementById('prefs-form');
@@ -813,36 +830,9 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         }).format(number);
     }
 
-    function compareText(left, right) {
-        return String(left || '').localeCompare(String(right || ''), 'nl', { numeric: true, sensitivity: 'base' });
-    }
-
-    function sortedIndexes() {
-        var indexes = articles.map(function (_, index) { return index; });
-        indexes.sort(function (leftIndex, rightIndex) {
-            var left = articles[leftIndex];
-            var right = articles[rightIndex];
-            var result = 0;
-            if (sortCol === null) {
-                result = compareText(left.item, right.item);
-                if (result === 0) { result = compareText(left.company, right.company); }
-                return result;
-            }
-            if (sortCol === 0) {
-                result = compareText(left.item, right.item);
-            } else {
-                var leftValues = (left.values && left.values[year]) || [];
-                var rightValues = (right.values && right.values[year]) || [];
-                var leftNumber = Number(leftValues[sortCol - 1]) || 0;
-                var rightNumber = Number(rightValues[sortCol - 1]) || 0;
-                result = leftNumber < rightNumber ? -1 : (leftNumber > rightNumber ? 1 : 0);
-            }
-            if (result === 0) { result = compareText(left.item, right.item); }
-            if (result === 0) { result = compareText(left.company, right.company); }
-            return sortDir < 0 ? -result : result;
-        });
-        return indexes;
-    }
+    var hideZero = !!tableData.hideZero;
+    var hideZeroBox = document.getElementById('hide-zero');
+    var zeroHiddenNode = document.querySelector('[data-zero-hidden]');
 
     function pageWindow(current, pages) {
         if (pages <= 7) {
@@ -899,8 +889,10 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
 
     function renderTable() {
         if (!body) { return; }
-        var indexes = sortedIndexes();
+        var visible = window.ConsusTable.visibleIndexes(articles, { year: year, hideZero: hideZero, col: sortCol, dir: sortDir });
+        var indexes = visible.indexes;
         var total = indexes.length;
+        if (zeroHiddenNode) { zeroHiddenNode.textContent = hideZero ? window.ConsusTable.hiddenLabel(visible.hidden) : ''; }
         var pages = Math.max(1, Math.ceil(total / pageSize));
         if (page > pages) { page = pages; }
         if (page < 1) { page = 1; }
@@ -935,6 +927,15 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             });
             body.appendChild(row);
         });
+        if (total === 0 && visible.hidden > 0) {
+            var emptyRow = document.createElement('tr');
+            var emptyCell = document.createElement('td');
+            emptyCell.colSpan = table ? table.querySelectorAll('thead th').length : 1;
+            emptyCell.className = 'muted';
+            emptyCell.textContent = 'Alle artikelen in ' + year + ' zijn nul-regels. Zet "Nul-regels wegfilteren" uit om ze te zien.';
+            emptyRow.appendChild(emptyCell);
+            body.appendChild(emptyRow);
+        }
         var from = total === 0 ? 0 : start + 1;
         var to = start + slice.length;
         document.querySelectorAll('[data-pager]').forEach(function (nav) {
@@ -975,19 +976,77 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         tab.addEventListener('click', function () { showYear(tab.getAttribute('data-year')); });
     });
 
-    if (table) {
+    function updateSortHeaders() {
+        if (!table) { return; }
         table.querySelectorAll('thead th').forEach(function (header) {
-            header.addEventListener('click', function () {
-                var index = Number(header.getAttribute('data-col'));
-                var descending = header.getAttribute('aria-sort') === 'ascending';
-                table.querySelectorAll('thead th').forEach(function (other) { other.removeAttribute('aria-sort'); });
-                header.setAttribute('aria-sort', descending ? 'descending' : 'ascending');
-                sortCol = index;
-                sortDir = descending ? -1 : 1;
+            var index = Number(header.getAttribute('data-col'));
+            var arrow = header.querySelector('.sort-arrow');
+            if (sortCol !== null && index === sortCol) {
+                header.setAttribute('aria-sort', sortDir < 0 ? 'descending' : 'ascending');
+                if (arrow) { arrow.textContent = sortDir < 0 ? '\u25BC' : '\u25B2'; }
+            } else {
+                header.removeAttribute('aria-sort');
+                if (arrow) { arrow.textContent = ''; }
+            }
+        });
+    }
+
+    if (table) {
+        // Een button per kolomkop: klik, Enter en spatie sorteren; nog eens keert om.
+        table.querySelectorAll('thead th .sort-button').forEach(function (button) {
+            button.addEventListener('click', function () {
+                var next = window.ConsusTable.nextSort(sortCol === null ? null : { col: sortCol, dir: sortDir }, Number(button.getAttribute('data-sort-col')));
+                sortCol = next.col;
+                sortDir = next.dir;
                 page = 1;
+                updateSortHeaders();
                 renderTable();
                 updateExport();
             });
+        });
+    }
+
+    if (hideZeroBox) {
+        // Opslaan per gebruiker (prefs.php, met CSRF), één verzoek tegelijk;
+        // bij een fout gaat het vinkje terug naar de laatst opgeslagen stand.
+        var savedHideZero = hideZero;
+        var hideZeroSeq = 0;
+        var hideZeroQueue = Promise.resolve();
+        var sendHideZero = function (value, seq) {
+            if (seq !== hideZeroSeq) { return Promise.resolve(); }
+            var payload = new FormData();
+            payload.set('csrf', (form.querySelector('[name="csrf"]') || {}).value || '');
+            payload.set('hide_zero', value ? '1' : '0');
+            return fetch(form.action, {
+                method: 'POST',
+                body: payload,
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' }
+            }).then(function (response) {
+                if (!response.ok) { throw new Error('opslaan mislukt'); }
+                savedHideZero = value;
+                var done = document.querySelector('[data-save-status]');
+                if (done && seq === hideZeroSeq) { done.hidden = true; done.textContent = ''; }
+            }).catch(function () {
+                if (seq !== hideZeroSeq) { return; }
+                hideZero = savedHideZero;
+                hideZeroBox.checked = savedHideZero;
+                page = 1;
+                renderTable();
+                var status = document.querySelector('[data-save-status]');
+                if (status) {
+                    status.hidden = false;
+                    status.textContent = 'Opslaan mislukt. Probeer het nog eens.';
+                }
+            });
+        };
+        hideZeroBox.addEventListener('change', function () {
+            hideZero = hideZeroBox.checked;
+            page = 1;
+            renderTable();
+            if (!form || !window.fetch) { return; }
+            var seq = ++hideZeroSeq;
+            hideZeroQueue = hideZeroQueue.then(function () { return sendHideZero(hideZero, seq); });
         });
     }
 

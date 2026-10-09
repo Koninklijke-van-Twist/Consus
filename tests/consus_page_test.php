@@ -265,4 +265,16 @@ page_assert(str_contains($rememberedHtml, '<option value="15" selected>15 - Perk
 
 array_map('unlink', glob($pageTmp . '/*') ?: []);
 @rmdir($pageTmp);
+// Nul-regels wegfilteren: standaard uit, per gebruiker onthouden; sorteerbare kolomkoppen.
+$zeroOff = page_html(page_snapshot(5), consus_empty_prefs());
+page_assert(strpos($zeroOff, 'Nul-regels wegfilteren') !== false, 'vinkje nul-regels wegfilteren staat bij de jaartabel');
+page_assert(strpos($zeroOff, '<input type="checkbox" id="hide-zero">') !== false, 'nul-filter staat standaard uit');
+page_assert(page_payload($zeroOff)['hideZero'] === false, 'jaardata: nul-filter uit');
+$zeroOn = page_html(page_snapshot(5), ['hide_zero' => true] + consus_empty_prefs());
+page_assert(strpos($zeroOn, '<input type="checkbox" id="hide-zero" checked>') !== false, 'onthouden nul-filter staat aangevinkt');
+page_assert(page_payload($zeroOn)['hideZero'] === true, 'jaardata: nul-filter aan');
+page_assert(substr_count($zeroOff, 'class="sort-button"') === count(consus_usage_column_labels()), 'elke kolomkop is een sorteerknop');
+page_assert(strpos($zeroOff, 'window.ConsusTable') !== false && strpos($zeroOff, 'function isZeroRow') !== false, 'filter- en sorteerlogica staat in de pagina');
+page_assert(strpos($zeroOff, "payload.set('hide_zero'") !== false && strpos($zeroOff, "payload.set('csrf'") !== false, 'nul-filter wordt met CSRF opgeslagen');
+
 echo "OK\n";
