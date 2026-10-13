@@ -30,6 +30,7 @@ usage_assert($october['remaining_days'] === 87 && $october['days_in_year'] === 3
 $labels = consus_usage_column_labels();
 usage_assert($labels === [
     'Artikelnummer',
+    'Omschrijving',
     'Veiligheidsvoorraad',
     'Totaal verbruik Jaar',
     'Januari',

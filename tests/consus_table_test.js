@@ -47,13 +47,13 @@ var otherYear = T.visibleIndexes(articles, { year: '2025', hideZero: true, col: 
 assert.deepStrictEqual(items(otherYear), ['b-10'], 'zonder data voor het jaar is het een nul-regel');
 assert.strictEqual(otherYear.hidden, 4);
 
-// Numeriek sorteren (kolom 2 = tweede getal), met filter, beide richtingen.
-var asc = T.visibleIndexes(articles, { year: 2026, hideZero: true, col: 2, dir: 1 });
+// Numeriek sorteren (kolom 3 = tweede getal), met filter, beide richtingen.
+var asc = T.visibleIndexes(articles, { year: 2026, hideZero: true, col: 3, dir: 1 });
 assert.deepStrictEqual(items(asc), ['A-2', 'a-10', 'c']);
-var desc = T.visibleIndexes(articles, { year: 2026, hideZero: true, col: 2, dir: -1 });
+var desc = T.visibleIndexes(articles, { year: 2026, hideZero: true, col: 3, dir: -1 });
 assert.deepStrictEqual(items(desc), ['c', 'a-10', 'A-2']);
 // Gelijke waarden: op artikelnummer.
-var byFirst = T.visibleIndexes(articles, { year: 2026, hideZero: false, col: 1, dir: 1 });
+var byFirst = T.visibleIndexes(articles, { year: 2026, hideZero: false, col: 2, dir: 1 });
 assert.deepStrictEqual(items(byFirst), ['Ä-1', 'a-10', 'b-10', 'c', 'A-2']);
 // Tekstkolom aflopend.
 var textDesc = T.visibleIndexes(articles, { year: 2026, hideZero: false, col: 0, dir: -1 });
@@ -64,6 +64,22 @@ assert.deepStrictEqual(T.nextSort(null, 3), { col: 3, dir: 1 });
 assert.deepStrictEqual(T.nextSort({ col: 3, dir: 1 }, 3), { col: 3, dir: -1 });
 assert.deepStrictEqual(T.nextSort({ col: 3, dir: -1 }, 3), { col: 3, dir: 1 });
 assert.deepStrictEqual(T.nextSort({ col: 3, dir: -1 }, 0), { col: 0, dir: 1 });
+
+// Omschrijving (kolom 1) sorteert als tekst; zoeken op nummer of omschrijving.
+function names(result) { return result.indexes.map(function (i) { return described[i].item; }); }
+var described = [
+    { item: 'X-2', description: 'Oliefilter', values: { 2026: [1] } },
+    { item: 'X-1', description: '', values: { 2026: [0] } },
+    { item: 'Y-9', description: 'Brandstoffilter', values: { 2026: [2] } }
+];
+assert.deepStrictEqual(names(T.visibleIndexes(described, { year: 2026, col: 1, dir: 1 })), ['X-1', 'Y-9', 'X-2']);
+assert.deepStrictEqual(names(T.visibleIndexes(described, { year: 2026, query: 'x-', col: null, dir: 1 })), ['X-1', 'X-2']);
+assert.deepStrictEqual(names(T.visibleIndexes(described, { year: 2026, query: ' FILTER ', col: null, dir: 1 })), ['X-2', 'Y-9']);
+assert.strictEqual(T.visibleIndexes(described, { year: 2026, query: 'zzz', col: null, dir: 1 }).matched, 0);
+var searchZero = T.visibleIndexes(described, { year: 2026, query: 'X-1', hideZero: true, col: null, dir: 1 });
+assert.strictEqual(searchZero.matched, 1);
+assert.strictEqual(searchZero.hidden, 1);
+assert.strictEqual(T.visibleIndexes(described, { year: 2026, query: '', col: null, dir: 1 }).indexes.length, 3);
 
 assert.strictEqual(T.hiddenLabel(0), '');
 assert.strictEqual(T.hiddenLabel(1), '1 nul-regel verborgen');

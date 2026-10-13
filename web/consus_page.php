@@ -120,6 +120,7 @@ function consus_page_client_rows(array $facts, array $years, array $windows, arr
             }
             $flat = consus_usage_row_values($row);
             array_shift($flat);
+            array_shift($flat);
             $numbers = [];
             foreach ($flat as $number) {
                 $numbers[] = (float) $number;
@@ -131,6 +132,7 @@ function consus_page_client_rows(array $facts, array $years, array $windows, arr
         }
         $articles[] = [
             'item' => (string) ($sample['item_no'] ?? ''),
+            'description' => trim((string) ($sample['description'] ?? '')),
             'company' => $showCompany ? (string) ($sample['company_label'] ?? '') : '',
             'low' => !empty($sample['low_stock']),
             'modal' => consus_modal_payload($sample),
@@ -253,11 +255,11 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         .filters { grid-template-columns: 1fr 1fr; }
         .field { display: grid; gap: 5px; position: relative; }
         .field label { color: var(--kvt-muted); font-size: .76rem; }
-        .field select, .field input[type="text"] {
+        .field select, .field input[type="text"], .field input[type="search"] {
             width: 100%; min-height: 42px; padding: 9px 12px; border: 1px solid var(--kvt-line);
             border-radius: 10px; color: var(--kvt-text); background: #fff;
         }
-        .field select:focus, .field input[type="text"]:focus { outline: 3px solid rgba(0,153,204,.16); border-color: #0099cc; }
+        .field select:focus, .field input[type="text"]:focus, .field input[type="search"]:focus { outline: 3px solid rgba(0,153,204,.16); border-color: #0099cc; }
         .filter-button, .export-link {
             min-height: 42px; padding: 9px 18px; border: 1px solid #0099cc; border-radius: 10px;
             background: #0099cc; color: #fff; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center;
@@ -281,6 +283,8 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         .tabs button { border: 1px solid var(--kvt-line); background: #fff; border-radius: 999px; padding: 8px 14px; cursor: pointer; color: #34445a; }
         .tabs button[aria-selected="true"] { background: #00529b; border-color: #00529b; color: #fff; }
         .page-size { min-width: 148px; }
+        .table-search { min-width: 240px; }
+        td.description { min-width: 220px; max-width: 360px; }
         .page-size select { min-width: 120px; }
         .legend { margin: 0 16px 12px; color: var(--kvt-muted); font-size: .82rem; }
         .pager { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; padding: 12px 16px; }
@@ -452,6 +456,10 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                 <p><?= count($facts) ?> artikelen. Klik een artikelnummer voor de voorraadberekening. Klik een kolomkop om te sorteren.</p>
             </div>
             <div class="table-tools">
+            <div class="field table-search">
+                <label for="table-search">Zoeken</label>
+                <input id="table-search" type="search" autocomplete="off" placeholder="Artikelnummer of omschrijving">
+            </div>
             <div class="zero-filter">
                 <label class="check"><input type="checkbox" id="hide-zero"<?= $hideZero ? ' checked' : '' ?>> Nul-regels wegfilteren</label>
                 <span class="muted zero-hidden" data-zero-hidden role="status" aria-live="polite"></span>
@@ -487,7 +495,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                     <thead>
                         <tr>
                             <?php foreach ($columnLabels as $index => $label): ?>
-                                <th scope="col" data-col="<?= (int) $index ?>" data-type="<?= $index === 0 ? 'text' : 'number' ?>" class="<?= $index === 0 ? 'item' : 'numeric' ?>"><button type="button" class="sort-button" data-sort-col="<?= (int) $index ?>"><?= consus_h($label) ?><span class="sort-arrow" aria-hidden="true"></span></button></th>
+                                <th scope="col" data-col="<?= (int) $index ?>" data-type="<?= $index <= 1 ? 'text' : 'number' ?>" class="<?= $index === 0 ? 'item' : ($index === 1 ? 'description' : 'numeric') ?>"><button type="button" class="sort-button" data-sort-col="<?= (int) $index ?>"><?= consus_h($label) ?><span class="sort-arrow" aria-hidden="true"></span></button></th>
                             <?php endforeach; ?>
                         </tr>
                     </thead>
@@ -831,6 +839,15 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     }
 
     var hideZero = !!tableData.hideZero;
+    var searchQuery = '';
+    var tableSearch = document.getElementById('table-search');
+    if (tableSearch) {
+        tableSearch.addEventListener('input', function () {
+            searchQuery = tableSearch.value;
+            page = 1;
+            renderTable();
+        });
+    }
     var hideZeroBox = document.getElementById('hide-zero');
     var zeroHiddenNode = document.querySelector('[data-zero-hidden]');
 
@@ -889,7 +906,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
 
     function renderTable() {
         if (!body) { return; }
-        var visible = window.ConsusTable.visibleIndexes(articles, { year: year, hideZero: hideZero, col: sortCol, dir: sortDir });
+        var visible = window.ConsusTable.visibleIndexes(articles, { year: year, hideZero: hideZero, query: searchQuery, col: sortCol, dir: sortDir });
         var indexes = visible.indexes;
         var total = indexes.length;
         if (zeroHiddenNode) { zeroHiddenNode.textContent = hideZero ? window.ConsusTable.hiddenLabel(visible.hidden) : ''; }
@@ -918,6 +935,10 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                 itemCell.appendChild(tag);
             }
             row.appendChild(itemCell);
+            var descriptionCell = document.createElement('td');
+            descriptionCell.className = 'description';
+            descriptionCell.textContent = article.description || '';
+            row.appendChild(descriptionCell);
             var numbers = (article.values && article.values[year]) || [];
             numbers.forEach(function (number) {
                 var cell = document.createElement('td');
@@ -927,7 +948,15 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             });
             body.appendChild(row);
         });
-        if (total === 0 && visible.hidden > 0) {
+        if (total === 0 && visible.matched === 0 && String(searchQuery).trim() !== '') {
+            var noMatchRow = document.createElement('tr');
+            var noMatchCell = document.createElement('td');
+            noMatchCell.colSpan = table ? table.querySelectorAll('thead th').length : 1;
+            noMatchCell.className = 'muted';
+            noMatchCell.textContent = 'Geen artikelen gevonden voor "' + String(searchQuery).trim() + '".';
+            noMatchRow.appendChild(noMatchCell);
+            body.appendChild(noMatchRow);
+        } else if (total === 0 && visible.hidden > 0) {
             var emptyRow = document.createElement('tr');
             var emptyCell = document.createElement('td');
             emptyCell.colSpan = table ? table.querySelectorAll('thead th').length : 1;

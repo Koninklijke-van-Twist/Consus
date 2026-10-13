@@ -56,7 +56,8 @@
 
     /**
      * Volgorde van twee artikelen. col null = standaard (artikelnummer, dan
-     * bedrijf); col 0 = artikelnummer (tekst); col n = n-de getal van het jaar.
+     * bedrijf); col 0 = artikelnummer, col 1 = omschrijving (tekst);
+     * col n >= 2 = (n-1)-de getal van het jaar.
      * Bij gelijke waarden artikelnummer en bedrijf, in dezelfde richting.
      */
     function compareArticles(left, right, col, dir, year) {
@@ -68,14 +69,28 @@
         }
         if (col === 0) {
             result = compareText(left.item, right.item);
+        } else if (col === 1) {
+            result = compareText(left.description, right.description);
         } else {
-            var leftNumber = toNumber(valuesFor(left, year)[col - 1]);
-            var rightNumber = toNumber(valuesFor(right, year)[col - 1]);
+            var leftNumber = toNumber(valuesFor(left, year)[col - 2]);
+            var rightNumber = toNumber(valuesFor(right, year)[col - 2]);
             result = leftNumber < rightNumber ? -1 : (leftNumber > rightNumber ? 1 : 0);
         }
         if (result === 0) { result = compareText(left.item, right.item); }
         if (result === 0) { result = compareText(left.company, right.company); }
         return dir < 0 ? -result : result;
+    }
+
+    /**
+     * Zoekterm (hoofdletterongevoelig) in artikelnummer of omschrijving.
+     * Een lege term past op alles.
+     */
+    function matchesQuery(article, query) {
+        var needle = String(query === null || query === undefined ? '' : query).trim().toLowerCase();
+        if (needle === '') { return true; }
+        var item = String((article && article.item) || '').toLowerCase();
+        var description = String((article && article.description) || '').toLowerCase();
+        return item.indexOf(needle) !== -1 || description.indexOf(needle) !== -1;
     }
 
     /**
@@ -87,7 +102,10 @@
         var hideZero = !!options.hideZero;
         var indexes = [];
         var hidden = 0;
+        var matched = 0;
         (articles || []).forEach(function (article, index) {
+            if (!matchesQuery(article, options.query)) { return; }
+            matched++;
             if (hideZero && isZeroRow(valuesFor(article, year))) {
                 hidden++;
                 return;
@@ -98,7 +116,7 @@
             var result = compareArticles(articles[leftIndex], articles[rightIndex], options.col, options.dir, year);
             return result !== 0 ? result : leftIndex - rightIndex;
         });
-        return { indexes: indexes, hidden: hidden };
+        return { indexes: indexes, hidden: hidden, matched: matched };
     }
 
     /** Volgende sorteerstand na een klik op kolom col. */
@@ -120,6 +138,7 @@
         isZeroRow: isZeroRow,
         compareText: compareText,
         compareArticles: compareArticles,
+        matchesQuery: matchesQuery,
         visibleIndexes: visibleIndexes,
         nextSort: nextSort,
         hiddenLabel: hiddenLabel
