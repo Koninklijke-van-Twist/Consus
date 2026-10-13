@@ -11,6 +11,7 @@ function consus_usage_column_labels(): array
 {
     return [
         'Artikelnummer',
+        'Omschrijving',
         'Veiligheidsvoorraad',
         'Totaal verbruik Jaar',
         'Januari',
@@ -506,7 +507,8 @@ function consus_usage_year_rows(array $facts, int $year, array $windows, array $
 }
 
 /**
- * Platte waarden in kolomvolgorde. Het eerste veld is tekst, de rest getallen.
+ * Platte waarden in kolomvolgorde. De eerste twee velden (artikelnummer en
+ * omschrijving) zijn tekst, de rest getallen. Zonder omschrijving: lege tekst.
  *
  * @param array<string, mixed> $row
  * @return array<int, float|string>
@@ -515,6 +517,7 @@ function consus_usage_row_values(array $row): array
 {
     $values = [
         (string) ($row['item_no'] ?? ''),
+        trim((string) ($row['description'] ?? '')),
         (float) ($row['safety_stock'] ?? 0),
         (float) ($row['total'] ?? 0),
     ];
@@ -550,8 +553,8 @@ function consus_sort_usage_rows(array $rows, $column, string $direction): array
     usort($rows, static function (array $left, array $right) use ($index, $descending): int {
         $leftValues = consus_usage_row_values($left);
         $rightValues = consus_usage_row_values($right);
-        if ($index === 0) {
-            $result = strnatcasecmp((string) $leftValues[0], (string) $rightValues[0]);
+        if ($index === 0 || $index === 1) {
+            $result = strnatcasecmp((string) $leftValues[$index], (string) $rightValues[$index]);
         } else {
             $leftNumber = (float) ($leftValues[$index] ?? 0);
             $rightNumber = (float) ($rightValues[$index] ?? 0);

@@ -114,9 +114,10 @@ foreach (array_slice($sheets, 0, 4) as $sheet) {
 $yearRows = $sheets[0]['rows'];
 xlsx_assert(count($yearRows) === 2, 'uitgesloten artikel staat niet op het blad');
 xlsx_assert($yearRows[1][0] === 'ART-1', 'overgebleven artikel');
-xlsx_assert(abs((float) $yearRows[1][3] - 7) < 0.0001, 'januari zonder uitgesloten klant: 4 verkoop + 3 intern');
-xlsx_assert(abs((float) $yearRows[1][2] - 7) < 0.0001, 'jaartotaal volgt januari');
-xlsx_assert(abs((float) $yearRows[1][19] - 3) < 0.0001, 'intern verbruik blijft de laatste kolom');
+xlsx_assert($headers[1] === 'Omschrijving' && is_string($yearRows[1][1]), 'omschrijving direct na het artikelnummer');
+xlsx_assert(abs((float) $yearRows[1][4] - 7) < 0.0001, 'januari zonder uitgesloten klant: 4 verkoop + 3 intern');
+xlsx_assert(abs((float) $yearRows[1][3] - 7) < 0.0001, 'jaartotaal volgt januari');
+xlsx_assert(abs((float) $yearRows[1][20] - 3) < 0.0001, 'intern verbruik blijft de laatste kolom');
 
 $filter = $sheets[5]['rows'];
 xlsx_assert($filter[0] === ['Gefilterde klanten', 'Gefilterde artikels'], 'filterblad heeft twee kolommen');
@@ -152,12 +153,12 @@ xlsx_assert(count($ungeneratedSheets[0]['rows']) === 1, 'lege generated_at expor
 
 $sorted = consus_xlsx_sheets($snapshot, ['customers' => [], 'items' => [], 'page_size' => 10], [
     'company' => 'kvt',
-    'sort' => '2',
+    'sort' => '3',
     'dir' => 'desc',
 ]);
 xlsx_assert(count($sorted[0]['rows']) === 3, 'export bevat alle rijen, niet één pagina');
 xlsx_assert((string) $sorted[0]['rows'][1][0] === 'ART-1', 'aflopend jaartotaal zet het grootste artikel eerst');
-xlsx_assert((float) $sorted[0]['rows'][1][2] > (float) $sorted[0]['rows'][2][2], 'eerste totaal is groter dan het tweede');
+xlsx_assert((float) $sorted[0]['rows'][1][3] > (float) $sorted[0]['rows'][2][3], 'eerste totaal is groter dan het tweede');
 
 $binary = consus_xlsx_binary($sheets);
 $path = sys_get_temp_dir() . '/consus-xlsx-test-' . getmypid() . '.xlsx';
