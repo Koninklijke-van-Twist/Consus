@@ -2642,7 +2642,7 @@ function consus_item_usage_has_movement(array $usage): bool
 /**
  * @param array<string, mixed> $item
  * @param array{as_of:string,history_start:string,retain_days_from?:string} $windows
- * @return array{company_key:string,item_no:string,cost_center:string,months:array<string, mixed>,days:array<string, mixed>}|null
+ * @return array{company_key:string,item_no:string,description:string,vendor_no:string,cost_center:string,months:array<string, mixed>,days:array<string, mixed>}|null
  */
 function consus_item_usage_record(array $item, array $windows): ?array
 {
@@ -2656,9 +2656,14 @@ function consus_item_usage_record(array $item, array $windows): ?array
         return null;
     }
 
+    // Verkoop zonder voorraad komt niet in articles (consus_article_from_location
+    // telt alleen voorraad en verbruik, geen Sale). De jaartabel leest de
+    // omschrijving anders alleen van articles en blijft leeg.
     return [
         'company_key' => (string) ($item['company_key'] ?? ''),
         'item_no' => $itemNo,
+        'description' => trim((string) ($item['description'] ?? '')),
+        'vendor_no' => trim((string) ($item['vendor_no'] ?? '')),
         'cost_center' => trim((string) ($item['cost_center'] ?? '')),
         'months' => $usage['months'],
         'days' => $usage['days'],
@@ -2793,9 +2798,23 @@ function consus_merge_warm_item_usage(
         } elseif (is_array($prev) && trim((string) ($prev['cost_center'] ?? '')) !== '') {
             $costCenter = trim((string) $prev['cost_center']);
         }
+        $description = trim((string) ($base['description'] ?? ''));
+        if (is_array($new) && trim((string) ($new['description'] ?? '')) !== '') {
+            $description = trim((string) $new['description']);
+        } elseif (is_array($prev) && trim((string) ($prev['description'] ?? '')) !== '') {
+            $description = trim((string) $prev['description']);
+        }
+        $vendorNo = trim((string) ($base['vendor_no'] ?? ''));
+        if (is_array($new) && trim((string) ($new['vendor_no'] ?? '')) !== '') {
+            $vendorNo = trim((string) $new['vendor_no']);
+        } elseif (is_array($prev) && trim((string) ($prev['vendor_no'] ?? '')) !== '') {
+            $vendorNo = trim((string) $prev['vendor_no']);
+        }
         $merged[] = [
             'company_key' => (string) ($base['company_key'] ?? ''),
             'item_no' => trim((string) ($base['item_no'] ?? '')),
+            'description' => $description,
+            'vendor_no' => $vendorNo,
             'cost_center' => $costCenter,
             'months' => $usage['months'],
             'days' => $usage['days'],

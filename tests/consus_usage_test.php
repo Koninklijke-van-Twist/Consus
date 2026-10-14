@@ -260,6 +260,63 @@ usage_assert(abs((float) $merged[0]['months']['2026-09']['customers']['C1'] - 10
 usage_assert(abs((float) $merged[0]['months']['2026-09']['internal'] - 2) < 0.0001, 'intern op de overlapdag wordt vervangen: 1 - 1 + 2');
 usage_assert(abs((float) $merged[0]['months']['2026-08']['internal'] - 4) < 0.0001, 'oudere maand blijft staan');
 
+$salesOnly = [];
+consus_apply_ledger_row($salesOnly, [
+    'Item_No' => 'PI-1',
+    'Quantity' => -4,
+    'Sales_Amount_Actual' => 40,
+    'Posting_Date' => '2026-09-10',
+    'Location_Code' => 'HVT',
+    'Source_No' => 'C9',
+    'Source_Type' => 'Customer',
+], 'hvt', 'sales', $windows);
+consus_apply_vendor_row($salesOnly, [
+    'No' => 'PI-1',
+    'Description' => 'Zuiger',
+    'Vendor_No' => 'PERK',
+    'Global_Dimension_1_Code' => '80',
+], 'hvt');
+$salesRolled = consus_rollup_items($salesOnly, $windows);
+$salesArticleNos = [];
+foreach ($salesRolled['articles'] as $salesArticle) {
+    $salesArticleNos[] = (string) ($salesArticle['item_no'] ?? '');
+}
+usage_assert(!in_array('PI-1', $salesArticleNos, true), 'alleen verkoop zonder voorraad komt niet in articles');
+$salesUsage = [];
+foreach ($salesRolled['item_usage'] as $salesRecord) {
+    $salesUsage[(string) ($salesRecord['item_no'] ?? '')] = $salesRecord;
+}
+usage_assert(($salesUsage['PI-1']['description'] ?? '') === 'Zuiger', 'verbruiksrecord bewaart de omschrijving');
+usage_assert(($salesUsage['PI-1']['vendor_no'] ?? '') === 'PERK', 'verbruiksrecord bewaart de leverancier');
+usage_assert(($salesUsage['PI-1']['cost_center'] ?? '') === '80', 'verbruiksrecord bewaart de afdeling');
+$salesSnapshot = consus_empty_snapshot();
+$salesSnapshot['generated_at'] = '2026-10-06T07:45:00+00:00';
+$salesSnapshot['as_of'] = $windows['as_of'];
+$salesSnapshot['windows'] = $windows;
+$salesSnapshot['articles'] = [];
+$salesSnapshot['item_usage'] = $salesRolled['item_usage'];
+$salesSnapshot['version'] = CONSUS_SNAPSHOT_VERSION;
+$salesFacts = [];
+foreach (consus_usage_facts($salesSnapshot, 'hvt', '', []) as $salesFact) {
+    $salesFacts[(string) $salesFact['item_no']] = $salesFact;
+}
+usage_assert(isset($salesFacts['PI-1']), 'verkoop zonder voorraad staat in de jaartabel');
+usage_assert($salesFacts['PI-1']['description'] === 'Zuiger', 'omschrijving komt uit item_usage als articles ontbreekt');
+usage_assert(($salesFacts['PI-1']['vendor_no'] ?? '') === 'PERK', 'leverancier komt uit item_usage');
+usage_assert($salesFacts['PI-1']['cost_center'] === '80', 'afdeling komt uit item_usage');
+$salesRow = consus_usage_year_row($salesFacts['PI-1'], 2026, $windows, []);
+$salesValues = consus_usage_row_values($salesRow);
+usage_assert($salesValues[0] === 'PI-1' && $salesValues[1] === 'Zuiger', 'tabel en excel tonen de omschrijving van alleen-verkoop');
+usage_assert(abs((float) $salesRow['months'][9] - 4) < 0.0001, 'september telt de verkoop');
+
+$fresh[0]['description'] = 'Filter';
+$fresh[0]['vendor_no'] = '';
+$previous[0]['description'] = '';
+$previous[0]['vendor_no'] = 'PERK';
+$mergedDescribed = consus_merge_warm_item_usage($previous, $fresh, $windows, '2026-09-23', '2026-09-23');
+usage_assert(($mergedDescribed[0]['description'] ?? '') === 'Filter', 'warme merge houdt de verse omschrijving');
+usage_assert(($mergedDescribed[0]['vendor_no'] ?? '') === 'PERK', 'warme merge houdt de leverancier uit de vorige snapshot');
+
 usage_assert(
     consus_format_dutch_datetime('2026-10-06T07:45:00+00:00') === '6 oktober 2026, 09:45',
     'tijdstip in Europe/Amsterdam, leesbaar Nederlands'

@@ -426,6 +426,19 @@ function consus_usage_facts(array $snapshot, string $companyKey, string $costCen
             $facts[$key] = consus_empty_usage_fact($usageCompany, $itemNo);
             $facts[$key]['cost_center'] = trim((string) ($usage['cost_center'] ?? ''));
         }
+        // Articles missen bij alleen verkoop (geen voorraad, geen verbruik).
+        // Omschrijving, leverancier en afdeling staan dan op het verbruiksrecord.
+        $usageDescription = trim((string) ($usage['description'] ?? ''));
+        if (strlen($usageDescription) > strlen((string) $facts[$key]['description'])) {
+            $facts[$key]['description'] = $usageDescription;
+        }
+        if ((string) $facts[$key]['cost_center'] === '' && trim((string) ($usage['cost_center'] ?? '')) !== '') {
+            $facts[$key]['cost_center'] = trim((string) $usage['cost_center']);
+        }
+        $usageVendor = trim((string) ($usage['vendor_no'] ?? ''));
+        if ($usageVendor !== '' && trim((string) ($facts[$key]['vendor_no'] ?? '')) === '') {
+            $facts[$key]['vendor_no'] = $usageVendor;
+        }
         $months = is_array($usage['months'] ?? null) ? $usage['months'] : [];
         foreach ($months as $month => $values) {
             if (!is_array($values)) {
