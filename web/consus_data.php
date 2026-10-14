@@ -2004,9 +2004,48 @@ function consus_apply_stock_row(array &$items, array $row, string $sourceCompany
 }
 
 /**
- * @param array<string, array<string, mixed>> $items
+ * Langere tekst wint, zelfde regel als de jaartabel. Leeg vult niets.
+ *
+ * @param array<string, string> $catalog artikelnummer => omschrijving
  */
-function consus_apply_vendor_row(array &$items, array $row, string $companyKey): void
+function consus_prefer_item_description(array &$catalog, string $itemNo, string $description): void
+{
+    $itemNo = trim($itemNo);
+    $description = trim($description);
+    if ($itemNo === '' || $description === '') {
+        return;
+    }
+    $current = trim((string) ($catalog[$itemNo] ?? ''));
+    if (strlen($description) > strlen($current)) {
+        $catalog[$itemNo] = $description;
+    }
+}
+
+/**
+ * Eerste gevulde waarde blijft. Leverancier en afdeling horen bij één bedrijf.
+ *
+ * @param array<string, string> $catalog
+ */
+function consus_remember_item_field(array &$catalog, string $key, string $value): void
+{
+    $key = trim($key);
+    $value = trim($value);
+    if ($key === '' || $key === '|' || $value === '') {
+        return;
+    }
+    if (trim((string) ($catalog[$key] ?? '')) !== '') {
+        return;
+    }
+    $catalog[$key] = $value;
+}
+
+/**
+ * @param array<string, array<string, mixed>> $items
+ * @param array<string, string>|null $descriptions
+ * @param array<string, string>|null $vendors company_key|item_no => leverancier
+ * @param array<string, string>|null $costCenters company_key|item_no => afdeling
+ */
+function consus_apply_vendor_row(array &$items, array $row, string $companyKey, ?array &$descriptions = null, ?array &$vendors = null, ?array &$costCenters = null): void
 {
     if ($companyKey === '') {
         return;
@@ -2017,12 +2056,30 @@ function consus_apply_vendor_row(array &$items, array $row, string $companyKey):
         return;
     }
 
-    $key = $companyKey . '|' . $itemNo;
+    // De omschrijving hoort bij het artikelnummer, ook als dit bedrijf het
+    // artikel nog niet in voorraad of verbruik heeft. Spill en het andere
+    // bedrijf vullen die later aan; anders blijft de tekst op de kaart staan
+    // en verdwijnt hij hier. Leverancier en afdeling idem, per bedrijf, zodat
+    // een warme nacht ze op bestaand verbruik kan zetten.
+    $description = consus_scalar_string($row['Description'] ?? '');
+    if ($descriptions !== null) {
+        consus_prefer_item_description($descriptions, $itemNo, $description);
+    }
+    $fieldKey = $companyKey . '|' . $itemNo;
+    $vendorNo = consus_scalar_string($row['Vendor_No'] ?? '');
+    if ($vendors !== null) {
+        consus_remember_item_field($vendors, $fieldKey, $vendorNo);
+    }
+    $costCenter = consus_cost_center_from_source_row($row);
+    if ($costCenters !== null) {
+        consus_remember_item_field($costCenters, $fieldKey, $costCenter);
+    }
+
+    $key = $fieldKey;
     if (!isset($items[$key])) {
         return;
     }
 
-    $vendorNo = consus_scalar_string($row['Vendor_No'] ?? '');
     $vendorName = consus_vendor_name_from_item($row);
     if ($vendorNo !== '') {
         $items[$key]['vendor_no'] = $vendorNo;
@@ -2031,12 +2088,10 @@ function consus_apply_vendor_row(array &$items, array $row, string $companyKey):
         $items[$key]['vendor_name'] = $vendorName;
     }
 
-    $costCenter = consus_cost_center_from_source_row($row);
     if ($costCenter !== '') {
         $items[$key]['cost_center'] = $costCenter;
     }
 
-    $description = consus_scalar_string($row['Description'] ?? '');
     if ($description !== '') {
         $items[$key]['description'] = $description;
     }
@@ -2263,8 +2318,9 @@ function consus_department_dimension_passes(string $dimensionCode): array
 
 /**
  * @param array<string, array<string, mixed>> $items
+ * @param array<string, string>|null $costCenters company_key|item_no => afdeling
  */
-function consus_apply_dimension_row(array &$items, array $row, string $companyKey, string $expectedDimension = ''): bool
+function consus_apply_dimension_row(array &$items, array $row, string $companyKey, string $expectedDimension = '', ?array &$costCenters = null): bool
 {
     if ($companyKey === '') {
         return false;
@@ -2282,6 +2338,9 @@ function consus_apply_dimension_row(array &$items, array $row, string $companyKe
     }
 
     $key = $companyKey . '|' . $itemNo;
+    if ($costCenters !== null) {
+        consus_remember_item_field($costCenters, $key, $value);
+    }
     if (!isset($items[$key])) {
         return false;
     }
@@ -2615,7 +2674,7 @@ function consus_item_usage_has_movement(array $usage): bool
 /**
  * @param array<string, mixed> $item
  * @param array{as_of:string,history_start:string,retain_days_from?:string} $windows
- * @return array{company_key:string,item_no:string,cost_center:string,months:array<string, mixed>,days:array<string, mixed>}|null
+ * @return array{company_key:string,item_no:string,description:string,vendor_no:string,cost_center:string,months:array<string, mixed>,days:array<string, mixed>}|null
  */
 function consus_item_usage_record(array $item, array $windows): ?array
 {
@@ -2629,9 +2688,14 @@ function consus_item_usage_record(array $item, array $windows): ?array
         return null;
     }
 
+    // Verkoop zonder voorraad komt niet in articles (consus_article_from_location
+    // telt alleen voorraad en verbruik, geen Sale). De jaartabel leest de
+    // omschrijving anders alleen van articles en blijft leeg.
     return [
         'company_key' => (string) ($item['company_key'] ?? ''),
         'item_no' => $itemNo,
+        'description' => trim((string) ($item['description'] ?? '')),
+        'vendor_no' => trim((string) ($item['vendor_no'] ?? '')),
         'cost_center' => trim((string) ($item['cost_center'] ?? '')),
         'months' => $usage['months'],
         'days' => $usage['days'],
@@ -2766,9 +2830,23 @@ function consus_merge_warm_item_usage(
         } elseif (is_array($prev) && trim((string) ($prev['cost_center'] ?? '')) !== '') {
             $costCenter = trim((string) $prev['cost_center']);
         }
+        $description = trim((string) ($base['description'] ?? ''));
+        if (is_array($new) && trim((string) ($new['description'] ?? '')) !== '') {
+            $description = trim((string) $new['description']);
+        } elseif (is_array($prev) && trim((string) ($prev['description'] ?? '')) !== '') {
+            $description = trim((string) $prev['description']);
+        }
+        $vendorNo = trim((string) ($base['vendor_no'] ?? ''));
+        if (is_array($new) && trim((string) ($new['vendor_no'] ?? '')) !== '') {
+            $vendorNo = trim((string) $new['vendor_no']);
+        } elseif (is_array($prev) && trim((string) ($prev['vendor_no'] ?? '')) !== '') {
+            $vendorNo = trim((string) $prev['vendor_no']);
+        }
         $merged[] = [
             'company_key' => (string) ($base['company_key'] ?? ''),
             'item_no' => trim((string) ($base['item_no'] ?? '')),
+            'description' => $description,
+            'vendor_no' => $vendorNo,
             'cost_center' => $costCenter,
             'months' => $usage['months'],
             'days' => $usage['days'],
@@ -4692,6 +4770,9 @@ function consus_overlay_stock_on_articles(
     if (trim((string) ($articles[$index]['cost_center'] ?? '')) === '' && trim((string) ($item['cost_center'] ?? '')) !== '') {
         $articles[$index]['cost_center'] = trim((string) $item['cost_center']);
     }
+    if (trim((string) ($articles[$index]['description'] ?? '')) === '' && trim((string) ($item['description'] ?? '')) !== '') {
+        $articles[$index]['description'] = trim((string) $item['description']);
+    }
 }
 
 function consus_article_has_consumption(array $article): bool
@@ -5294,6 +5375,74 @@ function consus_checkpoint_replay(string $basename, callable $onRow): int
 }
 
 /**
+ * True zodra één regel het veld heeft. OData laat een lege waarde soms weg;
+ * één gevulde regel betekent dat deze tussenstand het veld wel opvroeg.
+ */
+function consus_checkpoint_file_has_field(string $basename, string $field): bool
+{
+    $basename = basename($basename);
+    if ($basename === '' || $basename === '.' || $basename === '..' || $field === '') {
+        return false;
+    }
+    $path = consus_checkpoint_directory() . '/' . $basename;
+    if (!is_file($path)) {
+        return false;
+    }
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        return false;
+    }
+
+    try {
+        while (($line = fgets($handle)) !== false) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            $row = json_decode($line, true);
+            if (is_array($row) && array_key_exists($field, $row)) {
+                return true;
+            }
+        }
+    } finally {
+        fclose($handle);
+    }
+
+    return false;
+}
+
+/**
+ * Een afgeronde tussenstand van vóór het veld (of zonder het veld in de
+ * opgeslagen regels) telt niet meer. De vlag $keepFlag zet deze code zelf
+ * na een geslaagde ophaalronde, ook als BC de omschrijving leeg liet.
+ *
+ * @param array<string, mixed> $steps
+ */
+function consus_checkpoint_invalidate_if_field_missing(array &$steps, string $stepId, string $field, string $keepFlag): bool
+{
+    $existing = $steps[$stepId] ?? null;
+    if (!is_array($existing) || empty($existing['done'])) {
+        return false;
+    }
+    if ($keepFlag !== '' && !empty($existing[$keepFlag])) {
+        return false;
+    }
+    $file = (string) ($existing['file'] ?? '');
+    if ($file !== '' && consus_checkpoint_file_has_field($file, $field)) {
+        return false;
+    }
+    if ($file !== '') {
+        $path = consus_checkpoint_directory() . '/' . basename($file);
+        if (is_file($path)) {
+            @unlink($path);
+        }
+    }
+    unset($steps[$stepId]);
+
+    return true;
+}
+
+/**
  * @param array<string, mixed> $company
  * @return array<int, string>
  */
@@ -5832,7 +5981,10 @@ function consus_collect_customer_catalog(string $company, string $companyKey, ?c
  * @param array{as_of:string,month_start:string,quarter_start:string,year_start:string,history_start:string} $windows
  * @param array{mode?:string,from?:string,chunks?:array<int, array{from:string,to:string}>}|null $plan
  * @param array<string, mixed>|null $checkpoint
- * @return array{warnings:array<int, string>,foreign_spills:array<string, string>,departments:array<int, array<string, mixed>>,customers:array<int, array<string, mixed>>|null}
+ * @param array<string, string>|null $descriptions
+ * @param array<string, string>|null $vendors
+ * @param array<string, string>|null $costCenters
+ * @return array{warnings:array<int, string>,foreign_spills:array<string, string>,departments:array<int, array<string, mixed>>,customers:array<int, array<string, mixed>>|null,items_scanned:bool}
  */
 function consus_collect_company(
     string $company,
@@ -5843,7 +5995,10 @@ function consus_collect_company(
     ?array $plan = null,
     ?array &$checkpoint = null,
     ?callable $saveCheckpoint = null,
-    ?callable $fetchRows = null
+    ?callable $fetchRows = null,
+    ?array &$descriptions = null,
+    ?array &$vendors = null,
+    ?array &$costCenters = null
 ): array {
     $persist = $checkpoint !== null && $saveCheckpoint !== null;
     if ($checkpoint === null) {
@@ -5868,6 +6023,7 @@ function consus_collect_company(
     }
 
     $warnings = [];
+    $itemsScanned = false;
     $storedWarnings = $checkpoint['companies'][$companyKey]['warnings'] ?? [];
     if (is_array($storedWarnings)) {
         foreach ($storedWarnings as $warning) {
@@ -6003,22 +6159,30 @@ function consus_collect_company(
         }
 
         try {
+            if (consus_checkpoint_invalidate_if_field_missing(
+                $checkpoint['companies'][$companyKey]['steps'],
+                'artikelen',
+                'Description',
+                'select_has_description'
+            )) {
+                $addWarning('Opgeslagen artikelen hebben geen omschrijving en worden opnieuw opgehaald.');
+            }
             $vendorOutcome = consus_collect_entity_with_checkpoint(
                 $checkpoint['companies'][$companyKey]['steps'],
                 $companyKey,
                 'artikelen',
-                static function (array $row) use (&$items, $companyKey): void {
-                    consus_apply_vendor_row($items, $row, $companyKey);
+                static function (array $row) use (&$items, &$descriptions, &$vendors, &$costCenters, $companyKey): void {
+                    consus_apply_vendor_row($items, $row, $companyKey, $descriptions, $vendors, $costCenters);
                 },
-                static function (?array &$writer) use (&$items, $company, $companyKey, $onProgress): array {
+                static function (?array &$writer) use (&$items, &$descriptions, &$vendors, &$costCenters, $company, $companyKey, $onProgress): array {
                     return consus_each_entity_rows(
                         $company,
                         CONSUS_ITEM_ENTITY,
                         CONSUS_ITEM_FIELDS,
                         CONSUS_ITEM_OPTIONAL_FIELDS,
                         '',
-                        static function (array $row) use (&$items, &$writer, $companyKey): void {
-                            consus_apply_vendor_row($items, $row, $companyKey);
+                        static function (array $row) use (&$items, &$descriptions, &$vendors, &$costCenters, &$writer, $companyKey): void {
+                            consus_apply_vendor_row($items, $row, $companyKey, $descriptions, $vendors, $costCenters);
                             if ($writer !== null) {
                                 consus_checkpoint_write_row($writer, $row);
                             }
@@ -6050,6 +6214,14 @@ function consus_collect_company(
                 if (!empty($vendorResult['page_size_fallback'])) {
                     $addWarning(consus_page_size_warning(CONSUS_ITEM_ENTITY));
                 }
+            }
+            $articleStep = $checkpoint['companies'][$companyKey]['steps']['artikelen'] ?? null;
+            if (is_array($articleStep) && !empty($articleStep['done'])) {
+                if (empty($articleStep['select_has_description'])) {
+                    $checkpoint['companies'][$companyKey]['steps']['artikelen']['select_has_description'] = true;
+                    $saveCheckpoint();
+                }
+                $itemsScanned = true;
             }
         } catch (Throwable $error) {
             $addWarning('Artikelen (leverancier) niet geladen: ' . $error->getMessage());
@@ -6157,17 +6329,17 @@ function consus_collect_company(
                         $checkpoint['companies'][$companyKey]['steps'],
                         $companyKey,
                         $passStep,
-                        static function (array $row) use (&$items, &$dimensionMatched, $companyKey, $passCode): void {
-                            if (consus_apply_dimension_row($items, $row, $companyKey, $passCode)) {
+                        static function (array $row) use (&$items, &$dimensionMatched, &$costCenters, $companyKey, $passCode): void {
+                            if (consus_apply_dimension_row($items, $row, $companyKey, $passCode, $costCenters)) {
                                 $dimensionMatched[$passCode] = ($dimensionMatched[$passCode] ?? 0) + 1;
                             }
                         },
-                        static function (?array &$writer) use (&$items, &$dimensionMatched, $company, $companyKey, $passCode, $onProgress, $fetchRows): array {
+                        static function (?array &$writer) use (&$items, &$dimensionMatched, &$costCenters, $company, $companyKey, $passCode, $onProgress, $fetchRows): array {
                             return consus_each_dimension_rows(
                                 $company,
                                 $passCode,
-                                static function (array $row) use (&$items, &$dimensionMatched, &$writer, $companyKey, $passCode): void {
-                                    if (consus_apply_dimension_row($items, $row, $companyKey, $passCode)) {
+                                static function (array $row) use (&$items, &$dimensionMatched, &$costCenters, &$writer, $companyKey, $passCode): void {
+                                    if (consus_apply_dimension_row($items, $row, $companyKey, $passCode, $costCenters)) {
                                 $dimensionMatched[$passCode] = ($dimensionMatched[$passCode] ?? 0) + 1;
                             }
                                     if ($writer !== null) {
@@ -6255,6 +6427,7 @@ function consus_collect_company(
             'foreign_spills' => consus_foreign_spill_finish($foreignSpills, false),
             'departments' => $departmentCatalog,
             'customers' => $customers,
+            'items_scanned' => $itemsScanned,
         ];
     } catch (Throwable $error) {
         consus_foreign_spill_finish($foreignSpills, true);
@@ -6733,6 +6906,514 @@ function consus_publish_nightly_snapshot(
     return $snapshot;
 }
 
+/**
+ * Een regel in de tabel of de Excel heeft voorraad of verbruik.
+ */
+function consus_article_needs_description(array $article): bool
+{
+    if (
+        abs((float) ($article['inventory'] ?? 0)) >= 0.0000001
+        || abs((float) ($article['safety_stock'] ?? 0)) >= 0.0000001
+        || abs((float) ($article['reorder_point'] ?? 0)) >= 0.0000001
+    ) {
+        return true;
+    }
+
+    return consus_article_has_consumption($article);
+}
+
+function consus_odata_or(string $field, array $values): string
+{
+    $parts = [];
+    foreach ($values as $value) {
+        $value = trim((string) $value);
+        if ($value === '') {
+            continue;
+        }
+        $parts[] = $field . " eq '" . consus_escape_odata_string($value) . "'";
+    }
+    if ($parts === []) {
+        return '';
+    }
+
+    return '(' . implode(' or ', $parts) . ')';
+}
+
+/**
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @param array<string, string> $catalog
+ */
+function consus_seed_descriptions_from_articles(array &$catalog, array $groups): void
+{
+    foreach ($groups as $articlesByCompany) {
+        if (!is_array($articlesByCompany)) {
+            continue;
+        }
+        foreach ($articlesByCompany as $articles) {
+            if (!is_array($articles)) {
+                continue;
+            }
+            foreach ($articles as $article) {
+                if (!is_array($article)) {
+                    continue;
+                }
+                consus_prefer_item_description(
+                    $catalog,
+                    (string) ($article['item_no'] ?? ''),
+                    (string) ($article['description'] ?? '')
+                );
+            }
+        }
+    }
+}
+
+/**
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @param array<string, string> $catalog
+ */
+function consus_apply_description_catalog(array &$groups, array $catalog): void
+{
+    foreach ($groups as &$articlesByCompany) {
+        if (!is_array($articlesByCompany)) {
+            continue;
+        }
+        foreach ($articlesByCompany as &$articles) {
+            if (!is_array($articles)) {
+                continue;
+            }
+            foreach ($articles as &$article) {
+                if (!is_array($article) || trim((string) ($article['description'] ?? '')) !== '') {
+                    continue;
+                }
+                if (!consus_article_needs_description($article)) {
+                    continue;
+                }
+                $itemNo = trim((string) ($article['item_no'] ?? ''));
+                $description = trim((string) ($catalog[$itemNo] ?? ''));
+                if ($itemNo === '' || $description === '') {
+                    continue;
+                }
+                $article['description'] = $description;
+            }
+        }
+    }
+    unset($articlesByCompany, $articles, $article);
+}
+
+/**
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @return array<string, true>
+ */
+function consus_item_numbers_missing_description(array $groups): array
+{
+    $missing = [];
+    foreach ($groups as $articlesByCompany) {
+        if (!is_array($articlesByCompany)) {
+            continue;
+        }
+        foreach ($articlesByCompany as $articles) {
+            if (!is_array($articles)) {
+                continue;
+            }
+            foreach ($articles as $article) {
+                if (!is_array($article) || trim((string) ($article['description'] ?? '')) !== '') {
+                    continue;
+                }
+                if (!consus_article_needs_description($article)) {
+                    continue;
+                }
+                $itemNo = trim((string) ($article['item_no'] ?? ''));
+                if ($itemNo !== '') {
+                    $missing[$itemNo] = true;
+                }
+            }
+        }
+    }
+
+    return $missing;
+}
+
+/**
+ * @param array<string, true> $wanted
+ * @param callable(string, array<string, mixed>, callable(array<string, mixed>):void):int|null $fetchRows
+ * @return array<string, string>
+ */
+function consus_fetch_descriptions_for_numbers(
+    string $company,
+    string $entity,
+    array $required,
+    array $optional,
+    array $wanted,
+    bool $fullScan,
+    ?callable $fetchRows,
+    ?array &$vendors = null,
+    string $companyKey = ''
+): array {
+    $found = [];
+    $onRow = static function (array $row) use (&$found, $wanted, &$vendors, $companyKey): void {
+        $itemNo = consus_scalar_string($row['No'] ?? $row['Item_No'] ?? '');
+        if ($itemNo === '' || !isset($wanted[$itemNo])) {
+            return;
+        }
+        consus_prefer_item_description($found, $itemNo, consus_scalar_string($row['Description'] ?? ''));
+        if ($vendors !== null && $companyKey !== '') {
+            consus_remember_item_field($vendors, $companyKey . '|' . $itemNo, consus_scalar_string($row['Vendor_No'] ?? ''));
+        }
+    };
+    if ($fullScan) {
+        consus_each_entity_rows($company, $entity, $required, $optional, '', $onRow, $fetchRows);
+
+        return $found;
+    }
+    foreach (array_chunk(array_keys($wanted), 25) as $chunk) {
+        $filter = consus_odata_or('No', $chunk);
+        if ($filter === '') {
+            continue;
+        }
+        consus_each_entity_rows($company, $entity, $required, $optional, $filter, $onRow, $fetchRows);
+    }
+
+    return $found;
+}
+
+/**
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @param array<string, string> $catalog
+ */
+function consus_seed_descriptions_from_usage(array &$catalog, array $groups): void
+{
+    foreach ($groups as $usageByCompany) {
+        if (!is_array($usageByCompany)) {
+            continue;
+        }
+        foreach ($usageByCompany as $records) {
+            if (!is_array($records)) {
+                continue;
+            }
+            foreach ($records as $record) {
+                if (!is_array($record)) {
+                    continue;
+                }
+                consus_prefer_item_description(
+                    $catalog,
+                    (string) ($record['item_no'] ?? ''),
+                    (string) ($record['description'] ?? '')
+                );
+            }
+        }
+    }
+}
+
+/**
+ * Alleen-verkoop staat niet in articles. Een warme nacht bewaart het oude
+ * verbruiksrecord; de omschrijving uit AppItems moet daar alsnog op.
+ *
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @param array<string, string> $catalog
+ */
+function consus_apply_description_catalog_to_usage(array &$groups, array $catalog): void
+{
+    foreach ($groups as &$usageByCompany) {
+        if (!is_array($usageByCompany)) {
+            continue;
+        }
+        foreach ($usageByCompany as &$records) {
+            if (!is_array($records)) {
+                continue;
+            }
+            foreach ($records as &$record) {
+                if (!is_array($record) || trim((string) ($record['description'] ?? '')) !== '') {
+                    continue;
+                }
+                $itemNo = trim((string) ($record['item_no'] ?? ''));
+                $description = trim((string) ($catalog[$itemNo] ?? ''));
+                if ($itemNo === '' || $description === '') {
+                    continue;
+                }
+                $record['description'] = $description;
+            }
+        }
+    }
+    unset($usageByCompany, $records, $record);
+}
+
+/**
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @return array<string, true>
+ */
+function consus_usage_numbers_missing_description(array $groups): array
+{
+    $missing = [];
+    foreach ($groups as $usageByCompany) {
+        if (!is_array($usageByCompany)) {
+            continue;
+        }
+        foreach ($usageByCompany as $records) {
+            if (!is_array($records)) {
+                continue;
+            }
+            foreach ($records as $record) {
+                if (!is_array($record) || trim((string) ($record['description'] ?? '')) !== '') {
+                    continue;
+                }
+                $itemNo = trim((string) ($record['item_no'] ?? ''));
+                if ($itemNo !== '') {
+                    $missing[$itemNo] = true;
+                }
+            }
+        }
+    }
+
+    return $missing;
+}
+
+/**
+ * @param array<string, string> $vendors
+ * @param array<string, string> $costCenters
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ */
+function consus_seed_item_fields_from_articles(array &$vendors, array &$costCenters, array $groups): void
+{
+    foreach ($groups as $articlesByCompany) {
+        if (!is_array($articlesByCompany)) {
+            continue;
+        }
+        foreach ($articlesByCompany as $articles) {
+            if (!is_array($articles)) {
+                continue;
+            }
+            foreach ($articles as $article) {
+                if (!is_array($article)) {
+                    continue;
+                }
+                $key = trim((string) ($article['company_key'] ?? '')) . '|' . trim((string) ($article['item_no'] ?? ''));
+                consus_remember_item_field($vendors, $key, (string) ($article['vendor_no'] ?? ''));
+                consus_remember_item_field($costCenters, $key, (string) ($article['cost_center'] ?? ''));
+            }
+        }
+    }
+}
+
+/**
+ * @param array<string, string> $vendors
+ * @param array<string, string> $costCenters
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ */
+function consus_seed_item_fields_from_usage(array &$vendors, array &$costCenters, array $groups): void
+{
+    foreach ($groups as $usageByCompany) {
+        if (!is_array($usageByCompany)) {
+            continue;
+        }
+        foreach ($usageByCompany as $records) {
+            if (!is_array($records)) {
+                continue;
+            }
+            foreach ($records as $record) {
+                if (!is_array($record)) {
+                    continue;
+                }
+                $key = trim((string) ($record['company_key'] ?? '')) . '|' . trim((string) ($record['item_no'] ?? ''));
+                consus_remember_item_field($vendors, $key, (string) ($record['vendor_no'] ?? ''));
+                consus_remember_item_field($costCenters, $key, (string) ($record['cost_center'] ?? ''));
+            }
+        }
+    }
+}
+
+/**
+ * Alleen lege velden. Een gevulde leverancier of afdeling op het verbruiksrecord blijft.
+ *
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @param array<string, string> $vendors
+ * @param array<string, string> $costCenters
+ */
+function consus_apply_item_fields_to_usage(array &$groups, array $vendors, array $costCenters): void
+{
+    foreach ($groups as &$usageByCompany) {
+        if (!is_array($usageByCompany)) {
+            continue;
+        }
+        foreach ($usageByCompany as &$records) {
+            if (!is_array($records)) {
+                continue;
+            }
+            foreach ($records as &$record) {
+                if (!is_array($record)) {
+                    continue;
+                }
+                $key = trim((string) ($record['company_key'] ?? '')) . '|' . trim((string) ($record['item_no'] ?? ''));
+                if ($key === '|' || $key === '') {
+                    continue;
+                }
+                if (trim((string) ($record['vendor_no'] ?? '')) === '') {
+                    $vendorNo = trim((string) ($vendors[$key] ?? ''));
+                    if ($vendorNo !== '') {
+                        $record['vendor_no'] = $vendorNo;
+                    }
+                }
+                if (trim((string) ($record['cost_center'] ?? '')) === '') {
+                    $costCenter = trim((string) ($costCenters[$key] ?? ''));
+                    if ($costCenter !== '') {
+                        $record['cost_center'] = $costCenter;
+                    }
+                }
+            }
+        }
+    }
+    unset($usageByCompany, $records, $record);
+}
+
+/**
+ * Vult lege omschrijvingen op regels met voorraad of verbruik, en op
+ * verbruiksrecords (ook alleen verkoop, die niet in articles staat).
+ * Eerst per artikelnummer uit beide bedrijven en uit AppItems van deze run.
+ * Wat dan nog leeg is, haalt nightly gericht op via AppItems (Mímir, anders BC)
+ * en daarna de artikelkaart. Leverancier en afdeling gaan mee naar bestaand
+ * verbruik als die velden daar leeg zijn.
+ *
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @param array<string, string> $catalog
+ * @param array<int, array{company?:string,company_key?:string}> $companies
+ * @param array<string, mixed> $scannedCompanyKeys
+ * @param callable(string, array<string, mixed>, callable(array<string, mixed>):void):int|null $fetchRows
+ * @param array<int, array<string, array<int, array<string, mixed>>>>|null $usageGroups
+ * @param array<string, string>|null $vendors company_key|item_no => leverancier
+ * @param array<string, string>|null $costCenters company_key|item_no => afdeling
+ * @return array<int, array{company:string,warning:string}>
+ */
+function consus_backfill_article_descriptions(
+    array &$groups,
+    array $catalog,
+    array $companies,
+    array $scannedCompanyKeys,
+    ?callable $fetchRows = null,
+    ?array &$usageGroups = null,
+    ?array &$vendors = null,
+    ?array &$costCenters = null
+): array {
+    $warnings = [];
+    if ($usageGroups === null) {
+        $usageGroups = [];
+    }
+    if ($vendors === null) {
+        $vendors = [];
+    }
+    if ($costCenters === null) {
+        $costCenters = [];
+    }
+    consus_seed_descriptions_from_articles($catalog, $groups);
+    consus_seed_descriptions_from_usage($catalog, $usageGroups);
+    consus_seed_item_fields_from_articles($vendors, $costCenters, $groups);
+    consus_seed_item_fields_from_usage($vendors, $costCenters, $usageGroups);
+    consus_apply_description_catalog($groups, $catalog);
+    consus_apply_description_catalog_to_usage($usageGroups, $catalog);
+    consus_apply_item_fields_to_usage($usageGroups, $vendors, $costCenters);
+    $missing = consus_item_numbers_missing_description($groups) + consus_usage_numbers_missing_description($usageGroups);
+    if ($missing === []) {
+        return [];
+    }
+
+    $scanned = [];
+    foreach ($scannedCompanyKeys as $key => $value) {
+        if (is_int($key)) {
+            $scanned[(string) $value] = true;
+            continue;
+        }
+        if ($value) {
+            $scanned[(string) $key] = true;
+        }
+    }
+
+    $warnings = array_merge(
+        $warnings,
+        consus_fetch_missing_descriptions($groups, $catalog, $companies, $missing, $scanned, CONSUS_ITEM_ENTITY, ['No', 'Description'], ['Vendor_No'], true, $fetchRows, $vendors)
+    );
+    consus_apply_description_catalog_to_usage($usageGroups, $catalog);
+    consus_apply_item_fields_to_usage($usageGroups, $vendors, $costCenters);
+    $missing = consus_item_numbers_missing_description($groups) + consus_usage_numbers_missing_description($usageGroups);
+    if ($missing === []) {
+        return $warnings;
+    }
+
+    // AppItemCard time-outte op de volle set. Alleen de nummers die nog leeg zijn.
+    $warnings = array_merge(
+        $warnings,
+        consus_fetch_missing_descriptions($groups, $catalog, $companies, $missing, [], 'AppItemCard', ['No'], ['Description', 'Vendor_No'], false, $fetchRows, $vendors)
+    );
+    consus_apply_description_catalog_to_usage($usageGroups, $catalog);
+    consus_apply_item_fields_to_usage($usageGroups, $vendors, $costCenters);
+
+    return $warnings;
+}
+
+/**
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @param array<string, string> $catalog
+ * @param array<int, array{company?:string,company_key?:string}> $companies
+ * @param array<string, true> $missing
+ * @param array<string, true> $skipCompanyKeys
+ * @param array<int, string> $required
+ * @param array<int, string> $optional
+ * @param callable(string, array<string, mixed>, callable(array<string, mixed>):void):int|null $fetchRows
+ * @param array<string, string>|null $vendors
+ * @return array<int, array{company:string,warning:string}>
+ */
+function consus_fetch_missing_descriptions(
+    array &$groups,
+    array &$catalog,
+    array $companies,
+    array $missing,
+    array $skipCompanyKeys,
+    string $entity,
+    array $required,
+    array $optional,
+    bool $allowFullScan,
+    ?callable $fetchRows,
+    ?array &$vendors = null
+): array {
+    $warnings = [];
+    // Boven een paar honderd nummers is één AppItems-scan (alleen No en
+    // Description) korter dan tientallen OR-filters. Alleen gevraagde nummers blijven.
+    $fullScan = $allowFullScan && count($missing) > 400;
+    foreach ($companies as $companyInfo) {
+        if ($missing === [] || !is_array($companyInfo)) {
+            continue;
+        }
+        $companyKey = (string) ($companyInfo['company_key'] ?? '');
+        $company = trim((string) ($companyInfo['company'] ?? ''));
+        if ($company === '' || isset($skipCompanyKeys[$companyKey])) {
+            continue;
+        }
+        try {
+            $found = consus_fetch_descriptions_for_numbers(
+                $company,
+                $entity,
+                $required,
+                $optional,
+                $missing,
+                $fullScan,
+                $fetchRows,
+                $vendors,
+                $companyKey
+            );
+        } catch (Throwable $error) {
+            $warnings[] = [
+                'company' => $company,
+                'warning' => 'Omschrijvingen uit ' . $entity . ' niet geladen: ' . $error->getMessage(),
+            ];
+            continue;
+        }
+        foreach ($found as $itemNo => $description) {
+            consus_prefer_item_description($catalog, (string) $itemNo, (string) $description);
+            unset($missing[(string) $itemNo]);
+        }
+    }
+    consus_apply_description_catalog($groups, $catalog);
+
+    return $warnings;
+}
+
 function consus_run_nightly(bool $force = false, bool $fullLedger = false): array
 {
     // Nightly Mímir max_age = 4h (CONSUS_NIGHTLY_MAX_AGE). UI/on-demand keeps CONSUS_ODATA_TTL.
@@ -6796,6 +7477,10 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
     $freshUsage = [];
     $freshCustomers = [];
     $foreignSpills = [];
+    $descriptionCatalog = [];
+    $vendorCatalog = [];
+    $costCenterCatalog = [];
+    $descriptionScanned = [];
     $companyStats = [];
     $errors = [];
     $warnings = [];
@@ -6951,8 +7636,15 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
                 },
                 $plan,
                 $checkpoint,
-                $saveCheckpoint
+                $saveCheckpoint,
+                null,
+                $descriptionCatalog,
+                $vendorCatalog,
+                $costCenterCatalog
             );
+            if (!empty($result['items_scanned'])) {
+                $descriptionScanned[$companyKey] = true;
+            }
             $rolled = consus_rollup_items($localItems, $windows);
             $localItems = [];
             $freshRows[$companyKey] = $rolled['rows'];
@@ -7118,6 +7810,26 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
     foreach (consus_rehome_stranded_inventory($freshRows, $freshArticles) as $rehomeWarning) {
         $warnings[] = $rehomeWarning;
     }
+
+    $descriptionGroups = [];
+    $descriptionGroups[] = &$freshArticles;
+    $descriptionGroups[] = &$previousArticles;
+    $usageDescriptionGroups = [];
+    $usageDescriptionGroups[] = &$freshUsage;
+    $usageDescriptionGroups[] = &$previousUsage;
+    foreach (consus_backfill_article_descriptions(
+        $descriptionGroups,
+        $descriptionCatalog,
+        $companies,
+        $descriptionScanned,
+        null,
+        $usageDescriptionGroups,
+        $vendorCatalog,
+        $costCenterCatalog
+    ) as $descriptionWarning) {
+        $warnings[] = $descriptionWarning;
+    }
+    unset($descriptionGroups, $usageDescriptionGroups);
 
     $snapshot = $publish(false);
     unset($freshRows, $previousRows, $freshArticles, $previousArticles);

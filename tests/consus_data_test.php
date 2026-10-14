@@ -2549,7 +2549,9 @@ $deptItems = [
 ];
 test_assert(consus_apply_dimension_row($deptItems, ['No' => 'A1', 'Dimension_Code' => 'SALES_DEPARTMENT', 'Dimension_Value_Code' => '45'], 'kvt', 'SALES_DEPARTMENT'), 'SALES_DEPARTMENT telt');
 test_assert(!consus_apply_dimension_row($deptItems, ['No' => 'A2', 'Dimension_Code' => 'COST_CENTER', 'Dimension_Value_Code' => '15'], 'kvt', 'SALES_DEPARTMENT'), 'andere dimensie telt niet');
-test_assert(!consus_apply_dimension_row($deptItems, ['No' => 'X9', 'Dimension_Code' => 'SALES_DEPARTMENT', 'Dimension_Value_Code' => '15'], 'kvt', 'SALES_DEPARTMENT'), 'onbekend artikel telt niet');
+$unknownCostCenters = [];
+test_assert(!consus_apply_dimension_row($deptItems, ['No' => 'X9', 'Dimension_Code' => 'SALES_DEPARTMENT', 'Dimension_Value_Code' => '15'], 'kvt', 'SALES_DEPARTMENT', $unknownCostCenters), 'onbekend artikel telt niet');
+test_assert(($unknownCostCenters['kvt|X9'] ?? '') === '15', 'afdeling van een onbekend artikel blijft bewaard voor verbruik');
 consus_apply_dimension_row($deptItems, ['No' => 'A1', 'Dimension_Code' => 'COST_CENTER', 'Dimension_Value_Code' => '15'], 'kvt', 'COST_CENTER');
 consus_apply_dimension_row($deptItems, ['No' => 'A2', 'Dimension_Code' => 'COST_CENTER', 'Dimension_Value_Code' => '15'], 'kvt', 'COST_CENTER');
 test_assert($deptItems['kvt|A1']['cost_center'] === '45', 'SALES_DEPARTMENT wint van COST_CENTER');
@@ -2576,5 +2578,296 @@ $spill = consus_collect_rows_via_spill(static function (callable $onRow): int {
     return 2;
 }, static function (array $row): void {});
 test_assert(array_key_exists('Description', $spill['sample']), 'veldbestaan uit alle rijen, niet de eerste');
+
+// Omschrijving: AppItems vult ook een artikel dat nog niet in voorraad staat,
+// spill zonder Description blijft leeg tot de catalogus, en KVT/HVT vullen elkaar aan.
+$descCatalog = [];
+$descAbsent = [];
+$descVendors = [];
+$descCostCenters = [];
+consus_apply_vendor_row($descAbsent, [
+    'No' => 'PK-1',
+    'Description' => 'Pakking',
+    'Vendor_No' => 'PERK',
+    'Global_Dimension_1_Code' => '80',
+], 'hvt', $descCatalog, $descVendors, $descCostCenters);
+test_assert($descAbsent === [], 'een artikelkaart zonder voorraad of verbruik maakt geen regel');
+test_assert(($descCatalog['PK-1'] ?? '') === 'Pakking', 'de omschrijving blijft bewaard per artikelnummer');
+test_assert(($descVendors['hvt|PK-1'] ?? '') === 'PERK', 'de leverancier blijft bewaard zonder voorraadregel');
+test_assert(($descCostCenters['hvt|PK-1'] ?? '') === '80', 'de afdeling op de kaart blijft bewaard zonder voorraadregel');
+consus_prefer_item_description($descCatalog, 'PK-1', 'Kort');
+test_assert($descCatalog['PK-1'] === 'Pakking', 'een kortere omschrijving vervangt de langere niet');
+
+$descStock = [];
+consus_apply_stock_row($descStock, [
+    'Item_No' => 'PK-1',
+    'Company_Name' => 'Koninklijke van Twist',
+    'Inventory' => 5,
+], 'Hunter van Twist');
+test_assert(($descStock['kvt|PK-1']['description'] ?? '') === '', 'VoorraadPerBedrijf heeft geen omschrijving');
+$descRows = [];
+$descArticles = [];
+consus_overlay_spilled_stock($descRows, $descArticles, $descStock, 'kvt');
+test_assert(count($descArticles) === 1 && ($descArticles[0]['description'] ?? '') === '', 'spill zet voorraad zonder omschrijving');
+test_assert(abs((float) $descArticles[0]['inventory'] - 5) < 0.0001, 'spill zet wel de voorraad');
+$descByCompany = [
+    'kvt' => $descArticles,
+    'hvt' => [[
+        'company_key' => 'hvt',
+        'company_name' => 'Hunter van Twist',
+        'item_no' => 'PK-1',
+        'description' => '',
+        'vendor_no' => '',
+        'vendor_name' => '',
+        'cost_center' => '',
+        'location' => '',
+        'inventory' => 2.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'consumption' => consus_empty_consumption_qty(),
+    ], [
+        'company_key' => 'hvt',
+        'company_name' => 'Hunter van Twist',
+        'item_no' => 'LEEG',
+        'description' => '',
+        'vendor_no' => '',
+        'vendor_name' => '',
+        'cost_center' => '',
+        'location' => '',
+        'inventory' => 0.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'consumption' => consus_empty_consumption_qty(),
+    ]],
+];
+$descGroups = [&$descByCompany];
+$descWarnings = consus_backfill_article_descriptions($descGroups, $descCatalog, [], []);
+test_assert($descWarnings === [], 'aanvullen uit de catalogus doet geen OData');
+test_assert($descByCompany['kvt'][0]['description'] === 'Pakking', 'KVT-spill krijgt de omschrijving van HVT');
+test_assert($descByCompany['hvt'][0]['description'] === 'Pakking', 'hetzelfde artikelnummer vult het andere bedrijf');
+test_assert($descByCompany['hvt'][1]['description'] === '', 'zonder voorraad of verbruik blijft de omschrijving leeg');
+
+$onlyKvt = [
+    'kvt' => [[
+        'company_key' => 'kvt',
+        'company_name' => 'Koninklijke van Twist',
+        'item_no' => 'PK-9',
+        'description' => 'Filterelement',
+        'inventory' => 1.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'consumption' => consus_empty_consumption_qty(),
+    ]],
+    'hvt' => [[
+        'company_key' => 'hvt',
+        'company_name' => 'Hunter van Twist',
+        'item_no' => 'PK-9',
+        'description' => '',
+        'inventory' => 0.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'consumption' => consus_empty_consumption_qty(),
+    ]],
+];
+$onlyKvt['hvt'][0]['consumption']['y'] = 3.0;
+$onlyKvt['hvt'][0]['consumption']['months'] = ['2026-09' => 3.0];
+$crossGroups = [&$onlyKvt];
+test_assert(consus_backfill_article_descriptions($crossGroups, [], [], []) === [], 'tweede bedrijf zonder fetch');
+test_assert($onlyKvt['hvt'][0]['description'] === 'Filterelement', 'verbruik bij HVT krijgt de KVT-omschrijving');
+
+$savedDescGlobals = [];
+foreach (['baseUrl', 'auth_list', 'environment', 'demeter_company_environment_map'] as $globalName) {
+    $savedDescGlobals[$globalName] = $GLOBALS[$globalName] ?? null;
+}
+$GLOBALS['baseUrl'] = 'https://bc.example.test/BC';
+$GLOBALS['auth_list'] = [
+    'Test' => ['mode' => 'basic', 'user' => 'svc', 'pass' => 'x'],
+];
+$GLOBALS['environment'] = 'Test';
+$GLOBALS['demeter_company_environment_map'] = [
+    'Koninklijke van Twist' => 'Test',
+    'Hunter van Twist' => 'Test',
+];
+try {
+    $fetchedUrls = [];
+    $fetchDescriptions = static function (string $url, array $auth, callable $onRow) use (&$fetchedUrls): int {
+        unset($auth);
+        $fetchedUrls[] = rawurldecode($url);
+        $decoded = rawurldecode($url);
+        if (str_contains($decoded, 'AppItemCard')) {
+            $onRow(['No' => 'KAART-1', 'Description' => 'Van de kaart']);
+
+            return 1;
+        }
+        if (str_contains($decoded, 'AppItems')) {
+            $onRow(['No' => 'LIJST-1', 'Description' => 'Uit AppItems']);
+            $onRow(['No' => 'KAART-1', 'Vendor_No' => 'PERK']);
+
+            return 2;
+        }
+        test_assert(false, 'omschrijving komt uit AppItems of AppItemCard');
+
+        return 0;
+    };
+    $gap = [
+        'kvt' => [[
+            'company_key' => 'kvt',
+            'item_no' => 'LIJST-1',
+            'description' => '',
+            'inventory' => 4.0,
+            'safety_stock' => 0.0,
+            'reorder_point' => 0.0,
+            'consumption' => consus_empty_consumption_qty(),
+        ], [
+            'company_key' => 'kvt',
+            'item_no' => 'KAART-1',
+            'description' => '',
+            'inventory' => 1.0,
+            'safety_stock' => 0.0,
+            'reorder_point' => 0.0,
+            'consumption' => consus_empty_consumption_qty(),
+        ]],
+    ];
+    $gapGroups = [&$gap];
+    $gapWarnings = consus_backfill_article_descriptions($gapGroups, [], [
+        ['company' => 'Koninklijke van Twist', 'company_key' => 'kvt'],
+    ], [], $fetchDescriptions);
+    test_assert($gapWarnings === [], 'gerichte fetch slaagt');
+    test_assert($gap['kvt'][0]['description'] === 'Uit AppItems', 'AppItems vult het ontbrekende artikel');
+    test_assert($gap['kvt'][1]['description'] === 'Van de kaart', 'lege AppItems-omschrijving valt terug op de artikelkaart');
+    $sawItems = false;
+    $sawCard = false;
+    foreach ($fetchedUrls as $fetchedUrl) {
+        if (str_contains($fetchedUrl, 'AppItems') && str_contains($fetchedUrl, 'LIJST-1') && str_contains($fetchedUrl, 'KAART-1')) {
+            $sawItems = true;
+        }
+        if (str_contains($fetchedUrl, 'AppItemCard') && str_contains($fetchedUrl, 'KAART-1') && !str_contains($fetchedUrl, 'LIJST-1')) {
+            $sawCard = true;
+        }
+    }
+    test_assert($sawItems, 'AppItems wordt gericht op de ontbrekende nummers gevraagd');
+    test_assert($sawCard, 'de artikelkaart vraagt alleen wat AppItems leeg liet');
+
+    $scannedUrls = [];
+    $scannedFetch = static function (string $url, array $auth, callable $onRow) use (&$scannedUrls): int {
+        unset($auth, $onRow);
+        $scannedUrls[] = rawurldecode($url);
+
+        return 0;
+    };
+    $already = [
+        'hvt' => [[
+            'company_key' => 'hvt',
+            'item_no' => 'AL-1',
+            'description' => '',
+            'inventory' => 8.0,
+            'safety_stock' => 0.0,
+            'reorder_point' => 0.0,
+            'consumption' => consus_empty_consumption_qty(),
+        ]],
+    ];
+    $alreadyGroups = [&$already];
+    consus_backfill_article_descriptions($alreadyGroups, [], [
+        ['company' => 'Hunter van Twist', 'company_key' => 'hvt'],
+    ], ['hvt' => true], $scannedFetch);
+    $rescannedItems = false;
+    foreach ($scannedUrls as $scannedUrl) {
+        if (str_contains($scannedUrl, 'AppItems')) {
+            $rescannedItems = true;
+        }
+    }
+    test_assert(!$rescannedItems, 'een bedrijf dat AppItems deze run al zag wordt niet nog eens volledig gevraagd');
+} finally {
+    foreach ($savedDescGlobals as $globalName => $globalValue) {
+        $GLOBALS[$globalName] = $globalValue;
+    }
+}
+
+$savedDescEnv = getenv('CONSUS_SNAPSHOT_FILE');
+$descRoot = sys_get_temp_dir() . '/consus-desc-' . getmypid() . '.json';
+putenv('CONSUS_SNAPSHOT_FILE=' . $descRoot);
+try {
+    consus_clear_checkpoint();
+    $descDir = consus_checkpoint_directory();
+    if (!is_dir($descDir)) {
+        mkdir($descDir, 0775, true);
+    }
+    $oldFile = $descDir . '/kvt-artikelen.ndjson';
+    file_put_contents($oldFile, json_encode(['No' => 'PK-1', 'Vendor_No' => 'PERK'], JSON_UNESCAPED_UNICODE) . "\n");
+    $oldSteps = [
+        'artikelen' => [
+            'done' => true,
+            'file' => 'kvt-artikelen.ndjson',
+            'rows' => 1,
+        ],
+    ];
+    test_assert(
+        consus_checkpoint_invalidate_if_field_missing($oldSteps, 'artikelen', 'Description', 'select_has_description'),
+        'tussenstand zonder omschrijving is ongeldig'
+    );
+    test_assert(!isset($oldSteps['artikelen']), 'ongeldige artikelstap wordt opnieuw opgehaald');
+    test_assert(!is_file($oldFile), 'het oude artikelbestand gaat weg');
+
+    $keptFile = $descDir . '/hvt-artikelen.ndjson';
+    file_put_contents($keptFile, json_encode(['No' => 'PK-1', 'Description' => 'Pakking'], JSON_UNESCAPED_UNICODE) . "\n");
+    $keptSteps = [
+        'artikelen' => [
+            'done' => true,
+            'file' => 'hvt-artikelen.ndjson',
+            'rows' => 1,
+        ],
+    ];
+    test_assert(
+        !consus_checkpoint_invalidate_if_field_missing($keptSteps, 'artikelen', 'Description', 'select_has_description'),
+        'tussenstand met omschrijving blijft'
+    );
+    test_assert(isset($keptSteps['artikelen']), 'geldige artikelstap blijft staan');
+
+    $flagFile = $descDir . '/kvt-artikelen-flag.ndjson';
+    file_put_contents($flagFile, json_encode(['No' => 'PK-2', 'Vendor_No' => 'PERK'], JSON_UNESCAPED_UNICODE) . "\n");
+    $flagSteps = [
+        'artikelen' => [
+            'done' => true,
+            'file' => 'kvt-artikelen-flag.ndjson',
+            'rows' => 1,
+            'select_has_description' => true,
+        ],
+    ];
+    test_assert(
+        !consus_checkpoint_invalidate_if_field_missing($flagSteps, 'artikelen', 'Description', 'select_has_description'),
+        'een ronde van deze code blijft staan, ook als BC de omschrijving leeg liet'
+    );
+    consus_clear_checkpoint();
+} finally {
+    if ($savedDescEnv === false) {
+        putenv('CONSUS_SNAPSHOT_FILE');
+    } else {
+        putenv('CONSUS_SNAPSHOT_FILE=' . $savedDescEnv);
+    }
+}
+
+require_once __DIR__ . '/../web/consus_usage.php';
+$descSnapshot = consus_empty_snapshot();
+$descSnapshot['generated_at'] = '2026-09-24T02:00:00+00:00';
+$descSnapshot['as_of'] = $windows['as_of'];
+$descSnapshot['windows'] = $windows;
+$descSnapshot['articles'] = [[
+    'company_key' => 'kvt',
+    'company_name' => 'Koninklijke van Twist',
+    'item_no' => 'PK-1',
+    'description' => 'Pakking',
+    'vendor_no' => '',
+    'vendor_name' => '',
+    'cost_center' => '',
+    'location' => '',
+    'inventory' => 5.0,
+    'safety_stock' => 0.0,
+    'reorder_point' => 0.0,
+    'consumption' => consus_empty_consumption_qty(),
+]];
+$descFacts = consus_usage_facts($descSnapshot, 'kvt', '', []);
+$descYearRows = consus_usage_year_rows($descFacts, 2026, $windows, []);
+$descValues = consus_usage_row_values($descYearRows[0]);
+test_assert($descValues[0] === 'PK-1' && $descValues[1] === 'Pakking', 'tabel en excel zetten de omschrijving direct na het artikelnummer');
 
 echo "OK\n";
