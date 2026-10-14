@@ -7036,7 +7036,99 @@ function consus_fetch_descriptions_for_numbers(
 }
 
 /**
- * Vult lege omschrijvingen op regels met voorraad of verbruik.
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @param array<string, string> $catalog
+ */
+function consus_seed_descriptions_from_usage(array &$catalog, array $groups): void
+{
+    foreach ($groups as $usageByCompany) {
+        if (!is_array($usageByCompany)) {
+            continue;
+        }
+        foreach ($usageByCompany as $records) {
+            if (!is_array($records)) {
+                continue;
+            }
+            foreach ($records as $record) {
+                if (!is_array($record)) {
+                    continue;
+                }
+                consus_prefer_item_description(
+                    $catalog,
+                    (string) ($record['item_no'] ?? ''),
+                    (string) ($record['description'] ?? '')
+                );
+            }
+        }
+    }
+}
+
+/**
+ * Alleen-verkoop staat niet in articles. Een warme nacht bewaart het oude
+ * verbruiksrecord; de omschrijving uit AppItems moet daar alsnog op.
+ *
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @param array<string, string> $catalog
+ */
+function consus_apply_description_catalog_to_usage(array &$groups, array $catalog): void
+{
+    foreach ($groups as &$usageByCompany) {
+        if (!is_array($usageByCompany)) {
+            continue;
+        }
+        foreach ($usageByCompany as &$records) {
+            if (!is_array($records)) {
+                continue;
+            }
+            foreach ($records as &$record) {
+                if (!is_array($record) || trim((string) ($record['description'] ?? '')) !== '') {
+                    continue;
+                }
+                $itemNo = trim((string) ($record['item_no'] ?? ''));
+                $description = trim((string) ($catalog[$itemNo] ?? ''));
+                if ($itemNo === '' || $description === '') {
+                    continue;
+                }
+                $record['description'] = $description;
+            }
+        }
+    }
+    unset($usageByCompany, $records, $record);
+}
+
+/**
+ * @param array<int, array<string, array<int, array<string, mixed>>>> $groups
+ * @return array<string, true>
+ */
+function consus_usage_numbers_missing_description(array $groups): array
+{
+    $missing = [];
+    foreach ($groups as $usageByCompany) {
+        if (!is_array($usageByCompany)) {
+            continue;
+        }
+        foreach ($usageByCompany as $records) {
+            if (!is_array($records)) {
+                continue;
+            }
+            foreach ($records as $record) {
+                if (!is_array($record) || trim((string) ($record['description'] ?? '')) !== '') {
+                    continue;
+                }
+                $itemNo = trim((string) ($record['item_no'] ?? ''));
+                if ($itemNo !== '') {
+                    $missing[$itemNo] = true;
+                }
+            }
+        }
+    }
+
+    return $missing;
+}
+
+/**
+ * Vult lege omschrijvingen op regels met voorraad of verbruik, en op
+ * verbruiksrecords (ook alleen verkoop, die niet in articles staat).
  * Eerst per artikelnummer uit beide bedrijven en uit AppItems van deze run.
  * Wat dan nog leeg is, haalt nightly gericht op via AppItems (Mímir, anders BC)
  * en daarna de artikelkaart.
@@ -7046,6 +7138,7 @@ function consus_fetch_descriptions_for_numbers(
  * @param array<int, array{company?:string,company_key?:string}> $companies
  * @param array<string, mixed> $scannedCompanyKeys
  * @param callable(string, array<string, mixed>, callable(array<string, mixed>):void):int|null $fetchRows
+ * @param array<int, array<string, array<int, array<string, mixed>>>>|null $usageGroups
  * @return array<int, array{company:string,warning:string}>
  */
 function consus_backfill_article_descriptions(
@@ -7053,12 +7146,18 @@ function consus_backfill_article_descriptions(
     array $catalog,
     array $companies,
     array $scannedCompanyKeys,
-    ?callable $fetchRows = null
+    ?callable $fetchRows = null,
+    ?array &$usageGroups = null
 ): array {
     $warnings = [];
+    if ($usageGroups === null) {
+        $usageGroups = [];
+    }
     consus_seed_descriptions_from_articles($catalog, $groups);
+    consus_seed_descriptions_from_usage($catalog, $usageGroups);
     consus_apply_description_catalog($groups, $catalog);
-    $missing = consus_item_numbers_missing_description($groups);
+    consus_apply_description_catalog_to_usage($usageGroups, $catalog);
+    $missing = consus_item_numbers_missing_description($groups) + consus_usage_numbers_missing_description($usageGroups);
     if ($missing === []) {
         return [];
     }
@@ -7078,16 +7177,20 @@ function consus_backfill_article_descriptions(
         $warnings,
         consus_fetch_missing_descriptions($groups, $catalog, $companies, $missing, $scanned, CONSUS_ITEM_ENTITY, ['No', 'Description'], [], true, $fetchRows)
     );
-    $missing = consus_item_numbers_missing_description($groups);
+    consus_apply_description_catalog_to_usage($usageGroups, $catalog);
+    $missing = consus_item_numbers_missing_description($groups) + consus_usage_numbers_missing_description($usageGroups);
     if ($missing === []) {
         return $warnings;
     }
 
     // AppItemCard time-outte op de volle set. Alleen de nummers die nog leeg zijn.
-    return array_merge(
+    $warnings = array_merge(
         $warnings,
         consus_fetch_missing_descriptions($groups, $catalog, $companies, $missing, [], 'AppItemCard', ['No'], ['Description'], false, $fetchRows)
     );
+    consus_apply_description_catalog_to_usage($usageGroups, $catalog);
+
+    return $warnings;
 }
 
 /**
@@ -7549,15 +7652,20 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
     $descriptionGroups = [];
     $descriptionGroups[] = &$freshArticles;
     $descriptionGroups[] = &$previousArticles;
+    $usageDescriptionGroups = [];
+    $usageDescriptionGroups[] = &$freshUsage;
+    $usageDescriptionGroups[] = &$previousUsage;
     foreach (consus_backfill_article_descriptions(
         $descriptionGroups,
         $descriptionCatalog,
         $companies,
-        $descriptionScanned
+        $descriptionScanned,
+        null,
+        $usageDescriptionGroups
     ) as $descriptionWarning) {
         $warnings[] = $descriptionWarning;
     }
-    unset($descriptionGroups);
+    unset($descriptionGroups, $usageDescriptionGroups);
 
     $snapshot = $publish(false);
     unset($freshRows, $previousRows, $freshArticles, $previousArticles);

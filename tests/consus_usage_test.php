@@ -317,6 +317,39 @@ $mergedDescribed = consus_merge_warm_item_usage($previous, $fresh, $windows, '20
 usage_assert(($mergedDescribed[0]['description'] ?? '') === 'Filter', 'warme merge houdt de verse omschrijving');
 usage_assert(($mergedDescribed[0]['vendor_no'] ?? '') === 'PERK', 'warme merge houdt de leverancier uit de vorige snapshot');
 
+$warmUsage = [
+    'hvt' => [[
+        'company_key' => 'hvt',
+        'item_no' => 'PI-1',
+        'description' => '',
+        'vendor_no' => 'PERK',
+        'cost_center' => '80',
+        'months' => [
+            '2026-09' => ['internal' => 0.0, 'customers' => ['C9' => 4.0]],
+        ],
+        'days' => [],
+    ]],
+];
+$warmArticles = ['hvt' => []];
+$warmArticleGroups = [&$warmArticles];
+$warmUsageGroups = [&$warmUsage];
+$warmCatalog = ['PI-1' => 'Zuiger'];
+usage_assert(
+    consus_backfill_article_descriptions($warmArticleGroups, $warmCatalog, [], [], null, $warmUsageGroups) === [],
+    'catalogus vult verbruik zonder extra fetch'
+);
+usage_assert($warmUsage['hvt'][0]['description'] === 'Zuiger', 'warme item_usage krijgt de omschrijving uit AppItems');
+$warmSnapshot = consus_empty_snapshot();
+$warmSnapshot['generated_at'] = '2026-10-06T07:45:00+00:00';
+$warmSnapshot['as_of'] = $windows['as_of'];
+$warmSnapshot['windows'] = $windows;
+$warmSnapshot['articles'] = [];
+$warmSnapshot['item_usage'] = $warmUsage['hvt'];
+$warmSnapshot['version'] = CONSUS_SNAPSHOT_VERSION;
+$warmFacts = consus_usage_facts($warmSnapshot, 'hvt', '', []);
+usage_assert(($warmFacts[0]['description'] ?? '') === 'Zuiger', 'jaartabel toont de omschrijving na een warme nacht');
+usage_assert(consus_usage_row_values(consus_usage_year_row($warmFacts[0], 2026, $windows, []))[1] === 'Zuiger', 'excel toont diezelfde omschrijving');
+
 usage_assert(
     consus_format_dutch_datetime('2026-10-06T07:45:00+00:00') === '6 oktober 2026, 09:45',
     'tijdstip in Europe/Amsterdam, leesbaar Nederlands'
