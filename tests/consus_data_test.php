@@ -2549,7 +2549,9 @@ $deptItems = [
 ];
 test_assert(consus_apply_dimension_row($deptItems, ['No' => 'A1', 'Dimension_Code' => 'SALES_DEPARTMENT', 'Dimension_Value_Code' => '45'], 'kvt', 'SALES_DEPARTMENT'), 'SALES_DEPARTMENT telt');
 test_assert(!consus_apply_dimension_row($deptItems, ['No' => 'A2', 'Dimension_Code' => 'COST_CENTER', 'Dimension_Value_Code' => '15'], 'kvt', 'SALES_DEPARTMENT'), 'andere dimensie telt niet');
-test_assert(!consus_apply_dimension_row($deptItems, ['No' => 'X9', 'Dimension_Code' => 'SALES_DEPARTMENT', 'Dimension_Value_Code' => '15'], 'kvt', 'SALES_DEPARTMENT'), 'onbekend artikel telt niet');
+$unknownCostCenters = [];
+test_assert(!consus_apply_dimension_row($deptItems, ['No' => 'X9', 'Dimension_Code' => 'SALES_DEPARTMENT', 'Dimension_Value_Code' => '15'], 'kvt', 'SALES_DEPARTMENT', $unknownCostCenters), 'onbekend artikel telt niet');
+test_assert(($unknownCostCenters['kvt|X9'] ?? '') === '15', 'afdeling van een onbekend artikel blijft bewaard voor verbruik');
 consus_apply_dimension_row($deptItems, ['No' => 'A1', 'Dimension_Code' => 'COST_CENTER', 'Dimension_Value_Code' => '15'], 'kvt', 'COST_CENTER');
 consus_apply_dimension_row($deptItems, ['No' => 'A2', 'Dimension_Code' => 'COST_CENTER', 'Dimension_Value_Code' => '15'], 'kvt', 'COST_CENTER');
 test_assert($deptItems['kvt|A1']['cost_center'] === '45', 'SALES_DEPARTMENT wint van COST_CENTER');
@@ -2581,13 +2583,18 @@ test_assert(array_key_exists('Description', $spill['sample']), 'veldbestaan uit 
 // spill zonder Description blijft leeg tot de catalogus, en KVT/HVT vullen elkaar aan.
 $descCatalog = [];
 $descAbsent = [];
+$descVendors = [];
+$descCostCenters = [];
 consus_apply_vendor_row($descAbsent, [
     'No' => 'PK-1',
     'Description' => 'Pakking',
     'Vendor_No' => 'PERK',
-], 'hvt', $descCatalog);
+    'Global_Dimension_1_Code' => '80',
+], 'hvt', $descCatalog, $descVendors, $descCostCenters);
 test_assert($descAbsent === [], 'een artikelkaart zonder voorraad of verbruik maakt geen regel');
 test_assert(($descCatalog['PK-1'] ?? '') === 'Pakking', 'de omschrijving blijft bewaard per artikelnummer');
+test_assert(($descVendors['hvt|PK-1'] ?? '') === 'PERK', 'de leverancier blijft bewaard zonder voorraadregel');
+test_assert(($descCostCenters['hvt|PK-1'] ?? '') === '80', 'de afdeling op de kaart blijft bewaard zonder voorraadregel');
 consus_prefer_item_description($descCatalog, 'PK-1', 'Kort');
 test_assert($descCatalog['PK-1'] === 'Pakking', 'een kortere omschrijving vervangt de langere niet');
 

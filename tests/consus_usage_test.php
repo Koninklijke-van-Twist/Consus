@@ -322,10 +322,20 @@ $warmUsage = [
         'company_key' => 'hvt',
         'item_no' => 'PI-1',
         'description' => '',
-        'vendor_no' => 'PERK',
-        'cost_center' => '80',
+        'vendor_no' => '',
+        'cost_center' => '',
         'months' => [
             '2026-09' => ['internal' => 0.0, 'customers' => ['C9' => 4.0]],
+        ],
+        'days' => [],
+    ], [
+        'company_key' => 'hvt',
+        'item_no' => 'PI-2',
+        'description' => '',
+        'vendor_no' => 'HOUD',
+        'cost_center' => '5',
+        'months' => [
+            '2026-09' => ['internal' => 0.0, 'customers' => ['C8' => 1.0]],
         ],
         'days' => [],
     ]],
@@ -333,12 +343,19 @@ $warmUsage = [
 $warmArticles = ['hvt' => []];
 $warmArticleGroups = [&$warmArticles];
 $warmUsageGroups = [&$warmUsage];
-$warmCatalog = ['PI-1' => 'Zuiger'];
+$warmCatalog = ['PI-1' => 'Zuiger', 'PI-2' => 'Ring'];
+$warmVendors = ['hvt|PI-1' => 'PERK', 'hvt|PI-2' => 'ANDERS'];
+$warmCostCenters = ['hvt|PI-1' => '80', 'hvt|PI-2' => '99'];
 usage_assert(
-    consus_backfill_article_descriptions($warmArticleGroups, $warmCatalog, [], [], null, $warmUsageGroups) === [],
+    consus_backfill_article_descriptions($warmArticleGroups, $warmCatalog, [], [], null, $warmUsageGroups, $warmVendors, $warmCostCenters) === [],
     'catalogus vult verbruik zonder extra fetch'
 );
 usage_assert($warmUsage['hvt'][0]['description'] === 'Zuiger', 'warme item_usage krijgt de omschrijving uit AppItems');
+usage_assert($warmUsage['hvt'][0]['vendor_no'] === 'PERK', 'warme item_usage krijgt de leverancier als die leeg was');
+usage_assert($warmUsage['hvt'][0]['cost_center'] === '80', 'warme item_usage krijgt de afdeling als die leeg was');
+usage_assert($warmUsage['hvt'][1]['description'] === 'Ring', 'ook het tweede verbruiksrecord krijgt de omschrijving');
+usage_assert($warmUsage['hvt'][1]['vendor_no'] === 'HOUD', 'een gevulde leverancier op verbruik blijft staan');
+usage_assert($warmUsage['hvt'][1]['cost_center'] === '5', 'een gevulde afdeling op verbruik blijft staan');
 $warmSnapshot = consus_empty_snapshot();
 $warmSnapshot['generated_at'] = '2026-10-06T07:45:00+00:00';
 $warmSnapshot['as_of'] = $windows['as_of'];
@@ -346,9 +363,50 @@ $warmSnapshot['windows'] = $windows;
 $warmSnapshot['articles'] = [];
 $warmSnapshot['item_usage'] = $warmUsage['hvt'];
 $warmSnapshot['version'] = CONSUS_SNAPSHOT_VERSION;
-$warmFacts = consus_usage_facts($warmSnapshot, 'hvt', '', []);
-usage_assert(($warmFacts[0]['description'] ?? '') === 'Zuiger', 'jaartabel toont de omschrijving na een warme nacht');
-usage_assert(consus_usage_row_values(consus_usage_year_row($warmFacts[0], 2026, $windows, []))[1] === 'Zuiger', 'excel toont diezelfde omschrijving');
+$warmFacts = [];
+foreach (consus_usage_facts($warmSnapshot, 'hvt', '', []) as $warmFact) {
+    $warmFacts[(string) $warmFact['item_no']] = $warmFact;
+}
+usage_assert(($warmFacts['PI-1']['description'] ?? '') === 'Zuiger', 'jaartabel toont de omschrijving na een warme nacht');
+usage_assert(($warmFacts['PI-1']['vendor_no'] ?? '') === 'PERK', 'jaartabel toont de leverancier na een warme nacht');
+usage_assert(($warmFacts['PI-1']['cost_center'] ?? '') === '80', 'jaartabel toont de afdeling na een warme nacht');
+usage_assert(consus_usage_row_values(consus_usage_year_row($warmFacts['PI-1'], 2026, $windows, []))[1] === 'Zuiger', 'excel toont diezelfde omschrijving');
+
+$articleFilledUsage = [
+    'kvt' => [[
+        'company_key' => 'kvt',
+        'item_no' => 'PK-1',
+        'description' => '',
+        'vendor_no' => '',
+        'cost_center' => '',
+        'months' => [
+            '2026-09' => ['internal' => 1.0, 'customers' => []],
+        ],
+        'days' => [],
+    ]],
+];
+$articleFilledArticles = [
+    'kvt' => [[
+        'company_key' => 'kvt',
+        'item_no' => 'PK-1',
+        'description' => 'Pakking',
+        'vendor_no' => 'PERK',
+        'cost_center' => '80',
+        'inventory' => 2.0,
+        'safety_stock' => 0.0,
+        'reorder_point' => 0.0,
+        'consumption' => consus_empty_consumption_qty(),
+    ]],
+];
+$articleFilledArticleGroups = [&$articleFilledArticles];
+$articleFilledUsageGroups = [&$articleFilledUsage];
+usage_assert(
+    consus_backfill_article_descriptions($articleFilledArticleGroups, [], [], [], null, $articleFilledUsageGroups) === [],
+    'artikel vult leeg verbruik zonder fetch'
+);
+usage_assert($articleFilledUsage['kvt'][0]['description'] === 'Pakking', 'verbruik krijgt de omschrijving van het artikel');
+usage_assert($articleFilledUsage['kvt'][0]['vendor_no'] === 'PERK', 'verbruik krijgt de leverancier van het artikel');
+usage_assert($articleFilledUsage['kvt'][0]['cost_center'] === '80', 'verbruik krijgt de afdeling van het artikel');
 
 usage_assert(
     consus_format_dutch_datetime('2026-10-06T07:45:00+00:00') === '6 oktober 2026, 09:45',
