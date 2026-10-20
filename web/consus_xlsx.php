@@ -187,10 +187,12 @@ function consus_xlsx_sheets(array $snapshot, array $prefs, array $query): array
     $costCenter = trim((string) ($query['cost_center'] ?? ''));
     $excludedCustomers = consus_prefs_normalize_list($prefs['customers'] ?? []);
     $excludedItems = consus_prefs_normalize_list($prefs['items'] ?? []);
+    $vendorNo = trim((string) ($query['vendor'] ?? ''));
+    $showIdle = consus_prefs_normalize_flag($prefs['show_idle'] ?? false);
     $ready = (int) ($snapshot['version'] ?? 0) === CONSUS_SNAPSHOT_VERSION
         && trim((string) ($snapshot['generated_at'] ?? '')) !== '';
     $facts = $ready
-        ? consus_usage_facts($snapshot, $companyKey, $costCenter, $excludedItems)
+        ? consus_usage_facts_for_view($snapshot, $companyKey, $costCenter, $excludedItems, $vendorNo, $showIdle)
         : [];
     $headers = consus_usage_column_labels();
     $sortColumn = array_key_exists('sort', $query) ? $query['sort'] : null;

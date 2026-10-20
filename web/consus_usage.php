@@ -357,6 +357,7 @@ function consus_empty_usage_fact(string $companyKey, string $itemNo): array
         'item_no' => $itemNo,
         'description' => '',
         'cost_center' => '',
+        'vendor_no' => '',
         'safety_stock' => 0.0,
         'inventory' => 0.0,
         'usage' => [
@@ -400,6 +401,10 @@ function consus_usage_facts(array $snapshot, string $companyKey, string $costCen
         }
         if ((string) $facts[$key]['cost_center'] === '' && trim((string) ($article['cost_center'] ?? '')) !== '') {
             $facts[$key]['cost_center'] = trim((string) $article['cost_center']);
+        }
+        $articleVendor = trim((string) ($article['vendor_no'] ?? ''));
+        if ($articleVendor !== '' && trim((string) ($facts[$key]['vendor_no'] ?? '')) === '') {
+            $facts[$key]['vendor_no'] = $articleVendor;
         }
         $facts[$key]['safety_stock'] += (float) ($article['safety_stock'] ?? 0);
         $facts[$key]['inventory'] += (float) ($article['inventory'] ?? 0);
@@ -465,6 +470,98 @@ function consus_usage_facts(array $snapshot, string $companyKey, string $costCen
     });
 
     return $list;
+}
+
+/**
+ * Jaartabel en excel. Zonder leverancier blijven de nulregels weg: de volle
+ * AppItems-lijst past niet in de pagina of in vier excelbladen. Met een
+ * leverancier en de schakelaar aan komen alleen díe artikelen erbij, met 0
+ * in de cijferkolommen.
+ *
+ * @param array<string, mixed> $snapshot
+ * @param array<int, string> $excludedItems
+ * @return array<int, array<string, mixed>>
+ */
+function consus_usage_facts_for_view(
+    array $snapshot,
+    string $companyKey,
+    string $costCenter,
+    array $excludedItems,
+    string $vendorNo,
+    bool $showIdle
+): array {
+    $facts = consus_usage_facts($snapshot, $companyKey, $costCenter, $excludedItems);
+    if ($vendorNo !== '') {
+        $matched = [];
+        foreach ($facts as $fact) {
+            if (!is_array($fact)) {
+                continue;
+            }
+            if (consus_vendor_filter_matches((string) ($fact['vendor_no'] ?? ''), $vendorNo)) {
+                $matched[] = $fact;
+            }
+        }
+        $facts = $matched;
+    }
+    if (!$showIdle || $vendorNo === '') {
+        return $facts;
+    }
+
+    return consus_append_idle_usage_facts($facts, $companyKey, $costCenter, $vendorNo, $excludedItems);
+}
+
+/**
+ * @param array<int, array<string, mixed>> $facts
+ * @param array<int, string> $excludedItems
+ * @return array<int, array<string, mixed>>
+ */
+function consus_append_idle_usage_facts(
+    array $facts,
+    string $companyKey,
+    string $costCenter,
+    string $vendorNo,
+    array $excludedItems
+): array {
+    $seen = [];
+    foreach ($facts as $fact) {
+        if (!is_array($fact)) {
+            continue;
+        }
+        $seen[(string) ($fact['company_key'] ?? '') . '|' . trim((string) ($fact['item_no'] ?? ''))] = true;
+    }
+    $storedVendor = $vendorNo === '__none__' ? '' : $vendorNo;
+    $keys = $companyKey !== '' && isset(CONSUS_COMPANIES[$companyKey]) ? [$companyKey] : array_keys(CONSUS_COMPANIES);
+    foreach ($keys as $key) {
+        foreach (consus_read_idle_vendor_items($key, $storedVendor) as $row) {
+            if (!consus_cost_center_filter_matches((string) ($row['cost_center'] ?? ''), $costCenter)) {
+                continue;
+            }
+            $itemNo = trim((string) ($row['item_no'] ?? ''));
+            if ($itemNo === '' || consus_token_excluded($itemNo, $excludedItems)) {
+                continue;
+            }
+            $factKey = $key . '|' . $itemNo;
+            if (isset($seen[$factKey])) {
+                continue;
+            }
+            $seen[$factKey] = true;
+            $fact = consus_empty_usage_fact($key, $itemNo);
+            $fact['description'] = trim((string) ($row['description'] ?? ''));
+            $fact['cost_center'] = trim((string) ($row['cost_center'] ?? ''));
+            $fact['vendor_no'] = trim((string) ($row['vendor_no'] ?? $storedVendor));
+            $facts[] = $fact;
+        }
+    }
+    usort($facts, static function (array $left, array $right): int {
+        $byItem = strnatcasecmp((string) ($left['item_no'] ?? ''), (string) ($right['item_no'] ?? ''));
+        if ($byItem !== 0) {
+            return $byItem;
+        }
+
+        return strnatcasecmp((string) ($left['company_key'] ?? ''), (string) ($right['company_key'] ?? ''));
+    });
+
+    return $facts;
 }
 
 /**
@@ -662,9 +759,9 @@ function consus_customer_suggestions(array $snapshot, string $companyKey): array
  * @param array<string, mixed> $snapshot
  * @return array<int, array{item_no:string,description:string,company_key:string,label:string}>
  */
-function consus_item_suggestions(array $snapshot, string $companyKey, string $costCenter): array
+function consus_item_suggestions(array $snapshot, string $companyKey, string $costCenter, string $vendorNo = '', bool $showIdle = false): array
 {
-    $facts = consus_usage_facts($snapshot, $companyKey, $costCenter, []);
+    $facts = consus_usage_facts_for_view($snapshot, $companyKey, $costCenter, [], $vendorNo, $showIdle);
     $list = [];
     foreach ($facts as $fact) {
         $itemNo = (string) ($fact['item_no'] ?? '');

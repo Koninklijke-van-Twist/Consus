@@ -52,6 +52,25 @@ if (isset($static[$path])) {
 
 $snapshot = preview_snapshot();
 $email = 'preview@consus.example';
+if (!is_file(consus_idle_root() . '/index.json')) {
+    consus_store_company_idle('hvt', [[
+        'company_key' => 'hvt',
+        'item_no' => 'PK-0530017',
+        'description' => 'Voorbeeld zonder voorraad',
+        'vendor_no' => '90101',
+        'vendor_name' => 'EGT',
+        'cost_center' => '5',
+    ]]);
+    consus_store_company_idle('kvt', [[
+        'company_key' => 'kvt',
+        'item_no' => 'PK-1810504C2',
+        'description' => 'Voorbeeld zonder beweging',
+        'vendor_no' => '90052',
+        'vendor_name' => 'Dropship',
+        'cost_center' => '5',
+    ]]);
+    consus_rebuild_idle_index();
+}
 
 if ($path === '/prefs.php') {
     if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
@@ -79,6 +98,8 @@ if ($path === '/prefs.php') {
             'customers' => $saved['customers'],
             'items' => $saved['items'],
             'page_size' => $saved['page_size'],
+            'hide_zero' => $saved['hide_zero'],
+            'show_idle' => $saved['show_idle'],
         ], JSON_UNESCAPED_UNICODE);
         return true;
     }

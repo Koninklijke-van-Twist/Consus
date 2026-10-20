@@ -178,4 +178,52 @@ xlsx_assert(strpos($sheet, '<v>7</v>') !== false, 'getal staat als numerieke cel
 $zip->close();
 unlink($path);
 
+$savedXlsxEnv = getenv('CONSUS_SNAPSHOT_FILE');
+$xlsxIdleRoot = sys_get_temp_dir() . '/consus-xlsx-idle-' . getmypid();
+@mkdir($xlsxIdleRoot, 0775, true);
+putenv('CONSUS_SNAPSHOT_FILE=' . $xlsxIdleRoot . '/consus_snapshot.json');
+try {
+    consus_store_company_idle('hvt', [[
+        'company_key' => 'hvt',
+        'item_no' => 'PK-0530017',
+        'description' => 'Nulartikel',
+        'vendor_no' => '90101',
+        'vendor_name' => 'EGT',
+        'cost_center' => '',
+    ]]);
+    consus_rebuild_idle_index();
+    $idleSheets = consus_xlsx_sheets($snapshot, ['customers' => [], 'items' => [], 'show_idle' => true], [
+        'company' => 'hvt',
+        'vendor' => '90101',
+    ]);
+    $idleItems = array_column(array_slice($idleSheets[0]['rows'], 1), 0);
+    xlsx_assert(in_array('PK-0530017', $idleItems, true), 'excel toont het artikel zonder voorraad');
+    $idleLine = null;
+    foreach ($idleSheets[0]['rows'] as $idleLineRow) {
+        if (($idleLineRow[0] ?? '') === 'PK-0530017') {
+            $idleLine = $idleLineRow;
+        }
+    }
+    xlsx_assert(is_array($idleLine) && $idleLine[1] === 'Nulartikel', 'excel zet de omschrijving naast het nulartikel');
+    $idleNumbersZero = true;
+    foreach (array_slice($idleLine, 2) as $idleNumber) {
+        if (abs((float) $idleNumber) >= 0.0000001) {
+            $idleNumbersZero = false;
+        }
+    }
+    xlsx_assert($idleNumbersZero, 'excel zet 0 in de cijferkolommen');
+    $hiddenSheets = consus_xlsx_sheets($snapshot, ['customers' => [], 'items' => [], 'show_idle' => false], [
+        'company' => 'hvt',
+        'vendor' => '90101',
+    ]);
+    xlsx_assert(!in_array('PK-0530017', array_column($hiddenSheets[0]['rows'], 0), true), 'excel zonder schakelaar laat het nulartikel weg');
+} finally {
+    if ($savedXlsxEnv === false) {
+        putenv('CONSUS_SNAPSHOT_FILE');
+    } else {
+        putenv('CONSUS_SNAPSHOT_FILE=' . $savedXlsxEnv);
+    }
+    consus_remove_tree($xlsxIdleRoot);
+}
+
 echo "OK\n";

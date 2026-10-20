@@ -63,7 +63,9 @@ if ($wantsJson) {
         'page_size' => $saved['page_size'],
         'company' => $saved['company'],
         'cost_center' => $saved['cost_center'],
+        'vendor' => $saved['vendor'],
         'hide_zero' => $saved['hide_zero'],
+        'show_idle' => $saved['show_idle'],
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }

@@ -65,7 +65,7 @@ function consus_modal_payload(array $row): array
  * @param array<string, mixed> $query
  * @param array<string, mixed> $prefs
  * @param array<int, array{name:string,environment:string,label:string,key:string}>|null $catalog
- * @return array{company:string,company_key:string,company_label:string,usage_available:bool,cost_center:string,year:int}
+ * @return array{company:string,company_key:string,company_label:string,usage_available:bool,cost_center:string,vendor:string,year:int}
  */
 function consus_page_filters(array $query, string $asOf, array $prefs = [], ?array $catalog = null): array
 {
@@ -82,6 +82,9 @@ function consus_page_filters(array $query, string $asOf, array $prefs = [], ?arr
     $costCenter = array_key_exists('cost_center', $query)
         ? trim((string) $query['cost_center'])
         : (string) ($prefs['cost_center'] ?? '');
+    $vendor = array_key_exists('vendor', $query)
+        ? (string) (consus_prefs_normalize_choice($query['vendor']) ?? '')
+        : (string) ($prefs['vendor'] ?? '');
 
     return [
         'company' => $selected['name'] ?? '',
@@ -90,6 +93,7 @@ function consus_page_filters(array $query, string $asOf, array $prefs = [], ?arr
         // De nachtcache heeft alleen KVT en HVT; een ander bedrijf heeft hier alleen de Retourlijst.
         'usage_available' => $selected === null || ($selected['key'] ?? '') !== '',
         'cost_center' => $costCenter,
+        'vendor' => $vendor,
         'year' => $year,
     ];
 }
@@ -192,8 +196,18 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     $excludedItems = consus_prefs_normalize_list($prefs['items'] ?? []);
     $pageSize = consus_normalize_page_size($prefs['page_size'] ?? CONSUS_DEFAULT_PAGE_SIZE);
     $hideZero = consus_prefs_normalize_flag($prefs['hide_zero'] ?? false);
+    $showIdle = consus_prefs_normalize_flag($prefs['show_idle'] ?? false);
+    $vendorChoices = consus_vendor_choices($rows, $companyFilter, $costFilter);
+    $knownVendors = [];
+    foreach ($vendorChoices as $vendorChoice) {
+        $knownVendors[(string) ($vendorChoice['vendor_no'] ?? '')] = true;
+    }
+    $vendorFilter = $filters['vendor'];
+    if ($vendorFilter !== '' && !isset($knownVendors[$vendorFilter])) {
+        $vendorFilter = '';
+    }
     $facts = ($hasCache && $ready && $usageAvailable)
-        ? consus_usage_facts($snapshot, $companyFilter, $costFilter, $excludedItems)
+        ? consus_usage_facts_for_view($snapshot, $companyFilter, $costFilter, $excludedItems, $vendorFilter, $showIdle)
         : [];
     $clientRows = consus_page_client_rows($facts, $years, $windows, $excludedCustomers, $companyFilter === '');
     $tablePayload = [
@@ -204,7 +218,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         'articles' => $clientRows,
     ];
     $customerSuggestions = consus_customer_suggestions($snapshot, $companyFilter);
-    $itemSuggestions = consus_item_suggestions($snapshot, $companyFilter, $costFilter);
+    $itemSuggestions = consus_item_suggestions($snapshot, $companyFilter, $costFilter, $vendorFilter, $showIdle);
     $warningLines = consus_warning_lines(is_array($snapshot['warnings'] ?? null) ? $snapshot['warnings'] : []);
     $infoLines = consus_info_lines(is_array($snapshot['warnings'] ?? null) ? $snapshot['warnings'] : []);
     $queryString = http_build_query([
@@ -212,10 +226,14 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         'cost_center' => $costFilter,
         'year' => (string) $activeYear,
     ], '', '&', PHP_QUERY_RFC3986);
-    $exportQuery = http_build_query([
+    $exportParams = [
         'company' => $companyName,
         'cost_center' => $costFilter,
-    ], '', '&', PHP_QUERY_RFC3986);
+    ];
+    if ($vendorFilter !== '') {
+        $exportParams['vendor'] = $vendorFilter;
+    }
+    $exportQuery = http_build_query($exportParams, '', '&', PHP_QUERY_RFC3986);
     $columnLabels = consus_usage_column_labels();
     ?>
 <!doctype html>
@@ -251,7 +269,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         .panel-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-end; padding: 16px 16px 0; }
         .panel-head p { margin: 6px 0 0; color: var(--kvt-muted); font-size: .84rem; }
         .toolbar, .filters { display: grid; gap: 10px; padding: 16px; align-items: end; }
-        .toolbar { grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) auto auto; }
+        .toolbar { grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(160px, 1.2fr) auto auto; }
         .filters { grid-template-columns: 1fr 1fr; }
         .field { display: grid; gap: 5px; position: relative; }
         .field label { color: var(--kvt-muted); font-size: .76rem; }
@@ -404,6 +422,22 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                 </select>
             </div>
             <div class="field">
+                <label for="vendor">Leverancier</label>
+                <select id="vendor" name="vendor" autocomplete="off">
+                    <option value="">Alle leveranciers</option>
+                    <?php foreach ($vendorChoices as $vendorChoice): ?>
+                        <?php
+                        $vendorValue = (string) ($vendorChoice['vendor_no'] ?? '');
+                        $vendorLabel = (string) ($vendorChoice['vendor_name'] ?? $vendorValue);
+                        if ($vendorValue !== '' && $vendorValue !== '__none__' && !str_contains($vendorLabel, $vendorValue)) {
+                            $vendorLabel .= ' (' . $vendorValue . ')';
+                        }
+                        ?>
+                        <option value="<?= consus_h($vendorValue) ?>"<?= $vendorFilter === $vendorValue ? ' selected' : '' ?>><?= consus_h($vendorLabel) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="field">
                 <label for="company">Bedrijf</label>
                 <select id="company" name="company" autocomplete="off">
                     <option value="">Alle (KVT en HVT)</option>
@@ -462,6 +496,10 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             </div>
             <div class="zero-filter">
                 <label class="check"><input type="checkbox" id="hide-zero"<?= $hideZero ? ' checked' : '' ?>> Nul-regels wegfilteren</label>
+                <label class="check"><input type="checkbox" id="show-idle"<?= $showIdle ? ' checked' : '' ?>> Ook artikelen zonder voorraad of beweging tonen</label>
+                <?php if ($showIdle && $vendorFilter === ''): ?>
+                    <span class="muted" id="idle-hint">Kies een leverancier. AppItems telt ongeveer 85.000 artikelen per bedrijf; die hele lijst past niet in de tabel en de excel.</span>
+                <?php endif; ?>
                 <span class="muted zero-hidden" data-zero-hidden role="status" aria-live="polite"></span>
             </div>
             <div class="field page-size">
@@ -711,6 +749,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
     if (filterForm) {
         var companySelect = filterForm.querySelector('select[name="company"]');
         var departmentSelect = filterForm.querySelector('select[name="cost_center"]');
+        var vendorSelect = filterForm.querySelector('select[name="vendor"]');
         var filterStatus = filterForm.querySelector('[data-filter-status]');
         var retourEmpty = document.querySelector('#retour > .empty');
         var retourEmptyText = retourEmpty ? retourEmpty.textContent : '';
@@ -727,6 +766,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         };
         var shownCompany = renderedValue(companySelect);
         var shownDepartment = renderedValue(departmentSelect);
+        var shownVendor = renderedValue(vendorSelect);
         // Exportlinks horen bij de pagina die nu getoond wordt. Een download
         // tijdens het laden van een andere keuze breekt die navigatie af (de
         // pagina blijft dan op "laden…" staan), dus tijdens het laden uit.
@@ -744,7 +784,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         }, true);
         var lockFilters = function (company, department) {
             filterNavigating = true;
-            [companySelect, departmentSelect].forEach(function (select) { if (select) { select.disabled = true; } });
+            [companySelect, departmentSelect, vendorSelect].forEach(function (select) { if (select) { select.disabled = true; } });
             var text = company === '' ? 'Alle bedrijven laden…' : (company !== shownCompany ? 'Ander bedrijf: afdelingen laden…' : 'Retourlijst en verbruik laden…');
             if (filterStatus) { filterStatus.hidden = false; filterStatus.textContent = text; }
             if (retourEmpty) { retourEmpty.textContent = text; }
@@ -757,14 +797,17 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                 departmentSelect.value = shownDepartment;
                 departmentSelect.disabled = departmentSelect.hasAttribute('data-company-required');
             }
+            if (vendorSelect) { vendorSelect.disabled = false; vendorSelect.value = shownVendor; }
             if (filterStatus) { filterStatus.hidden = true; filterStatus.textContent = ''; }
             if (retourEmpty) { retourEmpty.textContent = retourEmptyText; }
             setExportsBusy(false);
         };
-        var chooseFilter = function (company, department) {
+        var chooseFilter = function (company, department, vendor) {
             if (filterNavigating) { return; }
             // Afdelingen verschillen per bedrijf: zonder bedrijf ("Alle") geen afdeling.
             if (company === '') { department = ''; }
+            // Leveranciers verschillen per bedrijf. Een ander bedrijf begint zonder leverancier.
+            if (vendor === undefined) { vendor = company !== shownCompany ? '' : shownVendor; }
             var year = (filterForm.querySelector('input[name="year"]') || {}).value || '';
             lockFilters(company, department);
             var csrf = form ? ((form.querySelector('[name="csrf"]') || {}).value || '') : '';
@@ -772,6 +815,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
                 var params = new URLSearchParams();
                 params.set('company', company);
                 params.set('cost_center', department);
+                params.set('vendor', vendor);
                 params.set('year', year);
                 window.location.assign('index.php?' + params.toString());
                 return;
@@ -780,7 +824,7 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             post.method = 'post';
             post.action = (form && form.getAttribute('action')) || 'prefs.php';
             post.hidden = true;
-            [['csrf', csrf], ['filter', '1'], ['company', company], ['cost_center', department], ['year', year]].forEach(function (pair) {
+            [['csrf', csrf], ['filter', '1'], ['company', company], ['cost_center', department], ['vendor', vendor], ['year', year]].forEach(function (pair) {
                 var input = document.createElement('input');
                 input.type = 'hidden';
                 input.name = pair[0];
@@ -799,6 +843,11 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
         if (departmentSelect) {
             departmentSelect.addEventListener('change', function () {
                 chooseFilter(companySelect ? shownCompany : '', departmentSelect.value);
+            });
+        }
+        if (vendorSelect) {
+            vendorSelect.addEventListener('change', function () {
+                chooseFilter(companySelect ? shownCompany : '', departmentSelect ? shownDepartment : '', vendorSelect.value);
             });
         }
         // Bij laden, vernieuwen en de terug-knop (ook bfcache): de selects tonen
@@ -848,6 +897,31 @@ function consus_page_render(array $snapshot, array $prefs, array $query, string 
             renderTable();
         });
     }
+    var showIdleBox = document.getElementById('show-idle');
+    if (showIdleBox && form && window.fetch) {
+        showIdleBox.addEventListener('change', function () {
+            var payload = new FormData();
+            payload.set('csrf', (form.querySelector('[name="csrf"]') || {}).value || '');
+            payload.set('show_idle', showIdleBox.checked ? '1' : '0');
+            fetch(form.action, {
+                method: 'POST',
+                body: payload,
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' }
+            }).then(function (response) {
+                if (!response.ok) { throw new Error('opslaan mislukt'); }
+                window.location.reload();
+            }).catch(function () {
+                showIdleBox.checked = !showIdleBox.checked;
+                var status = document.querySelector('[data-save-status]');
+                if (status) {
+                    status.hidden = false;
+                    status.textContent = 'Opslaan mislukt. Probeer het nog eens.';
+                }
+            });
+        });
+    }
+
     var hideZeroBox = document.getElementById('hide-zero');
     var zeroHiddenNode = document.querySelector('[data-zero-hidden]');
 

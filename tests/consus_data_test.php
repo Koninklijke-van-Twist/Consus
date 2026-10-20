@@ -2870,4 +2870,94 @@ $descYearRows = consus_usage_year_rows($descFacts, 2026, $windows, []);
 $descValues = consus_usage_row_values($descYearRows[0]);
 test_assert($descValues[0] === 'PK-1' && $descValues[1] === 'Pakking', 'tabel en excel zetten de omschrijving direct na het artikelnummer');
 
+// Artikel zonder voorraad en zonder posten (PK-0530017 en soortgenoten).
+$idle = [];
+$idleItems = [];
+$idleDescriptions = null;
+$idleVendors = null;
+$idleCostCenters = null;
+foreach ([
+    ['No' => 'PK-0530017', 'Description' => 'Nulartikel', 'Vendor_No' => '90101', 'LVS_Vendor_Name' => 'EGT', 'Type' => 'Inventory', 'Global_Dimension_1_Code' => '15'],
+    ['No' => 'PK-SERVICE', 'Description' => 'Serviceartikel', 'Vendor_No' => '90101', 'LVS_Vendor_Name' => 'EGT', 'Type' => 'Service'],
+    ['No' => 'PK-NON', 'Description' => 'Niet-voorraad', 'Vendor_No' => '90101', 'Type' => 'Non-Inventory'],
+    ['No' => 'PK-BLOCK', 'Description' => 'Geblokkeerd', 'Vendor_No' => '90101', 'Type' => 'Inventory', 'Blocked' => true],
+] as $idleRow) {
+    consus_apply_vendor_row($idleItems, $idleRow, 'hvt', $idleDescriptions, $idleVendors, $idleCostCenters, $idle);
+}
+test_assert($idleItems === [], 'artikelkaart zonder voorraad of posten maakt nog steeds geen feitregel');
+test_assert(($idle['hvt|PK-0530017']['vendor_no'] ?? '') === '90101', 'nulartikel uit AppItems blijft bewaard');
+test_assert(isset($idle['hvt|PK-SERVICE']) && isset($idle['hvt|PK-NON']), 'Service en Non-Inventory vallen niet weg');
+test_assert(!isset($idle['hvt|PK-BLOCK']), 'geblokkeerd artikel zonder voorraad blijft weg');
+
+$zeroStock = [];
+consus_apply_stock_row($zeroStock, [
+    'Item_No' => 'PK-26430445',
+    'Company_Name' => 'Hunter van Twist',
+    'Inventory' => 0,
+    'Safety_Stock_Quantity' => 0,
+    'Reorder_Point' => 0,
+], 'Hunter van Twist');
+consus_apply_vendor_row($zeroStock, [
+    'No' => 'PK-26430445',
+    'Description' => 'Nulvoorraad',
+    'Vendor_No' => '90052',
+    'LVS_Vendor_Name' => 'Dropship',
+], 'hvt', $idleDescriptions, $idleVendors, $idleCostCenters, $idle);
+$rolledZero = consus_rollup_items($zeroStock, $windows);
+test_assert($rolledZero['articles'] === [], 'nulvoorraad zonder posten komt niet in articles');
+$idleRows = consus_idle_rows_for_company($zeroStock, $rolledZero['articles'], $idle, $rolledZero['item_usage']);
+$idleNos = array_column($idleRows, 'item_no');
+test_assert(in_array('PK-0530017', $idleNos, true) && in_array('PK-26430445', $idleNos, true), 'AppItems en een nulregel uit voorraad blijven in de idle-lijst');
+test_assert(in_array('PK-SERVICE', $idleNos, true) && in_array('PK-NON', $idleNos, true), 'Service en Non-Inventory zitten in de idle-lijst');
+test_assert(!in_array('PK-BLOCK', $idleNos, true), 'geblokkeerd blijft uit de idle-lijst');
+
+$savedIdleEnv = getenv('CONSUS_SNAPSHOT_FILE');
+$idleRoot = sys_get_temp_dir() . '/consus-idle-' . getmypid();
+@mkdir($idleRoot, 0775, true);
+putenv('CONSUS_SNAPSHOT_FILE=' . $idleRoot . '/consus_snapshot.json');
+try {
+    consus_store_company_idle('hvt', $idleRows);
+    consus_rebuild_idle_index();
+    $index = consus_read_idle_vendor_index();
+    test_assert(isset($index['hvt']), 'index noemt het bedrijf');
+    $loaded = consus_read_idle_vendor_items('hvt', '90101');
+    $loadedNos = array_column($loaded, 'item_no');
+    test_assert(in_array('PK-0530017', $loadedNos, true) && in_array('PK-SERVICE', $loadedNos, true) && in_array('PK-NON', $loadedNos, true), 'leveranciersbestand houdt Inventory, Service en Non-Inventory');
+    test_assert(!in_array('PK-26430445', $loadedNos, true), 'andere leverancier zit niet in dit bestand');
+    $idleSnapshot = consus_empty_snapshot();
+    $idleSnapshot['generated_at'] = '2026-09-24T02:00:00+00:00';
+    $idleSnapshot['version'] = CONSUS_SNAPSHOT_VERSION;
+    $idleSnapshot['windows'] = $windows;
+    $idleSnapshot['as_of'] = $windows['as_of'];
+    test_assert(consus_usage_facts_for_view($idleSnapshot, 'hvt', '', [], '90101', false) === [], 'uitgeschakelde schakelaar toont het nulartikel niet');
+    test_assert(consus_usage_facts_for_view($idleSnapshot, 'hvt', '', [], '', true) === [], 'zonder gekozen leverancier blijft de volle lijst weg');
+    $withVendor = consus_usage_facts_for_view($idleSnapshot, 'hvt', '', [], '90101', true);
+    test_assert(in_array('PK-0530017', array_column($withVendor, 'item_no'), true), 'schakelaar en leverancier tonen het artikel zonder voorraad en zonder posten');
+    $departmentOnly = consus_usage_facts_for_view($idleSnapshot, 'hvt', '15', [], '90101', true);
+    test_assert(array_column($departmentOnly, 'item_no') === ['PK-0530017'], 'afdeling beperkt de nulartikelen');
+    $yearRow = null;
+    foreach (consus_usage_year_rows($withVendor, 2026, $windows, []) as $row) {
+        if (($row['item_no'] ?? '') === 'PK-0530017') {
+            $yearRow = $row;
+        }
+    }
+    test_assert(is_array($yearRow), 'jaartabel heeft het nulartikel');
+    $values = consus_usage_row_values($yearRow);
+    test_assert($values[0] === 'PK-0530017' && $values[1] === 'Nulartikel', 'nummer en omschrijving van het nulartikel');
+    $allZero = true;
+    foreach (array_slice($values, 2) as $number) {
+        if (abs((float) $number) >= 0.0000001) {
+            $allZero = false;
+        }
+    }
+    test_assert($allZero, 'cijferkolommen van een artikel zonder voorraad en zonder posten staan op 0');
+} finally {
+    if ($savedIdleEnv === false) {
+        putenv('CONSUS_SNAPSHOT_FILE');
+    } else {
+        putenv('CONSUS_SNAPSHOT_FILE=' . $savedIdleEnv);
+    }
+    consus_remove_tree($idleRoot);
+}
+
 echo "OK\n";
