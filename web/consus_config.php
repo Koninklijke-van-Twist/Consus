@@ -158,6 +158,10 @@ const CONSUS_ITEM_ENTITY = 'AppItems';
  * artikelen, ruim twee keer zo snel per rij. AppItemCard gaf bij KVT een
  * timeout van 300 s. Reorder_Point staat niet op AppItems; dat komt uit
  * VoorraadPerBedrijf, net als de veiligheidsvoorraad per bedrijf.
+ * Geen filter op Type. Elpis leest AppItems ook zonder soort (Inventory,
+ * Service, Non-Inventory); Type eq 'Artikel' geldt daar alleen voor
+ * planningsregels. Een Type-filter zou Non-Inventory en Service hier
+ * onterecht weghalen.
  */
 const CONSUS_ITEM_FIELDS = [
     'No',

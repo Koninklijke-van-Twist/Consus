@@ -43,6 +43,11 @@ try {
     prefs_assert(consus_prefs_write('tim@kvt.nl', ['customers' => 'C1, C2', 'items' => 'ART-1, ART-2'])['hide_zero'] === true, 'filteropslag (zonder vinkje) wist het nul-filter niet');
     prefs_assert(consus_prefs_write('tim@kvt.nl', ['hide_zero' => '0'])['hide_zero'] === false, 'nul-filter weer uit');
     prefs_assert(consus_prefs_write('tim@kvt.nl', ['hide_zero' => 'onzin'])['hide_zero'] === false, 'onbekende waarde is uit');
+    prefs_assert(consus_prefs_read('tim@kvt.nl')['show_idle'] === false, 'artikelen zonder voorraad staan standaard uit');
+    $idleOn = consus_prefs_write('tim@kvt.nl', consus_prefs_input_from_request(['show_idle' => '1']));
+    prefs_assert($idleOn['show_idle'] === true && $idleOn['hide_zero'] === false, 'schakelaar zonder voorraad wordt opgeslagen');
+    prefs_assert(consus_prefs_write('tim@kvt.nl', ['page_size' => 150])['show_idle'] === true, 'paginagrootte wist de schakelaar niet');
+    prefs_assert(consus_prefs_write('tim@kvt.nl', ['show_idle' => '0'])['show_idle'] === false, 'schakelaar weer uit');
     prefs_assert(consus_prefs_normalize_flag(true) && consus_prefs_normalize_flag('on') && consus_prefs_normalize_flag(1), 'aan-waarden');
     prefs_assert(!consus_prefs_normalize_flag(null) && !consus_prefs_normalize_flag('') && !consus_prefs_normalize_flag([1]) && !consus_prefs_normalize_flag(2), 'uit-waarden');
     prefs_assert(!array_key_exists('hide_zero', consus_prefs_input_from_request(['customers' => 'C1'])), 'zonder vinkje in het verzoek geen nul-filterwijziging');
@@ -125,11 +130,14 @@ if (consus_prefs_filter_redirect(['company' => '', 'cost_center' => '15', 'year'
 if (consus_prefs_filter_redirect(['company' => 'Hunter van Twist', 'cost_center' => '<x>']) !== 'index.php?company=Hunter%20van%20Twist&cost_center=&year=') {
     throw new RuntimeException('filter-redirect laat ongeldige afdeling weg');
 }
-if (consus_prefs_filter_input(['company' => '', 'cost_center' => '15']) !== ['company' => '', 'cost_center' => '']) {
+if (consus_prefs_filter_input(['company' => '', 'cost_center' => '15']) !== ['company' => '', 'cost_center' => '', 'vendor' => '']) {
     throw new RuntimeException('filter-input: bij Alle geen onthouden afdeling');
 }
-if (consus_prefs_filter_input(['company' => 'KVT Germany', 'cost_center' => '10', 'customers' => 'X']) !== ['company' => 'KVT Germany', 'cost_center' => '10']) {
-    throw new RuntimeException('filter-input: alleen bedrijf en afdeling, samen');
+if (consus_prefs_filter_input(['company' => 'KVT Germany', 'cost_center' => '10', 'customers' => 'X']) !== ['company' => 'KVT Germany', 'cost_center' => '10', 'vendor' => '']) {
+    throw new RuntimeException('filter-input: alleen bedrijf, afdeling en leverancier');
+}
+if (consus_prefs_filter_redirect(['company' => 'Hunter van Twist', 'cost_center' => '15', 'vendor' => '90101', 'year' => '2026']) !== 'index.php?company=Hunter%20van%20Twist&cost_center=15&year=2026&vendor=90101') {
+    throw new RuntimeException('filter-redirect neemt de leverancier mee');
 }
 
 echo "OK\n";

@@ -276,5 +276,12 @@ page_assert(page_payload($zeroOn)['hideZero'] === true, 'jaardata: nul-filter aa
 page_assert(substr_count($zeroOff, 'class="sort-button"') === count(consus_usage_column_labels()), 'elke kolomkop is een sorteerknop');
 page_assert(strpos($zeroOff, 'window.ConsusTable') !== false && strpos($zeroOff, 'function isZeroRow') !== false, 'filter- en sorteerlogica staat in de pagina');
 page_assert(strpos($zeroOff, "payload.set('hide_zero'") !== false && strpos($zeroOff, "payload.set('csrf'") !== false, 'nul-filter wordt met CSRF opgeslagen');
+page_assert(strpos($zeroOff, 'Ook artikelen zonder voorraad of beweging tonen') !== false, 'schakelaar voor artikelen zonder voorraad');
+page_assert(strpos($zeroOff, '<input type="checkbox" id="show-idle">') !== false, 'schakelaar staat standaard uit');
+page_assert(strpos($zeroOff, '<label for="vendor">Leverancier</label>') !== false, 'leverancierskeuze staat bij de filters');
+page_assert(strpos($zeroOff, 'id="idle-hint"') === false, 'zonder schakelaar geen hint over 85.000 artikelen');
+$idleOn = page_html(page_snapshot(5), ['show_idle' => true] + consus_empty_prefs());
+page_assert(strpos($idleOn, 'id="show-idle" checked') !== false, 'onthouden schakelaar staat aan');
+page_assert(strpos($idleOn, 'id="idle-hint"') !== false, 'zonder leverancier blijft de volle lijst weg');
 
 echo "OK\n";

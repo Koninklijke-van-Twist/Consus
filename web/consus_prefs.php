@@ -62,7 +62,7 @@ function consus_prefs_normalize_flag(mixed $value): bool
 }
 
 /**
- * @return array{customers:array<int, string>,items:array<int, string>,page_size:int,company:?string,cost_center:?string,hide_zero:bool}
+ * @return array{customers:array<int, string>,items:array<int, string>,page_size:int,company:?string,cost_center:?string,vendor:?string,hide_zero:bool,show_idle:bool}
  */
 function consus_empty_prefs(): array
 {
@@ -72,7 +72,9 @@ function consus_empty_prefs(): array
         'page_size' => CONSUS_DEFAULT_PAGE_SIZE,
         'company' => null,
         'cost_center' => null,
+        'vendor' => null,
         'hide_zero' => false,
+        'show_idle' => false,
     ];
 }
 
@@ -135,7 +137,7 @@ function consus_prefs_normalize_list($value, int $limit = 500): array
 function consus_prefs_input_from_request(array $post): array
 {
     $input = [];
-    foreach (['customers', 'items', 'page_size', 'company', 'cost_center', 'hide_zero'] as $key) {
+    foreach (['customers', 'items', 'page_size', 'company', 'cost_center', 'vendor', 'hide_zero', 'show_idle'] as $key) {
         if (array_key_exists($key, $post)) {
             $input[$key] = $post[$key];
         }
@@ -155,13 +157,18 @@ function consus_prefs_filter_redirect(array $post): string
 {
     $company = (string) (consus_prefs_normalize_choice($post['company'] ?? '') ?? '');
     $costCenter = $company === '' ? '' : (string) (consus_prefs_normalize_choice($post['cost_center'] ?? '') ?? '');
+    $vendor = (string) (consus_prefs_normalize_choice($post['vendor'] ?? '') ?? '');
     $year = (int) ($post['year'] ?? 0);
-
-    return 'index.php?' . http_build_query([
+    $params = [
         'company' => $company,
         'cost_center' => $costCenter,
         'year' => $year > 0 ? (string) $year : '',
-    ], '', '&', PHP_QUERY_RFC3986);
+    ];
+    if ($vendor !== '') {
+        $params['vendor'] = $vendor;
+    }
+
+    return 'index.php?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986);
 }
 
 /**
@@ -169,7 +176,7 @@ function consus_prefs_filter_redirect(array $post): string
  * onthouden afdeling nooit bij een ander bedrijf terechtkomt.
  *
  * @param array<string, mixed> $post
- * @return array{company:string,cost_center:string}
+ * @return array{company:string,cost_center:string,vendor:string}
  */
 function consus_prefs_filter_input(array $post): array
 {
@@ -178,6 +185,7 @@ function consus_prefs_filter_input(array $post): array
     return [
         'company' => $company,
         'cost_center' => $company === '' ? '' : (string) (consus_prefs_normalize_choice($post['cost_center'] ?? '') ?? ''),
+        'vendor' => (string) (consus_prefs_normalize_choice($post['vendor'] ?? '') ?? ''),
     ];
 }
 
@@ -193,7 +201,9 @@ function consus_prefs_from_array(array $decoded): array
         'page_size' => consus_normalize_page_size($decoded['page_size'] ?? CONSUS_DEFAULT_PAGE_SIZE),
         'company' => consus_prefs_normalize_choice($decoded['company'] ?? null),
         'cost_center' => consus_prefs_normalize_choice($decoded['cost_center'] ?? null),
+        'vendor' => consus_prefs_normalize_choice($decoded['vendor'] ?? null),
         'hide_zero' => consus_prefs_normalize_flag($decoded['hide_zero'] ?? false),
+        'show_idle' => consus_prefs_normalize_flag($decoded['show_idle'] ?? false),
     ];
 }
 
@@ -241,7 +251,10 @@ function consus_prefs_write(string $email, array $input): array
         if (array_key_exists('hide_zero', $input)) {
             $current['hide_zero'] = consus_prefs_normalize_flag($input['hide_zero']);
         }
-        foreach (['company', 'cost_center'] as $choice) {
+        if (array_key_exists('show_idle', $input)) {
+            $current['show_idle'] = consus_prefs_normalize_flag($input['show_idle']);
+        }
+        foreach (['company', 'cost_center', 'vendor'] as $choice) {
             if (array_key_exists($choice, $input)) {
                 $value = consus_prefs_normalize_choice($input[$choice]);
                 if ($value !== null) {
@@ -257,7 +270,9 @@ function consus_prefs_write(string $email, array $input): array
             'page_size' => $current['page_size'],
             'company' => $current['company'],
             'cost_center' => $current['cost_center'],
+            'vendor' => $current['vendor'],
             'hide_zero' => $current['hide_zero'],
+            'show_idle' => $current['show_idle'],
         ];
     });
 

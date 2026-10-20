@@ -1551,6 +1551,9 @@ function consus_merge_warm_company_rows(
             && !consus_bucket_map_has_movement($sales)
             && !consus_bucket_map_has_movement($consumption)
         ) {
+            // Zelfde grens als consus_article_from_location: een leveranciersrij
+            // zonder voorraad of beweging blijft uit de snapshot. Het artikel
+            // zelf staat in de idle-lijst.
             continue;
         }
 
@@ -1643,6 +1646,7 @@ function consus_merge_warm_company_articles(
             && abs($reorder) < 0.0000001
             && !consus_consumption_qty_has_movement($consumption)
         ) {
+            // Nulartikel blijft uit de snapshot; de idle-lijst is de bron voor de tabel.
             continue;
         }
 
@@ -2044,8 +2048,9 @@ function consus_remember_item_field(array &$catalog, string $key, string $value)
  * @param array<string, string>|null $descriptions
  * @param array<string, string>|null $vendors company_key|item_no => leverancier
  * @param array<string, string>|null $costCenters company_key|item_no => afdeling
+ * @param array<string, array<string, mixed>>|null $idleItems company_key|item_no => compacte nulregel
  */
-function consus_apply_vendor_row(array &$items, array $row, string $companyKey, ?array &$descriptions = null, ?array &$vendors = null, ?array &$costCenters = null): void
+function consus_apply_vendor_row(array &$items, array $row, string $companyKey, ?array &$descriptions = null, ?array &$vendors = null, ?array &$costCenters = null, ?array &$idleItems = null): void
 {
     if ($companyKey === '') {
         return;
@@ -2077,6 +2082,13 @@ function consus_apply_vendor_row(array &$items, array $row, string $companyKey, 
 
     $key = $fieldKey;
     if (!isset($items[$key])) {
+        // Nog geen voorraad of artikelpost. Bewaar het artikel compact, buiten
+        // $items: een volledige feitregel per AppItems-rij (ongeveer 85.000)
+        // hield de nachtrun eerder al boven memory_limit.
+        if ($idleItems !== null) {
+            consus_remember_idle_item($idleItems, $companyKey, $row);
+        }
+
         return;
     }
 
@@ -2097,6 +2109,226 @@ function consus_apply_vendor_row(array &$items, array $row, string $companyKey, 
     }
 
     consus_apply_item_planning($items[$key], $row);
+}
+
+/**
+ * AppItems zonder Type-filter. Elpis leest AppItems ook zonder soort
+ * (alleen No en InventoryField); Type eq 'Artikel' geldt daar alleen voor
+ * planningsregels, niet voor het artikel. Inventory, Non-Inventory en
+ * Service blijven dus allemaal in deze lijst. Een geblokkeerd artikel
+ * (Blocked op de rij) hoort er niet bij; ontbreekt het veld, dan blijft
+ * het artikel wel.
+ *
+ * @param array<string, array<string, mixed>> $idle
+ */
+function consus_remember_idle_item(array &$idle, string $companyKey, array $row): void
+{
+    if ($companyKey === '' || consus_dimension_value_is_blocked($row)) {
+        return;
+    }
+    $itemNo = consus_scalar_string($row['No'] ?? $row['Item_No'] ?? '');
+    if ($itemNo === '') {
+        return;
+    }
+    $key = $companyKey . '|' . $itemNo;
+    $description = consus_scalar_string($row['Description'] ?? '');
+    $vendorNo = consus_scalar_string($row['Vendor_No'] ?? '');
+    $vendorName = consus_vendor_name_from_item($row);
+    $costCenter = consus_cost_center_from_source_row($row);
+    if (!isset($idle[$key])) {
+        $idle[$key] = [
+            'company_key' => $companyKey,
+            'item_no' => $itemNo,
+            'description' => $description,
+            'vendor_no' => $vendorNo,
+            'vendor_name' => $vendorName,
+            'cost_center' => $costCenter,
+        ];
+
+        return;
+    }
+    if (strlen($description) > strlen((string) ($idle[$key]['description'] ?? ''))) {
+        $idle[$key]['description'] = $description;
+    }
+    if (trim((string) ($idle[$key]['vendor_no'] ?? '')) === '' && $vendorNo !== '') {
+        $idle[$key]['vendor_no'] = $vendorNo;
+    }
+    if (strlen($vendorName) > strlen((string) ($idle[$key]['vendor_name'] ?? ''))) {
+        $idle[$key]['vendor_name'] = $vendorName;
+    }
+    if (trim((string) ($idle[$key]['cost_center'] ?? '')) === '' && $costCenter !== '') {
+        $idle[$key]['cost_center'] = $costCenter;
+    }
+}
+
+/**
+ * Geen voorraad, geen veiligheidsvoorraad, geen bestelpunt en geen beweging.
+ */
+function consus_item_fact_is_idle(array $item): bool
+{
+    foreach (['inventory', 'safety_stock', 'reorder_point'] as $field) {
+        if (abs((float) ($item[$field] ?? 0)) >= 0.0000001) {
+            return false;
+        }
+    }
+    $usage = is_array($item['usage'] ?? null) ? $item['usage'] : [];
+    if (consus_item_usage_has_movement($usage)) {
+        return false;
+    }
+    $locations = is_array($item['by_location'] ?? null) ? $item['by_location'] : [];
+    foreach ($locations as $metrics) {
+        if (!is_array($metrics)) {
+            continue;
+        }
+        foreach (['inventory', 'safety_stock', 'reorder_point'] as $field) {
+            if (abs((float) ($metrics[$field] ?? 0)) >= 0.0000001) {
+                return false;
+            }
+        }
+        $consumption = is_array($metrics['consumption'] ?? null) ? $metrics['consumption'] : [];
+        if (consus_bucket_map_has_movement($consumption)) {
+            return false;
+        }
+    }
+
+    return trim((string) ($item['item_no'] ?? '')) !== '';
+}
+
+/**
+ * Wat de rollup liet vallen (nulregel zonder beweging) plus AppItems dat
+ * nog geen feitregel had. Artikelen die al in articles of item_usage staan
+ * komen hier niet nog eens in.
+ *
+ * @param array<string, array<string, mixed>> $items
+ * @param array<int, array<string, mixed>> $articles
+ * @param array<string, array<string, mixed>> $idleCatalog
+ * @param array<int, array<string, mixed>> $itemUsage
+ * @return array<int, array<string, mixed>>
+ */
+function consus_idle_rows_for_company(array $items, array $articles, array $idleCatalog, array $itemUsage): array
+{
+    $seen = [];
+    foreach ([$articles, $itemUsage] as $records) {
+        foreach ($records as $record) {
+            if (!is_array($record)) {
+                continue;
+            }
+            $key = trim((string) ($record['company_key'] ?? '')) . '|' . trim((string) ($record['item_no'] ?? ''));
+            if ($key !== '|') {
+                $seen[$key] = true;
+            }
+        }
+    }
+
+    $rows = [];
+    foreach ($idleCatalog as $key => $row) {
+        if (!is_array($row) || isset($seen[$key])) {
+            continue;
+        }
+        $itemNo = trim((string) ($row['item_no'] ?? ''));
+        if ($itemNo === '') {
+            continue;
+        }
+        $rows[$key] = $row;
+        $seen[$key] = true;
+    }
+    foreach ($items as $key => $item) {
+        if (!is_array($item) || isset($seen[$key]) || !consus_item_fact_is_idle($item)) {
+            continue;
+        }
+        $companyKey = (string) ($item['company_key'] ?? '');
+        $itemNo = trim((string) ($item['item_no'] ?? ''));
+        if ($companyKey === '' || $itemNo === '' || !isset(CONSUS_COMPANIES[$companyKey])) {
+            continue;
+        }
+        $rows[$key] = [
+            'company_key' => $companyKey,
+            'item_no' => $itemNo,
+            'description' => trim((string) ($item['description'] ?? '')),
+            'vendor_no' => trim((string) ($item['vendor_no'] ?? '')),
+            'vendor_name' => trim((string) ($item['vendor_name'] ?? '')),
+            'cost_center' => trim((string) ($item['cost_center'] ?? '')),
+        ];
+    }
+
+    $list = array_values($rows);
+    usort($list, static function (array $left, array $right): int {
+        $byItem = strnatcasecmp((string) ($left['item_no'] ?? ''), (string) ($right['item_no'] ?? ''));
+        if ($byItem !== 0) {
+            return $byItem;
+        }
+
+        return strnatcasecmp((string) ($left['company_key'] ?? ''), (string) ($right['company_key'] ?? ''));
+    });
+
+    return $list;
+}
+
+/**
+ * Lege leverancier in de lijst is __none__, net als een lege afdeling.
+ * Een leeg filter betekent alle leveranciers.
+ */
+function consus_vendor_filter_matches(string $actual, string $filter): bool
+{
+    if ($filter === '') {
+        return true;
+    }
+    if ($filter === '__none__') {
+        return trim($actual) === '';
+    }
+
+    return strcasecmp(trim($actual), $filter) === 0;
+}
+
+/**
+ * Leveranciers uit de snapshot plus de compacte nulregels. De index is klein;
+ * de artikelbestanden zelf worden hier niet gelezen.
+ *
+ * @param array<int, array<string, mixed>> $rows
+ * @return array<int, array{vendor_no:string,vendor_name:string}>
+ */
+function consus_vendor_choices(array $rows, string $companyKey, string $costCenter): array
+{
+    $options = [];
+    foreach (consus_vendor_options($rows, $companyKey, $costCenter) as $vendor) {
+        $number = (string) ($vendor['vendor_no'] ?? '');
+        $choice = $number === '' ? '__none__' : $number;
+        $options[$choice] = [
+            'vendor_no' => $choice,
+            'vendor_name' => (string) ($vendor['vendor_name'] ?? ''),
+        ];
+    }
+    $index = consus_read_idle_vendor_index();
+    $keys = $companyKey !== '' && isset(CONSUS_COMPANIES[$companyKey]) ? [$companyKey] : array_keys(CONSUS_COMPANIES);
+    foreach ($keys as $key) {
+        $vendors = $index[$key] ?? null;
+        if (!is_array($vendors)) {
+            continue;
+        }
+        foreach ($vendors as $vendor) {
+            if (!is_array($vendor)) {
+                continue;
+            }
+            $number = trim((string) ($vendor['vendor_no'] ?? ''));
+            $choice = $number === '' ? '__none__' : $number;
+            $name = trim((string) ($vendor['vendor_name'] ?? ''));
+            if ($name === '') {
+                $name = $number !== '' ? $number : 'Geen leverancier';
+            }
+            if (!isset($options[$choice]) || strlen($name) > strlen((string) ($options[$choice]['vendor_name'] ?? ''))) {
+                $options[$choice] = [
+                    'vendor_no' => $choice,
+                    'vendor_name' => $name,
+                ];
+            }
+        }
+    }
+    $list = array_values($options);
+    usort($list, static function (array $left, array $right): int {
+        return strnatcasecmp((string) $left['vendor_name'], (string) $right['vendor_name']);
+    });
+
+    return $list;
 }
 
 /**
@@ -3089,6 +3321,9 @@ function consus_article_from_location(
         && abs($reorder) < 0.0000001
         && !consus_consumption_qty_has_movement($consumption)
     ) {
+        // Niet in de snapshot: een nulregel per AppItems-artikel maakt de
+        // nachtrun en de excel te groot. consus_idle_rows_for_company bewaart
+        // hem compact, per leverancier.
         return null;
     }
 
@@ -3798,6 +4033,200 @@ function consus_write_snapshot(array $snapshot): void
         @unlink($temporary);
         throw new RuntimeException('Snapshot kon niet atomair worden vervangen.');
     }
+}
+
+/**
+ * Artikelen zonder voorraad en zonder beweging staan niet in de snapshot.
+ * AppItems telt ongeveer 85.000 rijen per bedrijf; die in articles, de
+ * warme merge of de paginajson zetten blaast nightly en de excel op.
+ * Per bedrijf, per leverancier, naast de snapshot.
+ */
+function consus_idle_root(): string
+{
+    return dirname(consus_snapshot_file()) . '/idle';
+}
+
+function consus_idle_vendor_hash(string $vendorNo): string
+{
+    return sha1($vendorNo);
+}
+
+function consus_remove_tree(string $dir): void
+{
+    if (!is_dir($dir)) {
+        return;
+    }
+    $entries = scandir($dir);
+    if (!is_array($entries)) {
+        return;
+    }
+    foreach ($entries as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        $path = $dir . '/' . $entry;
+        if (is_dir($path)) {
+            consus_remove_tree($path);
+            continue;
+        }
+        @unlink($path);
+    }
+    @rmdir($dir);
+}
+
+/**
+ * @param array<int, array<string, mixed>> $rows
+ */
+function consus_store_company_idle(string $companyKey, array $rows): void
+{
+    if (!isset(CONSUS_COMPANIES[$companyKey])) {
+        return;
+    }
+
+    $grouped = [];
+    $names = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $itemNo = trim((string) ($row['item_no'] ?? ''));
+        if ($itemNo === '') {
+            continue;
+        }
+        $vendorNo = trim((string) ($row['vendor_no'] ?? ''));
+        $grouped[$vendorNo][] = [
+            'item_no' => $itemNo,
+            'description' => trim((string) ($row['description'] ?? '')),
+            'vendor_no' => $vendorNo,
+            'vendor_name' => trim((string) ($row['vendor_name'] ?? '')),
+            'cost_center' => trim((string) ($row['cost_center'] ?? '')),
+        ];
+        $name = trim((string) ($row['vendor_name'] ?? ''));
+        if (!isset($names[$vendorNo]) || strlen($name) > strlen($names[$vendorNo])) {
+            $names[$vendorNo] = $name;
+        }
+    }
+
+    $root = consus_idle_root();
+    if (!is_dir($root) && !@mkdir($root, 0775, true) && !is_dir($root)) {
+        throw new RuntimeException('Map voor artikelen zonder voorraad kon niet worden aangemaakt.');
+    }
+    $staging = $root . '/' . $companyKey . '.tmp.' . getmypid();
+    consus_remove_tree($staging);
+    if (!@mkdir($staging, 0775, true) && !is_dir($staging)) {
+        throw new RuntimeException('Map voor artikelen zonder voorraad kon niet worden aangemaakt.');
+    }
+
+    $vendors = [];
+    foreach ($grouped as $vendorNo => $items) {
+        $json = json_encode(array_values($items), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (!is_string($json) || @file_put_contents($staging . '/' . consus_idle_vendor_hash((string) $vendorNo) . '.json', $json, LOCK_EX) === false) {
+            consus_remove_tree($staging);
+            throw new RuntimeException('Artikelen zonder voorraad konden niet worden weggeschreven.');
+        }
+        $label = $names[$vendorNo] ?? '';
+        $vendors[] = [
+            'vendor_no' => (string) $vendorNo,
+            'vendor_name' => $label !== '' ? $label : ((string) $vendorNo !== '' ? (string) $vendorNo : 'Geen leverancier'),
+            'count' => count($items),
+        ];
+    }
+    usort($vendors, static function (array $left, array $right): int {
+        return strnatcasecmp((string) $left['vendor_name'], (string) $right['vendor_name']);
+    });
+    $indexJson = json_encode($vendors, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!is_string($indexJson) || @file_put_contents($staging . '/vendors.json', $indexJson, LOCK_EX) === false) {
+        consus_remove_tree($staging);
+        throw new RuntimeException('Leveranciers zonder voorraad konden niet worden weggeschreven.');
+    }
+
+    $final = $root . '/' . $companyKey;
+    $backup = $root . '/' . $companyKey . '.old.' . getmypid();
+    consus_remove_tree($backup);
+    if (is_dir($final) && !@rename($final, $backup)) {
+        consus_remove_tree($staging);
+        throw new RuntimeException('Vorige lijst zonder voorraad kon niet worden vervangen.');
+    }
+    if (!@rename($staging, $final)) {
+        if (is_dir($backup)) {
+            @rename($backup, $final);
+        }
+        consus_remove_tree($staging);
+        throw new RuntimeException('Lijst zonder voorraad kon niet atomair worden vervangen.');
+    }
+    consus_remove_tree($backup);
+}
+
+function consus_rebuild_idle_index(): void
+{
+    $root = consus_idle_root();
+    $index = [];
+    foreach (array_keys(CONSUS_COMPANIES) as $key) {
+        $path = $root . '/' . $key . '/vendors.json';
+        if (!is_file($path)) {
+            continue;
+        }
+        $decoded = json_decode((string) @file_get_contents($path), true);
+        if (is_array($decoded)) {
+            $index[$key] = $decoded;
+        }
+    }
+    if (!is_dir($root) && !@mkdir($root, 0775, true) && !is_dir($root)) {
+        throw new RuntimeException('Map voor artikelen zonder voorraad kon niet worden aangemaakt.');
+    }
+    $json = json_encode($index, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!is_string($json)) {
+        throw new RuntimeException('Index zonder voorraad kon niet als JSON worden gecodeerd.');
+    }
+    $path = $root . '/index.json';
+    $temporary = $path . '.tmp.' . getmypid();
+    if (@file_put_contents($temporary, $json, LOCK_EX) === false) {
+        throw new RuntimeException('Index zonder voorraad kon niet worden weggeschreven.');
+    }
+    if (!@rename($temporary, $path)) {
+        @unlink($temporary);
+        throw new RuntimeException('Index zonder voorraad kon niet atomair worden vervangen.');
+    }
+}
+
+/**
+ * @return array<string, array<int, array<string, mixed>>>
+ */
+function consus_read_idle_vendor_index(): array
+{
+    $path = consus_idle_root() . '/index.json';
+    if (!is_file($path)) {
+        return [];
+    }
+    $decoded = json_decode((string) @file_get_contents($path), true);
+
+    return is_array($decoded) ? $decoded : [];
+}
+
+/**
+ * @return array<int, array<string, mixed>>
+ */
+function consus_read_idle_vendor_items(string $companyKey, string $vendorNo): array
+{
+    if (!isset(CONSUS_COMPANIES[$companyKey])) {
+        return [];
+    }
+    $path = consus_idle_root() . '/' . $companyKey . '/' . consus_idle_vendor_hash($vendorNo) . '.json';
+    if (!is_file($path)) {
+        return [];
+    }
+    $decoded = json_decode((string) @file_get_contents($path), true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+    $rows = [];
+    foreach ($decoded as $row) {
+        if (is_array($row)) {
+            $rows[] = $row;
+        }
+    }
+
+    return $rows;
 }
 
 function consus_company_entity_url(
@@ -5984,6 +6413,7 @@ function consus_collect_customer_catalog(string $company, string $companyKey, ?c
  * @param array<string, string>|null $descriptions
  * @param array<string, string>|null $vendors
  * @param array<string, string>|null $costCenters
+ * @param array<string, array<string, mixed>>|null $idleItems
  * @return array{warnings:array<int, string>,foreign_spills:array<string, string>,departments:array<int, array<string, mixed>>,customers:array<int, array<string, mixed>>|null,items_scanned:bool}
  */
 function consus_collect_company(
@@ -5998,7 +6428,8 @@ function consus_collect_company(
     ?callable $fetchRows = null,
     ?array &$descriptions = null,
     ?array &$vendors = null,
-    ?array &$costCenters = null
+    ?array &$costCenters = null,
+    ?array &$idleItems = null
 ): array {
     $persist = $checkpoint !== null && $saveCheckpoint !== null;
     if ($checkpoint === null) {
@@ -6171,18 +6602,18 @@ function consus_collect_company(
                 $checkpoint['companies'][$companyKey]['steps'],
                 $companyKey,
                 'artikelen',
-                static function (array $row) use (&$items, &$descriptions, &$vendors, &$costCenters, $companyKey): void {
-                    consus_apply_vendor_row($items, $row, $companyKey, $descriptions, $vendors, $costCenters);
+                static function (array $row) use (&$items, &$descriptions, &$vendors, &$costCenters, &$idleItems, $companyKey): void {
+                    consus_apply_vendor_row($items, $row, $companyKey, $descriptions, $vendors, $costCenters, $idleItems);
                 },
-                static function (?array &$writer) use (&$items, &$descriptions, &$vendors, &$costCenters, $company, $companyKey, $onProgress): array {
+                static function (?array &$writer) use (&$items, &$descriptions, &$vendors, &$costCenters, &$idleItems, $company, $companyKey, $onProgress): array {
                     return consus_each_entity_rows(
                         $company,
                         CONSUS_ITEM_ENTITY,
                         CONSUS_ITEM_FIELDS,
                         CONSUS_ITEM_OPTIONAL_FIELDS,
                         '',
-                        static function (array $row) use (&$items, &$descriptions, &$vendors, &$costCenters, &$writer, $companyKey): void {
-                            consus_apply_vendor_row($items, $row, $companyKey, $descriptions, $vendors, $costCenters);
+                        static function (array $row) use (&$items, &$descriptions, &$vendors, &$costCenters, &$idleItems, &$writer, $companyKey): void {
+                            consus_apply_vendor_row($items, $row, $companyKey, $descriptions, $vendors, $costCenters, $idleItems);
                             if ($writer !== null) {
                                 consus_checkpoint_write_row($writer, $row);
                             }
@@ -7625,6 +8056,7 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
         $checkpointResumed = consus_checkpoint_has_progress($checkpoint['companies'][$companyKey]);
 
         $localItems = [];
+        $idleCatalog = [];
         try {
             $result = consus_collect_company(
                 $company,
@@ -7640,13 +8072,13 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
                 null,
                 $descriptionCatalog,
                 $vendorCatalog,
-                $costCenterCatalog
+                $costCenterCatalog,
+                $idleCatalog
             );
             if (!empty($result['items_scanned'])) {
                 $descriptionScanned[$companyKey] = true;
             }
             $rolled = consus_rollup_items($localItems, $windows);
-            $localItems = [];
             $freshRows[$companyKey] = $rolled['rows'];
             $freshArticles[$companyKey] = is_array($rolled['articles'] ?? null) ? $rolled['articles'] : [];
             $freshUsage[$companyKey] = is_array($rolled['item_usage'] ?? null) ? $rolled['item_usage'] : [];
@@ -7678,6 +8110,24 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
                     $plan['overlap_through']
                 );
             }
+            $idleRows = consus_idle_rows_for_company(
+                $localItems,
+                is_array($freshArticles[$companyKey] ?? null) ? $freshArticles[$companyKey] : [],
+                $idleCatalog,
+                is_array($freshUsage[$companyKey] ?? null) ? $freshUsage[$companyKey] : []
+            );
+            $localItems = [];
+            $idleCatalog = [];
+            try {
+                consus_store_company_idle($companyKey, $idleRows);
+                consus_rebuild_idle_index();
+            } catch (Throwable $idleError) {
+                $warnings[] = [
+                    'company' => $company,
+                    'warning' => 'Artikelen zonder voorraad of beweging zijn niet weggeschreven: ' . $idleError->getMessage(),
+                ];
+            }
+            unset($idleRows);
             if (!consus_rows_lack_inventory($freshRows[$companyKey])) {
                 foreach ($foreignSpills[$companyKey] ?? [] as $path) {
                     if (is_string($path)) {
