@@ -397,3 +397,11 @@ Aequitas. Bestaat die niet, dan `web/auth.php` op de server. Die staat in
 dezelfde als bij de andere apps: `$baseUrl`, `$environment`, `$auth_list` en
 `$allowedUsers`. Die BC-gegevens blijven naast `$mimirApi` staan; ze zijn de
 fallback als Mímir niet bereikbaar is.
+
+## Analytics
+
+`web/analytics/analytics.sqlite` (en `*.sqlite-*`) blijft op de server staan bij een deploy: de FTP-mirror slaat die bestanden al over. Dezelfde mirror slaat `.htaccess` over, dus een gecommit bestand komt niet mee en een bestaand bestand wordt niet gewist. `analytics.php` schrijft `web/analytics/.htaccess` als die ontbreekt (of vult hem aan als het woord `sqlite` er nog niet in staat), zodat Apache de database weigert en `analytics.php` zelf bereikbaar blijft. `analytics.sqlite-wal`, `-shm` en `-journal` vallen onder dezelfde `FilesMatch`.
+
+```sh
+php tests/analytics_protect_test.php
+```

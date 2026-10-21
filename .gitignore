@@ -4,6 +4,7 @@ web/cache/
 
 web/analytics/*.sqlite
 web/analytics/*.sqlite-*
+web/analytics/.htaccess
 
 web/data/*.json
 web/data/*.json.tmp.*
