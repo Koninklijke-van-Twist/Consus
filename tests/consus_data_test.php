@@ -2911,6 +2911,17 @@ test_assert(in_array('PK-0530017', $idleNos, true) && in_array('PK-26430445', $i
 test_assert(in_array('PK-SERVICE', $idleNos, true) && in_array('PK-NON', $idleNos, true), 'Service en Non-Inventory zitten in de idle-lijst');
 test_assert(!in_array('PK-BLOCK', $idleNos, true), 'geblokkeerd blijft uit de idle-lijst');
 
+// Productie: AppItems levert geen Global_Dimension_1_Code; de afdeling komt
+// uit DefaultDimensions in de catalogus en moet op de nulregel landen.
+$prodIdle = [];
+$prodItems = [];
+$prodCostCenters = [];
+consus_apply_vendor_row($prodItems, ['No' => 'PK-1810504C2', 'Description' => 'Zonder dimensie', 'Vendor_No' => '90101'], 'hvt', $idleDescriptions, $idleVendors, $prodCostCenters, $prodIdle);
+consus_apply_dimension_row($prodItems, ['No' => 'PK-1810504C2', 'Dimension_Code' => 'AFD', 'Dimension_Value_Code' => '15'], 'hvt', 'AFD', $prodCostCenters);
+test_assert(($prodIdle['hvt|PK-1810504C2']['cost_center'] ?? 'x') === '', 'AppItems-rij zonder dimensie heeft lege afdeling');
+$prodRows = consus_idle_rows_for_company($prodItems, [], $prodIdle, [], $prodCostCenters);
+test_assert(($prodRows[0]['cost_center'] ?? '') === '15', 'nulregel krijgt de afdeling uit DefaultDimensions');
+
 $savedIdleEnv = getenv('CONSUS_SNAPSHOT_FILE');
 $idleRoot = sys_get_temp_dir() . '/consus-idle-' . getmypid();
 @mkdir($idleRoot, 0775, true);

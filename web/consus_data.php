@@ -2203,9 +2203,10 @@ function consus_item_fact_is_idle(array $item): bool
  * @param array<int, array<string, mixed>> $articles
  * @param array<string, array<string, mixed>> $idleCatalog
  * @param array<int, array<string, mixed>> $itemUsage
+ * @param array<string, string> $costCenters company_key|item_no => afdeling uit DefaultDimensions
  * @return array<int, array<string, mixed>>
  */
-function consus_idle_rows_for_company(array $items, array $articles, array $idleCatalog, array $itemUsage): array
+function consus_idle_rows_for_company(array $items, array $articles, array $idleCatalog, array $itemUsage, array $costCenters = []): array
 {
     $seen = [];
     foreach ([$articles, $itemUsage] as $records) {
@@ -2228,6 +2229,14 @@ function consus_idle_rows_for_company(array $items, array $articles, array $idle
         $itemNo = trim((string) ($row['item_no'] ?? ''));
         if ($itemNo === '') {
             continue;
+        }
+        // AppItems heeft geen Global_Dimension_1_Code in $select. De afdeling
+        // komt pas uit DefaultDimensions, na de artikelstap, en die vult
+        // alleen de catalogus voor artikelen buiten $items. Zonder deze
+        // aanvulling is cost_center leeg en valt elk nulartikel weg zodra er
+        // een afdeling gekozen is (Asclepius #1032).
+        if (trim((string) ($row['cost_center'] ?? '')) === '' && trim((string) ($costCenters[$key] ?? '')) !== '') {
+            $row['cost_center'] = trim((string) $costCenters[$key]);
         }
         $rows[$key] = $row;
         $seen[$key] = true;
@@ -8114,7 +8123,8 @@ function consus_run_nightly(bool $force = false, bool $fullLedger = false): arra
                 $localItems,
                 is_array($freshArticles[$companyKey] ?? null) ? $freshArticles[$companyKey] : [],
                 $idleCatalog,
-                is_array($freshUsage[$companyKey] ?? null) ? $freshUsage[$companyKey] : []
+                is_array($freshUsage[$companyKey] ?? null) ? $freshUsage[$companyKey] : [],
+                $costCenterCatalog
             );
             $localItems = [];
             $idleCatalog = [];
