@@ -2945,7 +2945,11 @@ try {
     $withVendor = consus_usage_facts_for_view($idleSnapshot, 'hvt', '', [], '90101', true);
     test_assert(in_array('PK-0530017', array_column($withVendor, 'item_no'), true), 'schakelaar en leverancier tonen het artikel zonder voorraad en zonder posten');
     $departmentOnly = consus_usage_facts_for_view($idleSnapshot, 'hvt', '15', [], '90101', true);
-    test_assert(array_column($departmentOnly, 'item_no') === ['PK-0530017'], 'afdeling beperkt de nulartikelen');
+    $departmentNos = array_column($departmentOnly, 'item_no');
+    test_assert(in_array('PK-0530017', $departmentNos, true), 'nulartikel met afdeling 15 staat bij afdeling 15');
+    test_assert(in_array('PK-SERVICE', $departmentNos, true), 'nulartikel zonder afdeling valt niet weg bij een gekozen afdeling');
+    $otherDepartment = array_column(consus_usage_facts_for_view($idleSnapshot, 'hvt', '20', [], '90101', true), 'item_no');
+    test_assert(!in_array('PK-0530017', $otherDepartment, true) && in_array('PK-NON', $otherDepartment, true), 'andere afdeling verbergt afdeling 15, niet de nulartikelen zonder afdeling');
     $yearRow = null;
     foreach (consus_usage_year_rows($withVendor, 2026, $windows, []) as $row) {
         if (($row['item_no'] ?? '') === 'PK-0530017') {
