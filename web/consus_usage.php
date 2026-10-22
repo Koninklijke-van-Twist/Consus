@@ -533,7 +533,14 @@ function consus_append_idle_usage_facts(
     $keys = $companyKey !== '' && isset(CONSUS_COMPANIES[$companyKey]) ? [$companyKey] : array_keys(CONSUS_COMPANIES);
     foreach ($keys as $key) {
         foreach (consus_read_idle_vendor_items($key, $storedVendor) as $row) {
-            if (!consus_cost_center_filter_matches((string) ($row['cost_center'] ?? ''), $costCenter)) {
+            // Een nulartikel zonder afdeling (lege Global Dimension 1 op de
+            // kaart en geen DefaultDimension) hoort bij geen enkele afdeling
+            // en zou bij elke gekozen afdeling wegvallen. De lijst is al
+            // begrensd door bedrijf en leverancier; toon het daarom ook bij een
+            // specifieke afdeling (Asclepius #1032). Een ingevulde andere
+            // afdeling blijft wel weg.
+            $rowCostCenter = trim((string) ($row['cost_center'] ?? ''));
+            if ($rowCostCenter !== '' && !consus_cost_center_filter_matches($rowCostCenter, $costCenter)) {
                 continue;
             }
             $itemNo = trim((string) ($row['item_no'] ?? ''));
