@@ -21,7 +21,7 @@ $rows = [];
 for ($i = 0; $i < 60; $i++) {
     $rows[] = ['No' => sprintf('PK-%02d', $i), 'Vendor_No' => '90101', 'Description' => 'LINER', 'Last_Date_Modified' => '2026-07-03'];
 }
-$rows[] = ['No' => 'PK-0530017', 'Vendor_No' => '90101', 'Description' => 'LINER', 'Blocked' => false, 'Last_Date_Modified' => '2026-07-03'];
+$rows[] = ['No' => 'PK-0530017', 'Vendor_No' => '90101', 'LVS_Vendor_Name' => 'OUDE NAAM', 'Description' => 'LINER', 'Blocked' => false, 'Last_Date_Modified' => '2026-07-03'];
 $rows[] = ['No' => 'A-1', 'Vendor_No' => '1', 'Description' => 'A', 'Last_Date_Modified' => '2026-07-03'];
 $rows[] = ['No' => 'Z9', 'Vendor_No' => '2', 'Description' => 'Z', 'Last_Date_Modified' => '2026-07-03'];
 $rows[] = ['No' => '~X', 'Vendor_No' => '3', 'Description' => 'buiten het alfabet', 'Last_Date_Modified' => '2026-07-03'];
@@ -67,11 +67,17 @@ $noCount = static function (string $company): ?int {
 
     return null;
 };
-$collect = static function (string $today, ?callable $count = null) use ($fetch, $noSleep, $bcCount): array {
+$vendorList = ['90101' => 'PERKINS'];
+$vendorNames = static function (string $company) use (&$vendorList): ?array {
+    unset($company);
+
+    return $vendorList;
+};
+$collect = static function (string $today, ?callable $count = null) use ($fetch, $noSleep, $bcCount, $vendorNames): array {
     $seen = [];
     $result = consus_each_item_rows_cached('Hunter van Twist', 'hvt', static function (array $row) use (&$seen): void {
         $seen[$row['No']] = $row;
-    }, $fetch, $today, $noSleep, $count ?? $bcCount);
+    }, $fetch, $today, $noSleep, $count ?? $bcCount, $vendorNames);
 
     return [$result, $seen];
 };
@@ -83,6 +89,11 @@ try {
     cache_assert(isset($seen['PK-0530017']) && $seen['PK-0530017']['Vendor_No'] === '90101', 'PK-0530017 met leverancier in de cache');
     cache_assert(!in_array('', $calls, true), 'nooit de volle AppItems in één call');
     cache_assert(!isset($seen['PK-0530017']['Last_Date_Modified']), 'cache bewaart alleen de artikelvelden');
+    cache_assert($seen['PK-0530017']['LVS_Vendor_Name'] === 'PERKINS', 'naam uit de leverancierslijst, niet uit de FlowField');
+    $vendorList = null;
+    [, $seen] = $collect('2026-10-27');
+    cache_assert($seen['PK-0530017']['LVS_Vendor_Name'] === 'OUDE NAAM', 'lijst faalt: cachewaarde als terugval');
+    $vendorList = ['90101' => 'PERKINS'];
 
     $calls = [];
     $rows[] = ['No' => 'PK-NIEUW', 'Vendor_No' => '90101', 'Description' => 'NIEUW', 'Last_Date_Modified' => '2026-10-27'];
