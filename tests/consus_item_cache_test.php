@@ -57,11 +57,21 @@ $fetch = static function (string $url, array $auth, callable $onRow) use (&$rows
 $noSleep = static function (int $seconds): void {
     unset($seconds);
 };
-$collect = static function (string $today) use ($fetch, $noSleep): array {
+$bcCount = static function (string $company) use (&$rows): ?int {
+    unset($company);
+
+    return count($rows);
+};
+$noCount = static function (string $company): ?int {
+    unset($company);
+
+    return null;
+};
+$collect = static function (string $today, ?callable $count = null) use ($fetch, $noSleep, $bcCount): array {
     $seen = [];
     $result = consus_each_item_rows_cached('Hunter van Twist', 'hvt', static function (array $row) use (&$seen): void {
         $seen[$row['No']] = $row;
-    }, $fetch, $today, $noSleep);
+    }, $fetch, $today, $noSleep, $count ?? $bcCount);
 
     return [$result, $seen];
 };
@@ -83,21 +93,79 @@ try {
     cache_assert($calls === ['Last_Date_Modified ge 2026-10-27'], 'delta filtert ge op de vorige dag: ' . json_encode($calls));
     cache_assert(isset($seen['PK-NIEUW']) && $seen['PK-00']['Vendor_No'] === '90052', 'delta voegt toe en werkt bij op No');
 
+    cache_assert(consus_item_cache_load('hvt')['full_on'] === '2026-10-27', 'delta doet geen volledige lading');
+
+    // Count ongelijk (hier: geen count): alleen No in stukken, verwijderde artikelen eruit.
     $calls = [];
     array_pop($rows);
-    [$result, $seen] = $collect('2026-11-04');
-    cache_assert($result['mode'] === 'full', 'na 7 dagen weer volledig');
-    cache_assert(!isset($seen['PK-NIEUW']), 'volledige verversing haalt verwijderde artikelen weg');
+    [$result, $seen] = $collect('2026-11-04', $noCount);
+    cache_assert($result['mode'] === 'delta+verwijderd', 'geen count: No-scan verwijdert: ' . $result['mode']);
+    cache_assert(!isset($seen['PK-NIEUW']) && isset($seen['PK-0530017']), 'alleen het verwijderde artikel weg');
+    cache_assert(count($calls) > 2, 'No-scan in stukken');
 
+    // Count gelijk: geen scan.
+    $calls = [];
+    [$result] = $collect('2026-11-05');
+    cache_assert($result['mode'] === 'delta' && count($calls) === 1, 'count gelijk: geen No-scan');
+
+    // Scan met veel te weinig nummers: cache blijft heel.
+    $saved = $rows;
     $rows = array_slice($rows, 0, 5);
-    $failed = false;
-    try {
-        $collect('2026-11-20');
-    } catch (RuntimeException $error) {
-        $failed = str_contains($error->getMessage(), 'niet vervangen');
-    }
-    cache_assert($failed, 'veel minder artikelen dan eerder vervangt de cache niet');
-    cache_assert(count(consus_item_cache_load('hvt')['items']) > 60, 'oude cache blijft staan');
+    [$result, $seen] = $collect('2026-11-06');
+    cache_assert(count($seen) > 60, 'nooit de halve cache weggooien: ' . count($seen));
+    $rows = $saved;
+
+    // Weekend: rekenwerk.
+    $ams = new DateTimeZone('Europe/Amsterdam');
+    $at = static fn (string $time): DateTimeImmutable => new DateTimeImmutable($time, $ams);
+    cache_assert(consus_item_weekend_slice_size(85481) === 1781 && consus_item_weekend_slice_size(48) === 1, 'stukgrootte ceil(totaal/48)');
+    cache_assert(consus_item_weekend_due($at('2026-10-30 23:59')) === null, 'vrijdag niets');
+    cache_assert(consus_item_weekend_due($at('2026-10-31 00:05')) === ['saturday' => '2026-10-31', 'due' => 1], 'za 00:00 = stuk 1');
+    cache_assert(consus_item_weekend_due($at('2026-11-01 23:10'))['due'] === 48, 'zo 23:00 = stuk 48');
+    cache_assert(consus_item_weekend_due($at('2026-11-01 23:10'))['saturday'] === '2026-10-31', 'zondag hoort bij zaterdag');
+    cache_assert(consus_item_weekend_due($at('2026-11-02 00:10')) === null, 'maandag niets');
+
+    $sliceCalls = 0;
+    $fail = false;
+    $fetchSlice = static function (string $company, string $after, int $top) use (&$rows, &$sliceCalls, &$fail): array {
+        unset($company);
+        $sliceCalls++;
+        if ($fail) {
+            throw new RuntimeException('BC HTTP 401: Unauthorized');
+        }
+        $sorted = $rows;
+        usort($sorted, static fn (array $a, array $b): int => strcmp($a['No'], $b['No']));
+        $out = array_values(array_filter($sorted, static fn (array $row): bool => $after === '' || strcmp($row['No'], $after) > 0));
+
+        return array_slice($out, 0, $top);
+    };
+    $cache = consus_item_cache_load('hvt');
+    $cache['items']['PK-WEG'] = ['No' => 'PK-WEG'];
+    consus_item_cache_save('hvt', $cache);
+    $step = consus_item_weekend_step('Hunter van Twist', 'hvt', $at('2026-10-31 00:10'), $fetchSlice, $bcCount);
+    cache_assert($step['done'] === 1 && $step['slice'] === 2, 'stuk 1: ' . json_encode($step));
+    $step = consus_item_weekend_step('Hunter van Twist', 'hvt', $at('2026-10-31 04:10'), $fetchSlice, $bcCount);
+    cache_assert($step['done'] === 5 && !$step['closed'], 'gemiste uren ingehaald: ' . json_encode($step));
+    $lock = consus_item_cache_lock('hvt', true);
+    $step = consus_item_weekend_step('Hunter van Twist', 'hvt', $at('2026-10-31 05:10'), $fetchSlice, $bcCount);
+    consus_item_cache_unlock($lock);
+    cache_assert($step['status'] === 'bezet', 'nooit tegelijk met nightly');
+    $step = consus_item_weekend_step('Hunter van Twist', 'hvt', $at('2026-11-01 23:05'), $fetchSlice, $bcCount);
+    cache_assert($step['done'] === 48 && $step['closed'] && $step['removed'] === 1, 'zondag afsluiten: ' . json_encode($step));
+    $items = consus_item_cache_load('hvt')['items'];
+    cache_assert(!isset($items['PK-WEG']) && count($items) === count($rows), 'niet geziene artikelen weg, rest heel');
+
+    // Volgend weekend met een fout: niets weggooien.
+    $cache = consus_item_cache_load('hvt');
+    $cache['items']['PK-WEG'] = ['No' => 'PK-WEG'];
+    consus_item_cache_save('hvt', $cache);
+    consus_item_weekend_step('Hunter van Twist', 'hvt', $at('2026-11-07 01:10'), $fetchSlice, $bcCount);
+    $fail = true;
+    $step = consus_item_weekend_step('Hunter van Twist', 'hvt', $at('2026-11-08 23:05'), $fetchSlice, $bcCount);
+    cache_assert($step['status'] === 'fout' && !$step['closed'] && $step['done'] === 2, 'fout: niet afsluiten: ' . json_encode($step));
+    cache_assert(isset(consus_item_cache_load('hvt')['items']['PK-WEG']), 'bij een fout blijft alles staan');
+    $fail = false;
+    cache_assert(consus_item_weekend_step('Hunter van Twist', 'hvt', $at('2026-11-09 00:05'), $fetchSlice, $bcCount)['status'] === 'geen weekend', 'maandag niet');
 
     $calls = [];
     $denied = static function (string $url, array $auth, callable $onRow) use (&$calls): int {
@@ -113,7 +181,7 @@ try {
     }
     cache_assert(count($calls) < 10, 'een inlogfout splitst niet eindeloos: ' . count($calls));
 } finally {
-    @unlink(consus_item_cache_file('hvt'));
+    array_map('unlink', glob($root . '/*') ?: []);
     @rmdir($root);
 }
 

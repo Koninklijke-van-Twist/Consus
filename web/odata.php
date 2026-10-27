@@ -976,7 +976,7 @@ function odata_mimir_query_impl(string $company, string $table, array $odataQuer
         'company' => $company,
         'table' => $table,
         'max_age' => max(0, $ttlSeconds),
-        'top' => 0,
+        'top' => max(0, (int) ($odataQuery['$mimir_top'] ?? 0)),
     ];
 
     $select = trim((string) ($odataQuery['$select'] ?? $odataQuery['select'] ?? ''));
