@@ -2935,6 +2935,15 @@ try {
     $loadedNos = array_column($loaded, 'item_no');
     test_assert(in_array('PK-0530017', $loadedNos, true) && in_array('PK-SERVICE', $loadedNos, true) && in_array('PK-NON', $loadedNos, true), 'leveranciersbestand houdt Inventory, Service en Non-Inventory');
     test_assert(!in_array('PK-26430445', $loadedNos, true), 'andere leverancier zit niet in dit bestand');
+    test_assert(!is_dir($idleRoot . '/idle') && is_file($idleRoot . '/consus_idle_index.json')
+        && is_file($idleRoot . '/consus_idle_hvt_' . sha1('90101') . '.json'), 'idle staat plat in data/ (deploy-exclude data/*.json)');
+    // Overgang: alleen het oude data/idle/ aanwezig, toch leesbaar.
+    @mkdir($idleRoot . '/idle/kvt', 0775, true);
+    file_put_contents($idleRoot . '/idle/kvt/' . sha1('90052') . '.json', json_encode([['item_no' => 'PK-OUD']]));
+    test_assert(array_column(consus_read_idle_vendor_items('kvt', '90052'), 'item_no') === ['PK-OUD'], 'oud data/idle/ als terugval');
+    consus_store_company_idle('hvt', array_values(array_filter($idleRows, static fn (array $r): bool => $r['vendor_no'] !== '90101')));
+    test_assert(consus_read_idle_vendor_items('hvt', '90101') === [], 'verdwenen leverancier: oud bestand weg');
+    consus_store_company_idle('hvt', $idleRows);
     $idleSnapshot = consus_empty_snapshot();
     $idleSnapshot['generated_at'] = '2026-09-24T02:00:00+00:00';
     $idleSnapshot['version'] = CONSUS_SNAPSHOT_VERSION;

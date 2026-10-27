@@ -52,7 +52,7 @@ if (isset($static[$path])) {
 
 $snapshot = preview_snapshot();
 $email = 'preview@consus.example';
-if (!is_file(consus_idle_root() . '/index.json')) {
+if (!is_file(consus_idle_file('index'))) {
     consus_store_company_idle('hvt', [[
         'company_key' => 'hvt',
         'item_no' => 'PK-0530017',
