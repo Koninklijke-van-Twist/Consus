@@ -169,6 +169,7 @@ const CONSUS_ITEM_FIELDS = [
     'LVS_Vendor_Name',
     'Description',
     'Safety_Stock_Quantity',
+    'Blocked',
 ];
 const CONSUS_ITEM_OPTIONAL_FIELDS = [];
 
