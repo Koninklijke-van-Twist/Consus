@@ -4681,11 +4681,10 @@ function consus_each_entity_rows(
  * AppItems (76.000 tot 85.000 rijen) niet in één antwoord: HTTP 500,
  * memory exhausted. De stap 'artikelen' faalde dan en elk nulartikel viel
  * zonder leverancier weg. Daarom: een volledige lading in stukken op No,
- * elke nacht alleen Last_Date_Modified ge <vorige geslaagde dag>, en elke
- * CONSUS_ITEM_CACHE_FULL_DAYS dagen weer volledig zodat verwijderde
- * artikelen verdwijnen. Bij twijfel volledig.
+ * elke nacht alleen Last_Date_Modified ge <vorige geslaagde dag> plus
+ * verwijderdetectie, en in het weekend een volledige verversing in 48
+ * uurstukken via hourly.php. Bij twijfel volledig.
  */
-const CONSUS_ITEM_CACHE_FULL_DAYS = 7;
 const CONSUS_ITEM_CACHE_CHUNK_CHARS = '-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const CONSUS_ITEM_CACHE_MAX_DEPTH = 6;
 
@@ -4756,12 +4755,14 @@ function consus_item_cache_error_is_too_big(Throwable $error): bool
  *
  * @param callable(array<string, mixed>):void $onRow
  */
-function consus_item_cache_fetch_range(string $company, string $filter, string $prefix, int $depth, callable $onRow, ?callable $fetchRows, callable $sleep): int
+function consus_item_cache_fetch_range(string $company, string $filter, string $prefix, int $depth, callable $onRow, ?callable $fetchRows, callable $sleep, ?array $fields = null): int
 {
     $attempt = 0;
     while (true) {
         try {
-            $result = consus_each_entity_rows($company, CONSUS_ITEM_ENTITY, CONSUS_ITEM_FIELDS, CONSUS_ITEM_OPTIONAL_FIELDS, $filter, $onRow, $fetchRows);
+            $result = $fields === null
+                ? consus_each_entity_rows($company, CONSUS_ITEM_ENTITY, CONSUS_ITEM_FIELDS, CONSUS_ITEM_OPTIONAL_FIELDS, $filter, $onRow, $fetchRows)
+                : consus_each_entity_rows($company, CONSUS_ITEM_ENTITY, $fields, [], $filter, $onRow, $fetchRows);
 
             return (int) ($result['count'] ?? 0);
         } catch (Throwable $error) {
@@ -4774,12 +4775,12 @@ function consus_item_cache_fetch_range(string $company, string $filter, string $
                 throw $error;
             }
 
-            return consus_item_cache_fetch_chunks($company, $prefix, $depth + 1, $onRow, $fetchRows, $sleep, $filter);
+            return consus_item_cache_fetch_chunks($company, $prefix, $depth + 1, $onRow, $fetchRows, $sleep, $filter, $fields);
         }
     }
 }
 
-function consus_item_cache_fetch_chunks(string $company, string $prefix, int $depth, callable $onRow, ?callable $fetchRows, callable $sleep, string $outer = ''): int
+function consus_item_cache_fetch_chunks(string $company, string $prefix, int $depth, callable $onRow, ?callable $fetchRows, callable $sleep, string $outer = '', ?array $fields = null): int
 {
     $bounds = [];
     foreach (str_split(CONSUS_ITEM_CACHE_CHUNK_CHARS) as $char) {
@@ -4799,7 +4800,7 @@ function consus_item_cache_fetch_chunks(string $company, string $prefix, int $de
             $parts[] = 'No lt ' . consus_odata_quote($bounds[$index]);
         }
         $subPrefix = $index > 0 ? $bounds[$index - 1] : $prefix;
-        $count += consus_item_cache_fetch_range($company, implode(' and ', $parts), $subPrefix, $depth, $onRow, $fetchRows, $sleep);
+        $count += consus_item_cache_fetch_range($company, implode(' and ', $parts), $subPrefix, $depth, $onRow, $fetchRows, $sleep, $fields);
     }
 
     return $count;
@@ -4819,74 +4820,175 @@ function consus_item_cache_compact(array $row): array
 }
 
 /**
+ * Eén lock per bedrijf voor nightly en hourly.php, zodat ze nooit tegelijk
+ * de artikelcache schrijven. data/*.lock valt buiten de deploy.
+ *
+ * @return resource|null null als $wait false is en een ander proces de lock heeft
+ */
+function consus_item_cache_lock(string $companyKey, bool $wait)
+{
+    $path = preg_replace('/\.json$/', '.lock', consus_item_cache_file($companyKey));
+    $directory = dirname((string) $path);
+    if (!is_dir($directory)) {
+        @mkdir($directory, 0775, true);
+    }
+    $handle = @fopen((string) $path, 'c');
+    if ($handle === false) {
+        throw new RuntimeException('Lock voor de artikelcache kon niet worden geopend.');
+    }
+    if (!flock($handle, $wait ? LOCK_EX : LOCK_EX | LOCK_NB)) {
+        fclose($handle);
+
+        return null;
+    }
+
+    return $handle;
+}
+
+function consus_item_cache_unlock($handle): void
+{
+    if (is_resource($handle)) {
+        flock($handle, LOCK_UN);
+        fclose($handle);
+    }
+}
+
+/**
+ * Aantal artikelen in BC, of null als dat niet goedkoop te krijgen is.
+ * Mímir geeft (nog) geen count terug; dan null en volgt de No-scan.
+ */
+function consus_item_count(string $company): ?int
+{
+    try {
+        if (!function_exists('odata_mimir_enabled') || !odata_mimir_enabled()) {
+            return null;
+        }
+        $response = odata_mimir_request('POST', 'query.php', [
+            'company' => $company, 'table' => CONSUS_ITEM_ENTITY, 'select' => ['No'], 'top' => 1, 'count' => true, 'max_age' => 0,
+        ]);
+        foreach ([$response['@odata.count'] ?? null, $response['count'] ?? null, $response['meta']['count'] ?? null] as $value) {
+            if (is_int($value) || (is_string($value) && ctype_digit($value))) {
+                return (int) $value;
+            }
+        }
+    } catch (Throwable $ignored) {
+    }
+
+    return null;
+}
+
+/**
+ * Na de delta: verwijderde artikelen opsporen. Count gelijk aan de cache:
+ * niets weg. Anders (of geen count) alleen No ophalen in stukken en wat BC
+ * niet meer heeft uit de cache halen. Mislukt de scan, of zou meer dan 10%
+ * verdwijnen, dan blijft de cache staan.
+ *
+ * @param array<string, array<string, mixed>> $items
+ * @return array{items: array<string, array<string, mixed>>, removed: int, missing: int}
+ */
+function consus_item_cache_drop_deleted(string $company, array $items, ?int $count, ?callable $fetchRows, callable $sleep): array
+{
+    if ($count !== null && $count === count($items)) {
+        return ['items' => $items, 'removed' => 0, 'missing' => 0];
+    }
+    $seen = [];
+    try {
+        consus_item_cache_fetch_chunks($company, '', 0, static function (array $row) use (&$seen): void {
+            $no = consus_scalar_string($row['No'] ?? '');
+            if ($no !== '') {
+                $seen[$no] = true;
+            }
+        }, $fetchRows, $sleep, '', ['No']);
+    } catch (Throwable $ignored) {
+        return ['items' => $items, 'removed' => 0, 'missing' => 0];
+    }
+    if ($seen === [] || count($seen) < count($items) * 0.9) {
+        return ['items' => $items, 'removed' => 0, 'missing' => 0];
+    }
+    $kept = array_intersect_key($items, $seen);
+
+    return ['items' => $kept, 'removed' => count($items) - count($kept), 'missing' => count(array_diff_key($seen, $items))];
+}
+
+/**
  * Vervangt de ene grote AppItems-call van de stap 'artikelen'. Elke rij uit
  * de (bijgewerkte) cache gaat naar $onRow, net als eerst elke BC-rij.
+ * Zonder cache een volledige lading in stukken; anders de delta plus
+ * verwijderdetectie. De volledige verversing loopt in het weekend via hourly.php.
  *
  * @param callable(array<string, mixed>):void $onRow
+ * @param (callable(string):?int)|null $countItems
  * @return array{count:int,mode:string}
  */
-function consus_each_item_rows_cached(string $company, string $companyKey, callable $onRow, ?callable $fetchRows = null, ?string $today = null, ?callable $sleep = null): array
+function consus_each_item_rows_cached(string $company, string $companyKey, callable $onRow, ?callable $fetchRows = null, ?string $today = null, ?callable $sleep = null, ?callable $countItems = null): array
 {
     $today ??= (new DateTimeImmutable('now', new DateTimeZone('Europe/Amsterdam')))->format('Y-m-d');
     $sleep ??= static function (int $seconds): void {
         sleep($seconds);
     };
-    $cache = consus_item_cache_load($companyKey);
-    $mode = 'full';
-    if ($cache !== null && $cache['items'] !== []) {
-        $fullAge = (strtotime($today) - (int) strtotime($cache['full_on'])) / 86400;
-        $syncAge = (strtotime($today) - (int) strtotime($cache['synced_on'])) / 86400;
-        if ($fullAge >= 0 && $fullAge < CONSUS_ITEM_CACHE_FULL_DAYS && $syncAge >= 0 && $syncAge < CONSUS_ITEM_CACHE_FULL_DAYS) {
-            $mode = 'delta';
-        }
-    }
+    $countItems ??= 'consus_item_count';
+    $lock = consus_item_cache_lock($companyKey, true);
+    try {
+        $cache = consus_item_cache_load($companyKey);
+        $mode = $cache !== null && $cache['items'] !== [] ? 'delta' : 'full';
 
-    if ($mode === 'delta') {
-        $items = $cache['items'];
-        $changed = [];
-        try {
-            consus_item_cache_fetch_range(
-                $company,
-                'Last_Date_Modified ge ' . $cache['synced_on'],
-                '',
-                CONSUS_ITEM_CACHE_MAX_DEPTH,
-                static function (array $row) use (&$changed): void {
-                    $changed[] = $row;
-                },
-                $fetchRows,
-                $sleep
-            );
-            foreach ($changed as $row) {
+        if ($mode === 'delta') {
+            $items = $cache['items'];
+            $changed = [];
+            try {
+                consus_item_cache_fetch_range(
+                    $company,
+                    'Last_Date_Modified ge ' . $cache['synced_on'],
+                    '',
+                    CONSUS_ITEM_CACHE_MAX_DEPTH,
+                    static function (array $row) use (&$changed): void {
+                        $changed[] = $row;
+                    },
+                    $fetchRows,
+                    $sleep
+                );
+                foreach ($changed as $row) {
+                    $no = consus_scalar_string($row['No'] ?? '');
+                    if ($no !== '') {
+                        $items[$no] = consus_item_cache_compact($row);
+                    }
+                }
+                $checked = consus_item_cache_drop_deleted($company, $items, $countItems($company), $fetchRows, $sleep);
+                if ($checked['missing'] > 0) {
+                    // BC heeft nummers die de cache mist: bij twijfel volledig.
+                    $mode = 'full';
+                } else {
+                    $cache = ['full_on' => $cache['full_on'], 'synced_on' => $today, 'items' => $checked['items']];
+                    $mode = $checked['removed'] > 0 ? 'delta+verwijderd' : 'delta';
+                }
+                unset($checked);
+            } catch (Throwable $ignored) {
+                $mode = 'full';
+            }
+            unset($changed, $items);
+        }
+
+        if ($mode === 'full') {
+            $previous = $cache !== null ? count($cache['items']) : 0;
+            $cache = null;
+            $items = [];
+            consus_item_cache_fetch_chunks($company, '', 0, static function (array $row) use (&$items): void {
                 $no = consus_scalar_string($row['No'] ?? '');
                 if ($no !== '') {
                     $items[$no] = consus_item_cache_compact($row);
                 }
+            }, $fetchRows, $sleep);
+            if ($previous > 0 && count($items) < $previous * 0.9) {
+                throw new RuntimeException('AppItems gaf ' . count($items) . ' artikelen, eerder ' . $previous . '. Artikelcache niet vervangen.');
             }
-            $cache = ['full_on' => $cache['full_on'], 'synced_on' => $today, 'items' => $items];
-        } catch (Throwable $ignored) {
-            $mode = 'full';
+            $cache = ['full_on' => $today, 'synced_on' => $today, 'items' => $items];
+            unset($items);
         }
-        unset($changed, $items);
-    }
 
-    if ($mode === 'full') {
-        $previous = $cache !== null ? count($cache['items']) : 0;
-        $cache = null;
-        $items = [];
-        consus_item_cache_fetch_chunks($company, '', 0, static function (array $row) use (&$items): void {
-            $no = consus_scalar_string($row['No'] ?? '');
-            if ($no !== '') {
-                $items[$no] = consus_item_cache_compact($row);
-            }
-        }, $fetchRows, $sleep);
-        if ($previous > 0 && count($items) < $previous * 0.9) {
-            throw new RuntimeException('AppItems gaf ' . count($items) . ' artikelen, eerder ' . $previous . '. Artikelcache niet vervangen.');
-        }
-        $cache = ['full_on' => $today, 'synced_on' => $today, 'items' => $items];
-        unset($items);
+        consus_item_cache_save($companyKey, $cache);
+    } finally {
+        consus_item_cache_unlock($lock);
     }
-
-    consus_item_cache_save($companyKey, $cache);
     $count = 0;
     foreach ($cache['items'] as $row) {
         if (is_array($row)) {
@@ -4896,6 +4998,178 @@ function consus_each_item_rows_cached(string $company, string $companyKey, calla
     }
 
     return ['count' => $count, 'mode' => $mode];
+}
+
+/** Weekendverversing: 48 uurstukken, za 00:00 = stuk 1, zo 23:00 = stuk 48. */
+const CONSUS_ITEM_WEEKEND_SLICES = 48;
+
+function consus_item_weekend_slice_size(int $total): int
+{
+    return max(1, (int) ceil($total / CONSUS_ITEM_WEEKEND_SLICES));
+}
+
+/**
+ * Hoeveel stukken er nu klaar moeten zijn, plus de zaterdag van dit weekend.
+ * Buiten za/zo (Europe/Amsterdam): null.
+ *
+ * @return array{saturday:string,due:int}|null
+ */
+function consus_item_weekend_due(DateTimeImmutable $now): ?array
+{
+    $local = $now->setTimezone(new DateTimeZone('Europe/Amsterdam'));
+    $weekday = (int) $local->format('N');
+    if ($weekday < 6) {
+        return null;
+    }
+    $hour = ($weekday - 6) * 24 + (int) $local->format('G');
+
+    return [
+        'saturday' => $local->modify($weekday === 7 ? '-1 day' : '+0 day')->format('Y-m-d'),
+        'due' => min(CONSUS_ITEM_WEEKEND_SLICES, $hour + 1),
+    ];
+}
+
+function consus_item_weekend_state_file(string $companyKey): string
+{
+    return dirname(consus_snapshot_file()) . '/consus_items_weekend_' . $companyKey . '.json';
+}
+
+/**
+ * Standaard: de volgende $top artikelen na $after, op No.
+ *
+ * @return list<array<string, mixed>>
+ */
+function consus_item_weekend_fetch_slice(string $company, string $after, int $top): array
+{
+    $query = [
+        '$select' => implode(',', CONSUS_ITEM_FIELDS),
+        '$orderby' => 'No',
+        '$top' => (string) $top,
+        '$mimir_top' => $top,
+    ];
+    if ($after !== '') {
+        $query['$filter'] = 'No gt ' . consus_odata_quote($after);
+    }
+
+    return odata_mimir_query($company, CONSUS_ITEM_ENTITY, $query, 0);
+}
+
+/**
+ * Eén run van hourly.php voor één bedrijf. Haalt alle stukken die nu klaar
+ * hadden moeten zijn (gemiste uren worden ingehaald), upsert ze in de cache,
+ * en ruimt na stuk 48 alleen op als alle stukken gelukt zijn en BC op is.
+ *
+ * @param callable(string, string, int):list<array<string, mixed>>|null $fetchSlice
+ * @param (callable(string):?int)|null $countItems
+ * @return array<string, mixed>
+ */
+function consus_item_weekend_step(string $company, string $companyKey, DateTimeImmutable $now, ?callable $fetchSlice = null, ?callable $countItems = null): array
+{
+    $due = consus_item_weekend_due($now);
+    if ($due === null) {
+        return ['status' => 'geen weekend'];
+    }
+    $fetchSlice ??= 'consus_item_weekend_fetch_slice';
+    $countItems ??= 'consus_item_count';
+    $lock = consus_item_cache_lock($companyKey, false);
+    if ($lock === null) {
+        return ['status' => 'bezet'];
+    }
+    try {
+        $cache = consus_item_cache_load($companyKey);
+        if ($cache === null || $cache['items'] === []) {
+            return ['status' => 'geen cache'];
+        }
+        $stateFile = consus_item_weekend_state_file($companyKey);
+        $state = json_decode((string) @file_get_contents($stateFile), true);
+        if (!is_array($state) || ($state['saturday'] ?? '') !== $due['saturday']) {
+            $total = $countItems($company) ?? count($cache['items']);
+            $state = ['saturday' => $due['saturday'], 'total' => $total, 'slice' => consus_item_weekend_slice_size($total),
+                'done' => 0, 'last_no' => '', 'end' => false, 'closed' => false, 'seen' => []];
+        }
+        $error = '';
+        try {
+            while (!$state['closed'] && $state['done'] < $due['due']) {
+                $isLast = $state['done'] + 1 >= CONSUS_ITEM_WEEKEND_SLICES;
+                do {
+                    $rows = consus_item_weekend_fetch_rows($company, (string) $state['last_no'], (int) $state['slice'], $fetchSlice);
+                    foreach ($rows as $row) {
+                        $no = consus_scalar_string($row['No'] ?? '');
+                        if ($no !== '') {
+                            $cache['items'][$no] = consus_item_cache_compact($row);
+                            $state['seen'][$no] = 1;
+                            $state['last_no'] = $no;
+                        }
+                    }
+                    if (count($rows) < (int) $state['slice']) {
+                        $state['end'] = true;
+                    }
+                    // Stuk 48 loopt door tot BC op is, ook als BC sinds zaterdag groeide.
+                } while ($isLast && !$state['end']);
+                $state['done']++;
+                consus_item_cache_save($companyKey, $cache);
+                @file_put_contents($stateFile, json_encode($state, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+            }
+        } catch (Throwable $fetchError) {
+            $error = $fetchError->getMessage();
+        }
+        $removed = 0;
+        if (!$state['closed'] && $error === '' && $state['done'] >= CONSUS_ITEM_WEEKEND_SLICES && $state['end']) {
+            $kept = array_intersect_key($cache['items'], $state['seen']);
+            if (count($kept) >= count($cache['items']) * 0.9) {
+                $removed = count($cache['items']) - count($kept);
+                $today = $now->setTimezone(new DateTimeZone('Europe/Amsterdam'))->format('Y-m-d');
+                $cache = ['full_on' => $today, 'synced_on' => $cache['synced_on'], 'items' => $kept];
+                consus_item_cache_save($companyKey, $cache);
+            }
+            $state['closed'] = true;
+            $state['seen'] = [];
+            @file_put_contents($stateFile, json_encode($state, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+        }
+
+        return ['status' => $error === '' ? 'ok' : 'fout', 'done' => $state['done'], 'due' => $due['due'],
+            'slice' => $state['slice'], 'closed' => $state['closed'], 'removed' => $removed, 'error' => $error];
+    } finally {
+        consus_item_cache_unlock($lock);
+    }
+}
+
+/**
+ * Eén stuk; te groot voor Mímir of BC-slot bezet: in kleinere stukken of even wachten.
+ *
+ * @return list<array<string, mixed>>
+ */
+function consus_item_weekend_fetch_rows(string $company, string $after, int $top, callable $fetchSlice): array
+{
+    $rows = [];
+    $step = $top;
+    $busy = 0;
+    while (count($rows) < $top) {
+        $want = min($step, $top - count($rows));
+        try {
+            $part = array_values($fetchSlice($company, $after, $want));
+        } catch (Throwable $error) {
+            if (consus_item_cache_error_is_busy($error) && $busy < 3) {
+                $busy++;
+                sleep(30 * $busy);
+                continue;
+            }
+            if ($step > 50 && consus_item_cache_error_is_too_big($error)) {
+                $step = intdiv($step, 2);
+                continue;
+            }
+            throw $error;
+        }
+        foreach ($part as $row) {
+            $rows[] = $row;
+        }
+        if (count($part) < $want || $part === []) {
+            break;
+        }
+        $after = consus_scalar_string($part[count($part) - 1]['No'] ?? '');
+    }
+
+    return $rows;
 }
 
 function consus_odata_error_allows_entry_type_fallback(Throwable $error): bool
