@@ -4901,7 +4901,7 @@ function consus_item_cache_drop_deleted(string $company, array $items, ?int $cou
  * @param (callable(string):?int)|null $countItems
  * @return array{count:int,mode:string}
  */
-function consus_each_item_rows_cached(string $company, string $companyKey, callable $onRow, ?callable $fetchRows = null, ?string $today = null, ?callable $sleep = null, ?callable $countItems = null): array
+function consus_each_item_rows_cached(string $company, string $companyKey, callable $onRow, ?callable $fetchRows = null, ?string $today = null, ?callable $sleep = null, ?callable $countItems = null, ?callable $vendorNames = null): array
 {
     $today ??= (new DateTimeImmutable('now', new DateTimeZone('Europe/Amsterdam')))->format('Y-m-d');
     $sleep ??= static function (int $seconds): void {
@@ -4970,15 +4970,45 @@ function consus_each_item_rows_cached(string $company, string $companyKey, calla
     } finally {
         consus_item_cache_unlock($lock);
     }
+    // LVS_Vendor_Name is een FlowField: verandert zonder Last_Date_Modified.
+    // Naam daarom uit de leverancierslijst; alleen als die faalt de cachewaarde.
+    $names = ($vendorNames ?? 'consus_item_vendor_names')($company);
     $count = 0;
     foreach ($cache['items'] as $row) {
         if (is_array($row)) {
+            $vendorNo = consus_scalar_string($row['Vendor_No'] ?? '');
+            if ($names !== null && $vendorNo !== '' && isset($names[$vendorNo])) {
+                $row['LVS_Vendor_Name'] = $names[$vendorNo];
+            }
             $onRow($row);
             $count++;
         }
     }
 
     return ['count' => $count, 'mode' => $mode];
+}
+
+/**
+ * Leveranciersnamen per nummer: één workflowVendors-call per bedrijf per nacht.
+ *
+ * @return array<string, string>|null null als de lijst niet te halen is
+ */
+function consus_item_vendor_names(string $company): ?array
+{
+    try {
+        $names = [];
+        foreach (odata_mimir_query($company, 'workflowVendors', ['$select' => 'number,name'], 3600) as $row) {
+            $no = consus_scalar_string($row['number'] ?? '');
+            $name = consus_scalar_string($row['name'] ?? '');
+            if ($no !== '' && $name !== '') {
+                $names[$no] = $name;
+            }
+        }
+
+        return $names === [] ? null : $names;
+    } catch (Throwable $ignored) {
+        return null;
+    }
 }
 
 /** Weekendverversing: 48 uurstukken, za 00:00 = stuk 1, zo 23:00 = stuk 48. */
