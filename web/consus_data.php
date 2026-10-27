@@ -4676,6 +4676,228 @@ function consus_each_entity_rows(
     );
 }
 
+/**
+ * Lokale artikelcache per bedrijf (Asclepius #1032). Mímir krijgt de volle
+ * AppItems (76.000 tot 85.000 rijen) niet in één antwoord: HTTP 500,
+ * memory exhausted. De stap 'artikelen' faalde dan en elk nulartikel viel
+ * zonder leverancier weg. Daarom: een volledige lading in stukken op No,
+ * elke nacht alleen Last_Date_Modified ge <vorige geslaagde dag>, en elke
+ * CONSUS_ITEM_CACHE_FULL_DAYS dagen weer volledig zodat verwijderde
+ * artikelen verdwijnen. Bij twijfel volledig.
+ */
+const CONSUS_ITEM_CACHE_FULL_DAYS = 7;
+const CONSUS_ITEM_CACHE_CHUNK_CHARS = '-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const CONSUS_ITEM_CACHE_MAX_DEPTH = 6;
+
+function consus_item_cache_file(string $companyKey): string
+{
+    return dirname(consus_snapshot_file()) . '/consus_items_' . $companyKey . '.json';
+}
+
+/** @return array{full_on:string,synced_on:string,items:array<string, array<string, mixed>>}|null */
+function consus_item_cache_load(string $companyKey): ?array
+{
+    $path = consus_item_cache_file($companyKey);
+    if (!is_file($path)) {
+        return null;
+    }
+    $decoded = json_decode((string) @file_get_contents($path), true);
+    if (!is_array($decoded) || !is_array($decoded['items'] ?? null)
+        || !is_string($decoded['full_on'] ?? null) || !is_string($decoded['synced_on'] ?? null)) {
+        return null;
+    }
+
+    return $decoded;
+}
+
+function consus_item_cache_save(string $companyKey, array $cache): void
+{
+    $path = consus_item_cache_file($companyKey);
+    $directory = dirname($path);
+    if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
+        throw new RuntimeException('Map voor de artikelcache kon niet worden aangemaakt.');
+    }
+    $json = json_encode($cache, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $temporary = $path . '.tmp.' . getmypid();
+    if (!is_string($json) || @file_put_contents($temporary, $json, LOCK_EX) === false || !@rename($temporary, $path)) {
+        @unlink($temporary);
+        throw new RuntimeException('Artikelcache kon niet worden weggeschreven.');
+    }
+}
+
+function consus_odata_quote(string $value): string
+{
+    return "'" . str_replace("'", "''", $value) . "'";
+}
+
+/** Mímir/BC wacht op een vrij slot (max. 3 live verzoeken): later opnieuw, geen echte fout. */
+function consus_item_cache_error_is_busy(Throwable $error): bool
+{
+    $message = strtolower($error->getMessage());
+
+    return str_contains($message, 'slot') || str_contains($message, 'queue') || str_contains($message, 'wacht')
+        || str_contains($message, 'too many') || str_contains($message, 'http 429') || str_contains($message, 'http 503');
+}
+
+/** Antwoord te groot voor Mímir/BC: kleiner stuk proberen. */
+function consus_item_cache_error_is_too_big(Throwable $error): bool
+{
+    $message = strtolower($error->getMessage());
+
+    return str_contains($message, 'memory') || str_contains($message, 'http 500')
+        || str_contains($message, 'timed out') || str_contains($message, 'timeout');
+}
+
+/**
+ * Haalt AppItems in aaneengesloten No-reeksen: No lt b1, b1..b2, ..., No ge bn.
+ * Die vereniging dekt elk nummer, ook als BC anders sorteert dan ASCII;
+ * dubbele rijen vangt de cache op No af. Een reeks die faalt wordt fijner
+ * gesplitst. Strikt na elkaar, nooit parallel.
+ *
+ * @param callable(array<string, mixed>):void $onRow
+ */
+function consus_item_cache_fetch_range(string $company, string $filter, string $prefix, int $depth, callable $onRow, ?callable $fetchRows, callable $sleep): int
+{
+    $attempt = 0;
+    while (true) {
+        try {
+            $result = consus_each_entity_rows($company, CONSUS_ITEM_ENTITY, CONSUS_ITEM_FIELDS, CONSUS_ITEM_OPTIONAL_FIELDS, $filter, $onRow, $fetchRows);
+
+            return (int) ($result['count'] ?? 0);
+        } catch (Throwable $error) {
+            if (consus_item_cache_error_is_busy($error) && $attempt < 3) {
+                $attempt++;
+                $sleep(60 * $attempt);
+                continue;
+            }
+            if ($depth >= CONSUS_ITEM_CACHE_MAX_DEPTH || !consus_item_cache_error_is_too_big($error)) {
+                throw $error;
+            }
+
+            return consus_item_cache_fetch_chunks($company, $prefix, $depth + 1, $onRow, $fetchRows, $sleep, $filter);
+        }
+    }
+}
+
+function consus_item_cache_fetch_chunks(string $company, string $prefix, int $depth, callable $onRow, ?callable $fetchRows, callable $sleep, string $outer = ''): int
+{
+    $bounds = [];
+    foreach (str_split(CONSUS_ITEM_CACHE_CHUNK_CHARS) as $char) {
+        $bounds[] = $prefix . $char;
+    }
+    $count = 0;
+    $total = count($bounds);
+    for ($index = 0; $index <= $total; $index++) {
+        $parts = [];
+        if ($outer !== '') {
+            $parts[] = '(' . $outer . ')';
+        }
+        if ($index > 0) {
+            $parts[] = 'No ge ' . consus_odata_quote($bounds[$index - 1]);
+        }
+        if ($index < $total) {
+            $parts[] = 'No lt ' . consus_odata_quote($bounds[$index]);
+        }
+        $subPrefix = $index > 0 ? $bounds[$index - 1] : $prefix;
+        $count += consus_item_cache_fetch_range($company, implode(' and ', $parts), $subPrefix, $depth, $onRow, $fetchRows, $sleep);
+    }
+
+    return $count;
+}
+
+/** Alleen wat consus_apply_vendor_row en de idle-lijst lezen. */
+function consus_item_cache_compact(array $row): array
+{
+    $compact = [];
+    foreach (array_merge(CONSUS_ITEM_FIELDS, CONSUS_ITEM_OPTIONAL_FIELDS) as $field) {
+        if (array_key_exists($field, $row)) {
+            $compact[$field] = $row[$field];
+        }
+    }
+
+    return $compact;
+}
+
+/**
+ * Vervangt de ene grote AppItems-call van de stap 'artikelen'. Elke rij uit
+ * de (bijgewerkte) cache gaat naar $onRow, net als eerst elke BC-rij.
+ *
+ * @param callable(array<string, mixed>):void $onRow
+ * @return array{count:int,mode:string}
+ */
+function consus_each_item_rows_cached(string $company, string $companyKey, callable $onRow, ?callable $fetchRows = null, ?string $today = null, ?callable $sleep = null): array
+{
+    $today ??= (new DateTimeImmutable('now', new DateTimeZone('Europe/Amsterdam')))->format('Y-m-d');
+    $sleep ??= static function (int $seconds): void {
+        sleep($seconds);
+    };
+    $cache = consus_item_cache_load($companyKey);
+    $mode = 'full';
+    if ($cache !== null && $cache['items'] !== []) {
+        $fullAge = (strtotime($today) - (int) strtotime($cache['full_on'])) / 86400;
+        $syncAge = (strtotime($today) - (int) strtotime($cache['synced_on'])) / 86400;
+        if ($fullAge >= 0 && $fullAge < CONSUS_ITEM_CACHE_FULL_DAYS && $syncAge >= 0 && $syncAge < CONSUS_ITEM_CACHE_FULL_DAYS) {
+            $mode = 'delta';
+        }
+    }
+
+    if ($mode === 'delta') {
+        $items = $cache['items'];
+        $changed = [];
+        try {
+            consus_item_cache_fetch_range(
+                $company,
+                'Last_Date_Modified ge ' . $cache['synced_on'],
+                '',
+                CONSUS_ITEM_CACHE_MAX_DEPTH,
+                static function (array $row) use (&$changed): void {
+                    $changed[] = $row;
+                },
+                $fetchRows,
+                $sleep
+            );
+            foreach ($changed as $row) {
+                $no = consus_scalar_string($row['No'] ?? '');
+                if ($no !== '') {
+                    $items[$no] = consus_item_cache_compact($row);
+                }
+            }
+            $cache = ['full_on' => $cache['full_on'], 'synced_on' => $today, 'items' => $items];
+        } catch (Throwable $ignored) {
+            $mode = 'full';
+        }
+        unset($changed, $items);
+    }
+
+    if ($mode === 'full') {
+        $previous = $cache !== null ? count($cache['items']) : 0;
+        $cache = null;
+        $items = [];
+        consus_item_cache_fetch_chunks($company, '', 0, static function (array $row) use (&$items): void {
+            $no = consus_scalar_string($row['No'] ?? '');
+            if ($no !== '') {
+                $items[$no] = consus_item_cache_compact($row);
+            }
+        }, $fetchRows, $sleep);
+        if ($previous > 0 && count($items) < $previous * 0.9) {
+            throw new RuntimeException('AppItems gaf ' . count($items) . ' artikelen, eerder ' . $previous . '. Artikelcache niet vervangen.');
+        }
+        $cache = ['full_on' => $today, 'synced_on' => $today, 'items' => $items];
+        unset($items);
+    }
+
+    consus_item_cache_save($companyKey, $cache);
+    $count = 0;
+    foreach ($cache['items'] as $row) {
+        if (is_array($row)) {
+            $onRow($row);
+            $count++;
+        }
+    }
+
+    return ['count' => $count, 'mode' => $mode];
+}
+
 function consus_odata_error_allows_entry_type_fallback(Throwable $error): bool
 {
     $message = $error->getMessage();
@@ -6615,25 +6837,15 @@ function consus_collect_company(
                     consus_apply_vendor_row($items, $row, $companyKey, $descriptions, $vendors, $costCenters, $idleItems);
                 },
                 static function (?array &$writer) use (&$items, &$descriptions, &$vendors, &$costCenters, &$idleItems, $company, $companyKey, $onProgress): array {
-                    return consus_each_entity_rows(
+                    return consus_each_item_rows_cached(
                         $company,
-                        CONSUS_ITEM_ENTITY,
-                        CONSUS_ITEM_FIELDS,
-                        CONSUS_ITEM_OPTIONAL_FIELDS,
-                        '',
+                        $companyKey,
                         static function (array $row) use (&$items, &$descriptions, &$vendors, &$costCenters, &$idleItems, &$writer, $companyKey): void {
                             consus_apply_vendor_row($items, $row, $companyKey, $descriptions, $vendors, $costCenters, $idleItems);
                             if ($writer !== null) {
                                 consus_checkpoint_write_row($writer, $row);
                             }
-                        },
-                        null,
-                        consus_page_progress($onProgress, [
-                            'company' => $company,
-                            'company_key' => $companyKey,
-                            'step' => 'artikelen',
-                            'entry_type' => CONSUS_ITEM_ENTITY,
-                        ])
+                        }
                     );
                 },
                 $saveCheckpoint,
