@@ -4055,6 +4055,44 @@ function consus_idle_root(): string
     return dirname(consus_snapshot_file()) . '/idle';
 }
 
+/**
+ * Sinds de deploy (lftp mirror --delete) data/idle/ wist: platte bestanden
+ * data/consus_idle_*.json, die de exclude data/*.json al beschermt.
+ * consus_idle_root() blijft alleen als leesterugval voor één overgang.
+ */
+function consus_idle_file(string $name): string
+{
+    return dirname(consus_snapshot_file()) . '/consus_idle_' . $name . '.json';
+}
+
+function consus_idle_write(string $path, array $data): void
+{
+    $directory = dirname($path);
+    if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
+        throw new RuntimeException('Map voor artikelen zonder voorraad kon niet worden aangemaakt.');
+    }
+    $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $temporary = $path . '.tmp.' . getmypid();
+    if (!is_string($json) || @file_put_contents($temporary, $json, LOCK_EX) === false || !@rename($temporary, $path)) {
+        @unlink($temporary);
+        throw new RuntimeException('Artikelen zonder voorraad konden niet worden weggeschreven.');
+    }
+}
+
+/** Nieuw bestand, anders het oude pad onder data/idle/. */
+function consus_idle_read(string $name, string $legacy): ?array
+{
+    foreach ([consus_idle_file($name), consus_idle_root() . '/' . $legacy] as $path) {
+        if (is_file($path)) {
+            $decoded = json_decode((string) @file_get_contents($path), true);
+
+            return is_array($decoded) ? $decoded : null;
+        }
+    }
+
+    return null;
+}
+
 function consus_idle_vendor_hash(string $vendorNo): string
 {
     return sha1($vendorNo);
@@ -4116,23 +4154,12 @@ function consus_store_company_idle(string $companyKey, array $rows): void
         }
     }
 
-    $root = consus_idle_root();
-    if (!is_dir($root) && !@mkdir($root, 0775, true) && !is_dir($root)) {
-        throw new RuntimeException('Map voor artikelen zonder voorraad kon niet worden aangemaakt.');
-    }
-    $staging = $root . '/' . $companyKey . '.tmp.' . getmypid();
-    consus_remove_tree($staging);
-    if (!@mkdir($staging, 0775, true) && !is_dir($staging)) {
-        throw new RuntimeException('Map voor artikelen zonder voorraad kon niet worden aangemaakt.');
-    }
-
+    $written = [];
     $vendors = [];
     foreach ($grouped as $vendorNo => $items) {
-        $json = json_encode(array_values($items), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        if (!is_string($json) || @file_put_contents($staging . '/' . consus_idle_vendor_hash((string) $vendorNo) . '.json', $json, LOCK_EX) === false) {
-            consus_remove_tree($staging);
-            throw new RuntimeException('Artikelen zonder voorraad konden niet worden weggeschreven.');
-        }
+        $file = consus_idle_file($companyKey . '_' . consus_idle_vendor_hash((string) $vendorNo));
+        consus_idle_write($file, array_values($items));
+        $written[$file] = true;
         $label = $names[$vendorNo] ?? '';
         $vendors[] = [
             'vendor_no' => (string) $vendorNo,
@@ -4143,59 +4170,25 @@ function consus_store_company_idle(string $companyKey, array $rows): void
     usort($vendors, static function (array $left, array $right): int {
         return strnatcasecmp((string) $left['vendor_name'], (string) $right['vendor_name']);
     });
-    $indexJson = json_encode($vendors, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if (!is_string($indexJson) || @file_put_contents($staging . '/vendors.json', $indexJson, LOCK_EX) === false) {
-        consus_remove_tree($staging);
-        throw new RuntimeException('Leveranciers zonder voorraad konden niet worden weggeschreven.');
-    }
-
-    $final = $root . '/' . $companyKey;
-    $backup = $root . '/' . $companyKey . '.old.' . getmypid();
-    consus_remove_tree($backup);
-    if (is_dir($final) && !@rename($final, $backup)) {
-        consus_remove_tree($staging);
-        throw new RuntimeException('Vorige lijst zonder voorraad kon niet worden vervangen.');
-    }
-    if (!@rename($staging, $final)) {
-        if (is_dir($backup)) {
-            @rename($backup, $final);
+    consus_idle_write(consus_idle_file($companyKey . '_vendors'), $vendors);
+    // Leveranciers die niet meer voorkomen: oude bestanden weg.
+    foreach (glob(consus_idle_file($companyKey . '_' . str_repeat('?', 40))) ?: [] as $old) {
+        if (!isset($written[$old])) {
+            @unlink($old);
         }
-        consus_remove_tree($staging);
-        throw new RuntimeException('Lijst zonder voorraad kon niet atomair worden vervangen.');
     }
-    consus_remove_tree($backup);
 }
 
 function consus_rebuild_idle_index(): void
 {
-    $root = consus_idle_root();
     $index = [];
     foreach (array_keys(CONSUS_COMPANIES) as $key) {
-        $path = $root . '/' . $key . '/vendors.json';
-        if (!is_file($path)) {
-            continue;
-        }
-        $decoded = json_decode((string) @file_get_contents($path), true);
-        if (is_array($decoded)) {
+        $decoded = consus_idle_read($key . '_vendors', $key . '/vendors.json');
+        if ($decoded !== null) {
             $index[$key] = $decoded;
         }
     }
-    if (!is_dir($root) && !@mkdir($root, 0775, true) && !is_dir($root)) {
-        throw new RuntimeException('Map voor artikelen zonder voorraad kon niet worden aangemaakt.');
-    }
-    $json = json_encode($index, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if (!is_string($json)) {
-        throw new RuntimeException('Index zonder voorraad kon niet als JSON worden gecodeerd.');
-    }
-    $path = $root . '/index.json';
-    $temporary = $path . '.tmp.' . getmypid();
-    if (@file_put_contents($temporary, $json, LOCK_EX) === false) {
-        throw new RuntimeException('Index zonder voorraad kon niet worden weggeschreven.');
-    }
-    if (!@rename($temporary, $path)) {
-        @unlink($temporary);
-        throw new RuntimeException('Index zonder voorraad kon niet atomair worden vervangen.');
-    }
+    consus_idle_write(consus_idle_file('index'), $index);
 }
 
 /**
@@ -4203,13 +4196,7 @@ function consus_rebuild_idle_index(): void
  */
 function consus_read_idle_vendor_index(): array
 {
-    $path = consus_idle_root() . '/index.json';
-    if (!is_file($path)) {
-        return [];
-    }
-    $decoded = json_decode((string) @file_get_contents($path), true);
-
-    return is_array($decoded) ? $decoded : [];
+    return consus_idle_read('index', 'index.json') ?? [];
 }
 
 /**
@@ -4220,14 +4207,8 @@ function consus_read_idle_vendor_items(string $companyKey, string $vendorNo): ar
     if (!isset(CONSUS_COMPANIES[$companyKey])) {
         return [];
     }
-    $path = consus_idle_root() . '/' . $companyKey . '/' . consus_idle_vendor_hash($vendorNo) . '.json';
-    if (!is_file($path)) {
-        return [];
-    }
-    $decoded = json_decode((string) @file_get_contents($path), true);
-    if (!is_array($decoded)) {
-        return [];
-    }
+    $hash = consus_idle_vendor_hash($vendorNo);
+    $decoded = consus_idle_read($companyKey . '_' . $hash, $companyKey . '/' . $hash . '.json') ?? [];
     $rows = [];
     foreach ($decoded as $row) {
         if (is_array($row)) {
