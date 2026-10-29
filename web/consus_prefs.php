@@ -345,15 +345,23 @@ function consus_write_json_locked(string $path, array $payload): void
     });
 }
 
+/**
+ * Opent de sessie alleen kort: lezen, zo nodig een token schrijven en weer
+ * sluiten, zodat de lock niet tijdens het renderen vast blijft staan.
+ */
 function consus_csrf_token(): string
 {
+    $opened = false;
     if (session_status() !== PHP_SESSION_ACTIVE) {
-        @session_start();
+        $opened = @session_start();
     }
     $token = (string) ($_SESSION['consus_csrf'] ?? '');
     if ($token === '') {
         $token = bin2hex(random_bytes(16));
         $_SESSION['consus_csrf'] = $token;
+    }
+    if ($opened) {
+        session_write_close();
     }
 
     return $token;
@@ -362,7 +370,7 @@ function consus_csrf_token(): string
 function consus_csrf_matches(string $provided): bool
 {
     if (session_status() !== PHP_SESSION_ACTIVE) {
-        @session_start();
+        @session_start(['read_and_close' => true]);
     }
     $token = (string) ($_SESSION['consus_csrf'] ?? '');
     if ($token === '' || $provided === '') {
